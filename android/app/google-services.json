@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "1014476645992",
+    "project_id": "med-history-299a1",
+    "storage_bucket": "med-history-299a1.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1014476645992:android:1f838aa6e22652199c3ddd",
+        "android_client_info": {
+          "package_name": "com.medhistory.app.medhistory"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "1014476645992-04muavjpi8tae47lregvdv97u3jvmaic.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.medhistory.app.medhistory",
+            "certificate_hash": "af60a4fe3f4e26fc56187d33a90b7e844289be65"
+          }
+        },
+        {
+          "client_id": "1014476645992-6s886d3l0h84lb277ghfq571gkg6bfi9.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBCxOub0nZWicXP6JCoiH5SO6T6YIrCrYY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "1014476645992-6s886d3l0h84lb277ghfq571gkg6bfi9.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
