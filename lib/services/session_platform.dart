@@ -6,6 +6,7 @@ import 'package:flutter/painting.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
+import '../config/dev_mode.dart';
 import '../providers/firestore_settings.dart';
 
 /// Whether the signed-in user may use the app's cloud data. Mirrors the
@@ -75,6 +76,8 @@ class FirebaseSessionPlatform implements SessionPlatform {
 
   @override
   Future<ApprovalStatus> checkApproval(User user) async {
+    // The dev owner id is never a real account: refused before any network.
+    if (isLocalOwner(user.uid)) return ApprovalStatus.notApproved;
     var current = user;
     try {
       await user.reload();
@@ -108,6 +111,7 @@ class FirebaseSessionPlatform implements SessionPlatform {
 
   @override
   Future<Set<String>?> cloudPatientIds(String uid) async {
+    if (isLocalOwner(uid)) return null; // never query the cloud for dev data
     try {
       final snap = await _db
           .collection('doctors')

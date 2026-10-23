@@ -1,0 +1,13 @@
+<!-- Dev flavor only (merged over src/main): distinct launcher label, and no
+     native Firebase auto-init. Dev mode never uses Firebase. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application
+        android:label="DOCEase DEV"
+        tools:replace="android:label">
+        <provider
+            android:name="com.google.firebase.provider.FirebaseInitProvider"
+            android:authorities="${applicationId}.firebaseinitprovider"
+            tools:node="remove" />
+    </application>
+</manifest>

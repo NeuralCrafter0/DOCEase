@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
+import '../config/dev_mode.dart';
 import '../models/patient.dart';
 
 /// Patient documents at `doctors/{uid}/patients/{patientId}`.
@@ -33,10 +34,13 @@ class FirestoreHelper {
 
   /// The uid to act for, or null if nobody is signed in or the session this
   /// helper belongs to is no longer the signed-in user.
+  /// Never the dev owner [kLocalOwnerId]: checked before Auth is touched,
+  /// and again for the signed-in uid (an account named `local` is refused).
   String? _owner() {
-    final current = _auth.currentUser?.uid;
-    if (current == null) return null;
     final expected = _expectedUid?.call();
+    if (isLocalOwner(expected)) return null;
+    final current = _auth.currentUser?.uid;
+    if (current == null || isLocalOwner(current)) return null;
     if (expected != null && expected != current) return null;
     return current;
   }

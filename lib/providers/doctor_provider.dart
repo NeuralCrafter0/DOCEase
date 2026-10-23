@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import '../config/dev_mode.dart';
 import '../models/doctor.dart';
 import '../services/attachments.dart';
 import '../services/local_photo_store.dart';
@@ -25,14 +26,17 @@ class DoctorProvider with ChangeNotifier {
   })  : _authOverride = auth,
         _firestoreOverride = firestore,
         _storageOverride = storage,
-        _cloud = cloudSync,
+        _cloudSync = cloudSync,
         _localDbOverride = localDb,
         _photosOverride = photos;
 
   /// Settings key of the on-phone profile (dev mode).
   static const profileSettingKey = 'doctor_profile';
 
-  final bool _cloud;
+  final bool _cloudSync;
+
+  /// Cloud work only with cloudSync on and never for the dev owner.
+  bool get _cloud => _cloudSync && !isLocalOwner(_uid);
   final LocalDatabase? _localDbOverride;
   final LocalPhotoStore? _photosOverride;
   LocalDatabase get _local => _localDbOverride ?? DatabaseHelper.instance;
@@ -57,7 +61,11 @@ class DoctorProvider with ChangeNotifier {
 
   /// The id a saved profile gets: the signed-in uid, or in dev mode the
   /// on-phone owner. Null when nobody is signed in.
-  String? get ownerUid => _cloud ? _auth.currentUser?.uid : _uid;
+  String? get ownerUid {
+    if (!_cloud) return _uid;
+    final uid = _auth.currentUser?.uid;
+    return isLocalOwner(uid) ? null : uid; // an account named `local` is refused
+  }
 
   /// The account's email to prefill the form (null in dev mode).
   String? get accountEmail => _cloud ? _auth.currentUser?.email : null;
@@ -89,6 +97,7 @@ class DoctorProvider with ChangeNotifier {
         if (gen != _generation) return;
         if (data != null) _currentDoctor = Doctor.fromJson(data);
       } else {
+        if (isLocalOwner(uid)) throw StateError('dev owner: no cloud fetch');
         final doc = await _db.collection('doctors').doc(uid).get();
         if (gen != _generation) return;
         final data = doc.data();
@@ -120,12 +129,13 @@ class DoctorProvider with ChangeNotifier {
         maxBytes: AttachmentPolicy.maxAvatarBytes);
     if (!_cloud) {
       try {
-        return await _photos.keepAvatar(file.path, type);
+        return await _photos.keepAvatar(uid, file.path, type);
       } catch (e) {
         debugPrint('Profile photo copy failed: ${_code(e)}');
         return null;
       }
     }
+    if (isLocalOwner(uid)) return null; // hard guard: no upload for the dev owner
     try {
       // A new timestamped name per upload forces a fresh URL (no caching).
       final name = '${DateTime.now().millisecondsSinceEpoch}.${type.fileExtension}';
@@ -161,10 +171,12 @@ class DoctorProvider with ChangeNotifier {
       if (!_cloud) {
         final stored = _decode(await _local.getSetting(profileSettingKey)) ?? {};
         await _local.putSetting(profileSettingKey, jsonEncode({...stored, ...payload}));
-        if (oldPhoto != null && newPhoto != null && oldPhoto != newPhoto && _photos.isAppPhoto(oldPhoto)) {
-          await _photos.deleteAppPhoto(oldPhoto);
+        if (oldPhoto != null && newPhoto != null && oldPhoto != newPhoto &&
+            _photos.isAppPhoto(oldPhoto, owner: uid)) {
+          await _photos.deleteAppPhoto(oldPhoto, owner: uid);
         }
       } else {
+        if (isLocalOwner(uid)) throw StateError('dev owner: no cloud save');
         await _db.collection('doctors').doc(uid).set(payload, SetOptions(merge: true));
       }
       if (gen != _generation) return true;
@@ -184,8 +196,9 @@ class DoctorProvider with ChangeNotifier {
       return true;
     } catch (e) {
       debugPrint('Profile save failed: ${_code(e)}');
-      if (!_cloud && newPhoto != null && newPhoto != oldPhoto && _photos.isAppPhoto(newPhoto)) {
-        await _photos.deleteAppPhoto(newPhoto); // never referenced by a saved profile
+      if (!_cloud && newPhoto != null && newPhoto != oldPhoto &&
+          _photos.isAppPhoto(newPhoto, owner: uid)) {
+        await _photos.deleteAppPhoto(newPhoto, owner: uid); // never referenced by a saved profile
       }
       return false;
     }

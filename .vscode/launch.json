@@ -1,30 +1,32 @@
 {
   // DOCEase run configurations. Dev mode (no Firebase, login or lock, on-phone
-  // data only) needs the define; the "release-like" entry is what a real
-  // build does (login, biometric lock and Firebase sync on).
+  // data only) is the `dev` flavor plus the define, debug or profile only; a
+  // release build refuses it. The prod entry is the real app.
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "DOCEase (dev mode)",
+      "name": "DOCEase DEV (dev mode)",
       "request": "launch",
       "type": "dart",
       "program": "lib/main.dart",
-      "args": ["--dart-define=DOCEASE_DEV_MODE=true"]
+      "flutterMode": "debug",
+      "args": ["--flavor", "dev", "--dart-define=DOCEASE_DEV_MODE=true"]
     },
     {
-      "name": "DOCEase (dev mode, profile)",
+      "name": "DOCEase DEV (dev mode, profile)",
       "request": "launch",
       "type": "dart",
       "program": "lib/main.dart",
       "flutterMode": "profile",
-      "args": ["--dart-define=DOCEASE_DEV_MODE=true"]
+      "args": ["--flavor", "dev", "--dart-define=DOCEASE_DEV_MODE=true"]
     },
     {
-      "name": "DOCEase (Firebase, login + lock)",
+      "name": "DOCEase (prod: Firebase, login + lock)",
       "request": "launch",
       "type": "dart",
       "program": "lib/main.dart",
-      "args": ["--dart-define=DOCEASE_DEV_MODE=false"]
+      "flutterMode": "debug",
+      "args": ["--flavor", "prod", "--dart-define=DOCEASE_DEV_MODE=false"]
     }
   ]
 }

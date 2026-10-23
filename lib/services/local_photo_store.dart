@@ -1,5 +1,7 @@
+import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
@@ -8,21 +10,31 @@ import 'attachments.dart';
 
 /// Photos kept on the phone (dev mode: no Storage upload).
 ///
-/// Layout, inside the app support directory (app-private; the same folder
-/// PR #8 moves picked visit photos to):
-///   `<support>/attachments/<uuid>.<ext>`  visit photos
-///   `<support>/profile/avatar_<uuid>.<ext>`  the doctor's photo
+/// Layout, inside the app support directory (app-private), one folder per
+/// DB owner so dev (`local`) and real-account photos never share a folder:
+///   `<support>/attachments/<ownerHash>/<uuid>.<ext>`        visit photos
+///   `<support>/profile/<ownerHash>/avatar_<uuid>.<ext>`     the doctor's photo
 ///
-/// Only files inside those two folders are ever shown from disk or deleted.
+/// `<ownerHash>` is the same `sha256(owner)[:32]` as the owner's encrypted DB
+/// file name (`DatabaseHelper.dbFileNameFor`), so the uid itself is not on disk.
+///
+/// Files are only kept, shown or deleted inside those folders; deleting is
+/// further limited to the given owner's own folders.
 class LocalPhotoStore {
   LocalPhotoStore({Future<Directory> Function()? supportDir})
       : _supportDir = supportDir ?? getApplicationSupportDirectory;
 
-  /// The app-wide store (main.dart calls [init] before runApp in dev mode).
+  /// The app-wide store (dev mode calls [init] before runApp).
   static LocalPhotoStore instance = LocalPhotoStore();
 
   static const attachmentsFolder = 'attachments';
   static const profileFolder = 'profile';
+
+  /// Folder name for [owner]: `sha256(owner)` hex, first 32 characters.
+  static String ownerFolderName(String owner) =>
+      sha256.convert(utf8.encode(owner)).toString().substring(0, 32);
+
+  static final _ownerHash = RegExp(r'^[0-9a-f]{32}$');
 
   final Future<Directory> Function() _supportDir;
   String? _support;
@@ -37,32 +49,51 @@ class LocalPhotoStore {
 
   String? get supportPath => _support;
 
-  String? _folder(String name) => _support == null ? null : p.join(_support!, name);
+  /// `<support>/attachments/<ownerHash>`; null before [init].
+  String? visitFolderFor(String owner) => _ownerDir(attachmentsFolder, owner);
 
-  /// Whether [path] is a file inside one of the photo folders (lexical
-  /// check after normalising, so `..` cannot escape). False before [init].
-  bool isAppPhoto(String path) {
-    if (!p.isAbsolute(path)) return false;
+  /// `<support>/profile/<ownerHash>`; null before [init].
+  String? profileFolderFor(String owner) => _ownerDir(profileFolder, owner);
+
+  String? _ownerDir(String root, String owner) {
+    if (_support == null || owner.isEmpty) return null;
+    return p.join(_support!, root, ownerFolderName(owner));
+  }
+
+  List<String> _ownerDirs(String owner) =>
+      [visitFolderFor(owner), profileFolderFor(owner)].whereType<String>().toList();
+
+  /// Whether [path] is a file inside a photo folder: [owner]'s folders when
+  /// given, otherwise any owner's (`<root>/<ownerHash>/…`). Lexical check
+  /// after normalising, so `..` cannot escape. False before [init].
+  bool isAppPhoto(String path, {String? owner}) {
+    if (!p.isAbsolute(path) || _support == null) return false;
     final n = p.normalize(path);
-    for (final f in [_folder(attachmentsFolder), _folder(profileFolder)]) {
-      if (f != null && p.isWithin(f, n)) return true;
+    if (owner != null) return _ownerDirs(owner).any((d) => p.isWithin(d, n));
+    for (final root in [attachmentsFolder, profileFolder]) {
+      final r = p.join(_support!, root);
+      if (!p.isWithin(r, n)) continue;
+      // Must sit in an owner sub-folder, not directly in the root.
+      final rel = p.split(p.relative(n, from: r));
+      if (rel.length >= 2 && _ownerHash.hasMatch(rel.first)) return true;
     }
     return false;
   }
 
-  /// Keeps a picked visit photo: returns [source] if it already is in the
-  /// attachments folder, otherwise copies it there under a new name and
-  /// returns the copy's path.
-  Future<String> keepVisitPhoto(String source, UploadImageType type) =>
-      _keep(source, attachmentsFolder, '${const Uuid().v4()}.${type.fileExtension}');
+  /// Keeps a picked visit photo for [owner]: returns [source] if it already
+  /// is in the owner's visit folder, otherwise copies it there under a new
+  /// name and returns the copy's path.
+  Future<String> keepVisitPhoto(String owner, String source, UploadImageType type) =>
+      _keep(owner, source, attachmentsFolder, '${const Uuid().v4()}.${type.fileExtension}');
 
-  /// Copies a picked profile photo into the profile folder.
-  Future<String> keepAvatar(String source, UploadImageType type) =>
-      _keep(source, profileFolder, 'avatar_${const Uuid().v4()}.${type.fileExtension}');
+  /// Copies a picked profile photo into [owner]'s profile folder.
+  Future<String> keepAvatar(String owner, String source, UploadImageType type) =>
+      _keep(owner, source, profileFolder, 'avatar_${const Uuid().v4()}.${type.fileExtension}');
 
-  Future<String> _keep(String source, String folder, String name) async {
+  Future<String> _keep(String owner, String source, String root, String name) async {
     await init();
-    final dir = _folder(folder)!;
+    final dir = _ownerDir(root, owner);
+    if (dir == null) throw ArgumentError('owner must not be empty');
     if (p.isWithin(dir, p.normalize(source)) && await _realPathWithin(source, dir)) return source;
     await Directory(dir).create(recursive: true);
     final target = p.join(dir, name);
@@ -70,16 +101,17 @@ class LocalPhotoStore {
     return target;
   }
 
-  /// Deletes [path] only if it is a file inside a photo folder (also after
-  /// resolving symlinks). Returns whether a file was deleted. Never throws.
-  Future<bool> deleteAppPhoto(String path) async {
+  /// Deletes [path] only if it is a file inside [owner]'s photo folders
+  /// (also after resolving symlinks). Returns whether a file was deleted.
+  /// Never throws.
+  Future<bool> deleteAppPhoto(String path, {required String owner}) async {
     try {
       await init();
-      if (!isAppPhoto(path)) return false;
+      if (!isAppPhoto(path, owner: owner)) return false;
       final f = File(path);
       if (!await f.exists()) return false;
       final real = p.normalize(await f.resolveSymbolicLinks());
-      if (!isAppPhoto(real)) return false;
+      if (!isAppPhoto(real, owner: owner)) return false;
       await File(real).delete();
       return true;
     } catch (_) {
