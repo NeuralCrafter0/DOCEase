@@ -31,12 +31,25 @@ class VisitShareText {
     b.write('\n*Date:* ${DateFormat('dd MMM yyyy').format(record.date)}');
     b.write('\n*Type:* ${record.visitType}');
     final details = <String>[
-      if (fields.contains(ShareField.vitals)) '*Vitals:* BP: ${record.bp ?? 'N/A'}, Temp: ${record.temp ?? 'N/A'}',
+      if (fields.contains(ShareField.vitals)) '*Vitals:* ${_vitals(record)}',
       if (fields.contains(ShareField.diagnosis)) '*Diagnosis:* ${record.diagnosis}',
       if (fields.contains(ShareField.prescription)) '*Prescription:* ${record.prescription}',
     ];
     if (details.isNotEmpty) b.write('\n\n${details.join('\n')}');
     if (signOff != null && signOff.trim().isNotEmpty) b.write('\n\n*$signOff*');
     return b.toString();
+  }
+
+  /// BP and Temp as before ('N/A' when missing), then pulse, weight and
+  /// blood sugar when they were recorded, labelled like the visit card.
+  static String _vitals(VisitRecord r) {
+    String? recorded(String? v) => (v == null || v.trim().isEmpty) ? null : v.trim();
+    return [
+      'BP: ${r.bp ?? 'N/A'}',
+      'Temp: ${r.temp ?? 'N/A'}',
+      if (recorded(r.pulse) case final v?) 'Pulse: $v',
+      if (recorded(r.weight) case final v?) 'Weight: $v',
+      if (recorded(r.sugar) case final v?) 'Sugar: $v',
+    ].join(', ');
   }
 }
