@@ -1,9 +1,12 @@
-// Regression tests for the fail-closed app lock (SecurityWrapper in
-// lib/main.dart). Cases follow QA's BIO-01..BIO-10 drafts.
+// Regression tests for the fail-closed app lock (AppLockHost in
+// lib/security/app_lock.dart, engaged by SecurityWrapper in lib/main.dart).
+// Cases follow QA's BIO-01..BIO-10 drafts; POC-1..3 are the security
+// review's proofs of concept with the expectations reversed.
 // ignore_for_file: depend_on_referenced_packages
 import 'dart:async';
 
 import 'package:docease/main.dart';
+import 'package:docease/security/app_lock.dart';
 import 'package:docease/screens/login_screen.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -63,7 +66,8 @@ Future<void> settle(WidgetTester t) async {
 }
 
 Future<void> pumpWrapper(WidgetTester t) async {
-  await t.pumpWidget(const MaterialApp(home: SecurityWrapper()));
+  // Same layering as DOCEaseApp: the lock host above the MaterialApp.
+  await t.pumpWidget(const AppLockHost(child: MaterialApp(home: SecurityWrapper())));
   await settle(t);
 }
 
@@ -233,7 +237,7 @@ void main() {
       expect(find.text('PATIENT DATA'), findsOneWidget);
     });
 
-    testWidgets('the lock route cannot be dismissed with back', (t) async {
+    testWidgets('the lock cannot be dismissed with back', (t) async {
       await unlockAndOpenPatientScreen(t);
       fake.result = false;
       background(t);
@@ -243,6 +247,13 @@ void main() {
       await settle(t);
       expect(find.text(lockTitle), findsOneWidget);
       expect(find.text('PATIENT DATA'), findsNothing);
+      // Back was consumed by the lock: it did not pop the screen behind it.
+      fake.result = true;
+      await t.tap(find.text(unlockButton));
+      await settle(t);
+      await t.pump(const Duration(seconds: 1)); // any pop transition would finish here
+      await settle(t);
+      expect(find.text('PATIENT DATA'), findsOneWidget);
     });
 
     testWidgets('BIO-09 inactive -> resumed only (notification shade) does not re-lock', (t) async {
@@ -293,4 +304,166 @@ void main() {
       expect(protectedSubtreeBuilt(), isTrue);
     });
   });
+
+  group('lock is drawn above the navigator (security review F4-1)', () {
+    Future<NavigatorState> unlockAndOpen(WidgetTester t, Widget screen) async {
+      await pumpWrapper(t);
+      expect(find.text(lockTitle), findsNothing);
+      final nav = t.state<NavigatorState>(find.byType(Navigator));
+      nav.push(MaterialPageRoute<void>(builder: (_) => const Scaffold(body: Center(child: Text('PATIENT DATA')))));
+      await settle(t);
+      nav.push(MaterialPageRoute<void>(builder: (_) => screen));
+      await settle(t);
+      return nav;
+    }
+
+    void relockWithFailedAuth(WidgetTester t) {
+      fake.result = false;
+      background(t);
+      foreground(t);
+    }
+
+    testWidgets('POC-1 a save that pops after an await while locked leaves the lock up', (t) async {
+      final save = Completer<void>();
+      await unlockAndOpen(t, _SlowSaveScreen(save));
+      await t.tap(find.text('Save'));
+      fake.result = false;
+      background(t);
+      await settle(t);
+      expectLocked();
+      foreground(t);
+      await settle(t);
+      expectLocked();
+      save.complete(); // AddRecordScreen: await addRecord(); Navigator.pop(context)
+      await settle(t);
+      expect(find.text(lockTitle), findsOneWidget);
+      expect(find.text('CLINICAL NOTE'), findsNothing);
+      expect(find.text('PATIENT DATA'), findsNothing);
+    });
+
+    testWidgets('POC-2 after such a pop, every later re-lock still shows the lock', (t) async {
+      final save = Completer<void>();
+      await unlockAndOpen(t, _SlowSaveScreen(save));
+      await t.tap(find.text('Save'));
+      relockWithFailedAuth(t);
+      await settle(t);
+      save.complete();
+      await settle(t);
+      fake.result = true;
+      background(t);
+      foreground(t);
+      await settle(t);
+      expect(find.text(lockTitle), findsNothing, reason: 'unlocks normally');
+      expect(find.text('PATIENT DATA'), findsOneWidget, reason: 'the save popped only the note');
+      relockWithFailedAuth(t);
+      await settle(t);
+      expect(fake.authCalls, 4, reason: 'initial, failed, successful and failed re-lock prompts');
+      expect(find.text(lockTitle), findsOneWidget);
+      expect(find.text('PATIENT DATA'), findsNothing);
+    });
+
+    testWidgets('POC-3 a dialog opened by an async callback while locked stays hidden', (t) async {
+      await unlockAndOpen(t, const Scaffold(body: Text('CLINICAL NOTE')));
+      relockWithFailedAuth(t);
+      await settle(t);
+      final ctx = t.element(find.text('PATIENT DATA', skipOffstage: false));
+      showDialog<void>(context: ctx, builder: (_) => const AlertDialog(content: Text('Delete Rahul Sharma?')));
+      await settle(t);
+      expect(find.text('Delete Rahul Sharma?'), findsNothing);
+      expectLocked();
+      fake.result = true;
+      await t.tap(find.text(unlockButton));
+      await settle(t);
+      expect(find.text('Delete Rahul Sharma?'), findsOneWidget, reason: 'shown only after unlocking');
+    });
+
+    testWidgets('while locked the app is offstage, excluded from semantics, focus and tickers', (t) async {
+      await unlockAndOpen(t, const Scaffold(body: TextField(key: Key('note'))));
+      await t.showKeyboard(find.byKey(const Key('note')));
+      await settle(t);
+      bool textFieldFocused() =>
+          FocusManager.instance.primaryFocus?.context?.findAncestorWidgetOfExactType<EditableText>() != null;
+      expect(textFieldFocused(), isTrue);
+      expect(t.testTextInput.isVisible, isTrue);
+      relockWithFailedAuth(t);
+      await settle(t);
+      final navFinder = find.byType(Navigator, skipOffstage: false);
+      T above<T extends Widget>() =>
+          t.widget<T>(find.ancestor(of: navFinder, matching: find.byType(T, skipOffstage: false)).first);
+      expect(above<Offstage>().offstage, isTrue);
+      expect(above<ExcludeSemantics>().excluding, isTrue);
+      expect(above<ExcludeFocus>().excluding, isTrue);
+      expect(above<TickerMode>().enabled, isFalse);
+      expect(textFieldFocused(), isFalse,
+          reason: 'the note field lost focus, so the keyboard cannot type into it');
+      expect(t.testTextInput.isVisible, isFalse);
+      fake.result = true;
+      await t.tap(find.text(unlockButton));
+      await settle(t);
+      expect(above<Offstage>().offstage, isFalse);
+      expect(above<ExcludeSemantics>().excluding, isFalse);
+      expect(above<TickerMode>().enabled, isTrue);
+    });
+
+    testWidgets('the screen under the lock keeps its state (half-written note)', (t) async {
+      await unlockAndOpen(t, const Scaffold(body: TextField(key: Key('note'))));
+      await t.enterText(find.byKey(const Key('note')), 'half-written note');
+      relockWithFailedAuth(t);
+      await settle(t);
+      fake.result = true;
+      await t.tap(find.text(unlockButton));
+      await settle(t);
+      expect(find.text('half-written note'), findsOneWidget);
+    });
+
+    testWidgets('DOCEaseApp puts the lock host above its MaterialApp', (t) async {
+      fake.result = false;
+      await t.pumpWidget(const DOCEaseApp(ready: true));
+      await settle(t);
+      expectLocked();
+      expect(find.ancestor(of: find.byType(MaterialApp, skipOffstage: false), matching: find.byType(AppLockHost)),
+          findsOneWidget);
+      expect(protectedSubtreeBuilt(), isFalse);
+    });
+
+    testWidgets('a home that never builds SecurityWrapper is not locked', (t) async {
+      await t.pumpWidget(const DOCEaseApp(ready: false));
+      await settle(t);
+      expect(find.text('Clinical Cloud Connection Error'), findsOneWidget);
+      expect(find.text(lockTitle), findsNothing);
+      expect(fake.authCalls, 0);
+    });
+
+    testWidgets('SecurityWrapper without a lock host builds nothing behind it', (t) async {
+      await t.pumpWidget(const MaterialApp(home: SecurityWrapper()));
+      expect(t.takeException(), isA<AssertionError>());
+      await settle(t);
+      expect(protectedSubtreeBuilt(), isFalse);
+      expect(fake.authCalls, 0);
+    });
+  });
+}
+
+/// Stand-in for AddRecordScreen._saveRecord:
+/// `await provider.addRecord(...); if (mounted) Navigator.pop(context);`
+class _SlowSaveScreen extends StatefulWidget {
+  final Completer<void> save;
+  const _SlowSaveScreen(this.save);
+  @override
+  State<_SlowSaveScreen> createState() => _SlowSaveScreenState();
+}
+
+class _SlowSaveScreenState extends State<_SlowSaveScreen> {
+  Future<void> _saveRecord() async {
+    await widget.save.future;
+    if (mounted) Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        body: Column(children: [
+          const Text('CLINICAL NOTE'),
+          ElevatedButton(onPressed: _saveRecord, child: const Text('Save')),
+        ]),
+      );
 }
