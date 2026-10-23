@@ -2,11 +2,13 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'package:intl/intl.dart';
+import 'pdf_fonts.dart';
 import '../models/patient.dart';
 import '../models/doctor.dart';
 
 class PdfExport {
   static Future<void> generateAndPrintPatientReport(Patient patient, {Doctor? doctor}) async {
+    await PdfFonts.ensureLoaded();
     final pdf = pw.Document();
 
     final String docName = doctor != null ? "${doctor.title} ${doctor.name}" : "Clinical Practitioner";
@@ -17,6 +19,7 @@ class PdfExport {
 
     pdf.addPage(
       pw.MultiPage(
+        theme: PdfFonts.theme,
         pageFormat: PdfPageFormat.a4,
         margin: const pw.EdgeInsets.all(32),
         build: (pw.Context context) {
