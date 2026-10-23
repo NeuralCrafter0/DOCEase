@@ -3,6 +3,8 @@ import '../widgets/attachment_image.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
+import '../utils/vitals_display.dart';
+import 'vitals_trends_screen.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:share_plus/share_plus.dart';
 import '../providers/patient_provider.dart';
@@ -117,7 +119,7 @@ class PatientDetailScreen extends StatelessWidget {
         // The patient was just deleted: this route is on its way out, so
         // render nothing instead of throwing from findById.
         if (patient == null) return const Scaffold(backgroundColor: Color(0xFFF8FAFC));
-        final family = provider.patients.where((p) => p.phone == patient.phone && p.id != patient.id).toList();
+        final family = provider.allPatients.where((p) => p.phone == patient.phone && p.id != patient.id).toList();
         // Timeline, "Last Visit" and the latest marker follow visit date,
         // not insertion order (a backdated note is inserted at index 0).
         final timeline = patient.history.newestFirst();
@@ -129,6 +131,7 @@ class PatientDetailScreen extends StatelessWidget {
             title: Text(patient.name, style: const TextStyle(fontWeight: FontWeight.w800, color: Color(0xFF1E293B))),
             backgroundColor: Colors.transparent, elevation: 0,
             actions: [
+              IconButton(tooltip: 'Vitals trends', icon: const Icon(Icons.show_chart_rounded, color: Color(0xFF6366F1)), onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (c) => VitalsTrendsScreen(patientId: patient.id)))),
               IconButton(icon: const Icon(Icons.edit_outlined, color: Color(0xFF6366F1)), onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (c) => AddPatientScreen(existingPatient: patient)))),
               IconButton(icon: const Icon(Icons.delete_outline, color: Colors.redAccent), onPressed: () => _showModernDeletePatientConfirm(context, provider, patient)),
               IconButton(
@@ -177,7 +180,7 @@ class PatientDetailScreen extends StatelessWidget {
 
   Widget _buildClinicalTimeline(BuildContext context, dynamic doctor, Patient patient, VisitRecord record, bool isLatest, PatientProvider provider) {
     return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Column(children: [Container(width: 10, height: 10, decoration: BoxDecoration(color: isLatest ? const Color(0xFF6366F1) : const Color(0xFFE2E8F0), shape: BoxShape.circle)), Container(width: 2, height: (record.bp != null && record.bp!.isNotEmpty) ? 160 : 120, color: const Color(0xFFF1F5F9))]),
+      Column(children: [Container(width: 10, height: 10, decoration: BoxDecoration(color: isLatest ? const Color(0xFF6366F1) : const Color(0xFFE2E8F0), shape: BoxShape.circle)), Container(width: 2, height: filledVitals(record).isNotEmpty ? 160 : 120, color: const Color(0xFFF1F5F9))]),
       const SizedBox(width: 16),
       Expanded(child: GestureDetector(
         onTap: () => _showRecordDetails(context, doctor, patient, record, provider),
@@ -193,9 +196,9 @@ class PatientDetailScreen extends StatelessWidget {
               ]),
               const SizedBox(height: 8),
               Text(record.diagnosis, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16, color: Color(0xFF1E293B))),
-              if (record.bp != null && record.bp!.isNotEmpty) ...[
+              if (filledVitals(record).isNotEmpty) ...[
                 const SizedBox(height: 8),
-                Row(children: [_buildSmallVitalChip('BP', record.bp!), const SizedBox(width: 8), if (record.temp != null && record.temp!.isNotEmpty) _buildSmallVitalChip('T', record.temp!)]),
+                Wrap(spacing: 8, runSpacing: 6, children: [for (final v in filledVitals(record)) _buildSmallVitalChip(v.label, v.value)]),
               ],
               const SizedBox(height: 8),
               Text(record.symptoms, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Color(0xFF64748B), fontSize: 13)),
@@ -224,7 +227,7 @@ class PatientDetailScreen extends StatelessWidget {
         ]),
         const Divider(height: 40),
         Expanded(child: SingleChildScrollView(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          if (record.bp != null && record.bp!.isNotEmpty) _buildProfessionalDetail('Patient Vitals', "BP: ${record.bp} | Temp: ${record.temp} | Pulse: ${record.pulse} | Weight: ${record.weight}", Icons.monitor_heart_outlined),
+          if (filledVitals(record).isNotEmpty) _buildProfessionalDetail('Patient Vitals', vitalsLine(record), Icons.monitor_heart_outlined),
           _buildProfessionalDetail('Chief Symptoms', record.symptoms, Icons.subject_rounded),
           _buildProfessionalDetail('Clinical Prescription', record.prescription, Icons.medication_outlined, isSpecial: true),
           if (record.notes != null && record.notes!.isNotEmpty) _buildProfessionalDetail('Clinical Notes', record.notes!, Icons.edit_note_rounded),

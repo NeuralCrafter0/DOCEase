@@ -15,6 +15,7 @@ import '../services/sync_cancel_token.dart';
 import 'database_helper.dart';
 import 'firestore_helper.dart';
 import 'save_refused_exception.dart';
+import '../utils/patient_search.dart';
 
 export 'save_refused_exception.dart';
 
@@ -114,12 +115,15 @@ class PatientProvider with ChangeNotifier {
 
     return _patients.where((p) {
       final nameMatch = p.name.toLowerCase().contains(cleanQuery);
-      final phoneMatch = p.phone.contains(cleanQuery);
+      final phoneMatch = phoneMatchesQuery(p.phone, cleanQuery);
       return nameMatch || phoneMatch;
     }).toList();
   }
 
   bool get isSyncing => _isSyncing;
+  /// Every patient on this phone, ignoring the home-screen search. Use this
+  /// for whole-practice views (Insights) and lookups by id.
+  List<Patient> get allPatients => [..._patients];
 
   /// The uid whose data is loaded.
   String? get sessionUid => _uid;
