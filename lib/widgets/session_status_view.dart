@@ -66,7 +66,10 @@ class SessionStatusView extends StatelessWidget {
         ],
       );
 
-  Widget _signOut() => TextButton(onPressed: session.signOut, child: const Text('Sign out'));
+  // Dev mode has no account to sign out of.
+  Widget _signOut() => session.isLocalOnly
+      ? const SizedBox.shrink()
+      : TextButton(onPressed: session.signOut, child: const Text('Sign out'));
 
   Widget _approval(BuildContext context) {
     final (title, text) = switch (session.approvalStatus) {

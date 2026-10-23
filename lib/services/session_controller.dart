@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/widgets.dart';
 
+import '../config/dev_mode.dart';
 import '../providers/database_helper.dart';
 import '../providers/doctor_provider.dart';
 import '../providers/medicine_provider.dart';
@@ -96,18 +97,47 @@ class SessionController with ChangeNotifier {
         _doctor = doctor,
         _medicines = medicines,
         _db = db ?? DatabaseHelper.instance,
-        _platform = platform ?? FirebaseSessionPlatform() {
+        _platform = platform ?? FirebaseSessionPlatform(),
+        _localOnly = false {
     _dbSub = _db.states.listen(_onDbState);
     _authSub = (authStateChanges ?? FirebaseAuth.instance.authStateChanges())
         .listen(_onAuth, onError: (Object e) => debugPrint('Auth stream error: ${errorCode(e)}'));
-    if (observeAppLifecycle) {
-      try {
-        _lifecycle = AppLifecycleListener(onResume: _onResume);
-      } catch (_) {
-        // No WidgetsBinding (plain unit tests): no resume hook.
-      }
+    if (observeAppLifecycle) _observeLifecycle();
+  }
+
+  /// Dev mode (kDevMode): no auth, approval, Firestore or legacy-DB claim.
+  /// Opens the encrypted DB for [kLocalOwnerId] straight away and loads
+  /// patients, profile and medicines from it. [signOut] does nothing. The
+  /// legacy plain database, if any, is left untouched for the real account.
+  SessionController.localOnly({
+    LocalDatabase? db,
+    required PatientProvider patients,
+    required DoctorProvider doctor,
+    required MedicineProvider medicines,
+    bool observeAppLifecycle = true,
+  })  : _patients = patients,
+        _doctor = doctor,
+        _medicines = medicines,
+        _db = db ?? DatabaseHelper.instance,
+        _platform = LocalOnlySessionPlatform(),
+        _localOnly = true {
+    _dbSub = _db.states.listen(_onDbState);
+    if (observeAppLifecycle) _observeLifecycle();
+    _schedule();
+  }
+
+  void _observeLifecycle() {
+    try {
+      _lifecycle = AppLifecycleListener(onResume: _onResume);
+    } catch (_) {
+      // No WidgetsBinding (plain unit tests): no resume hook.
     }
   }
+
+  final bool _localOnly;
+
+  /// True in dev mode: on-phone only, no sign-in.
+  bool get isLocalOnly => _localOnly;
 
   static const _cacheWipeFlag = 'docease.firestoreCacheWiped.v1';
   static String _approvedFlag(String uid) => 'docease.approved.$uid';
@@ -179,7 +209,8 @@ class SessionController with ChangeNotifier {
 
   void _schedule({bool restart = false}) {
     final e = ++_epoch;
-    unawaited(_enqueue(() => _reconcile(e, restart: restart)).catchError((Object err) {
+    unawaited(_enqueue(() => _localOnly ? _reconcileLocal(e) : _reconcile(e, restart: restart))
+        .catchError((Object err) {
       debugPrint('Session error: ${errorCode(err)}');
     }));
   }
@@ -196,7 +227,22 @@ class SessionController with ChangeNotifier {
     return c.future;
   }
 
-  bool _stale(int e, String uid) => _disposed || e != _epoch || _latestUser?.uid != uid || _uid != uid;
+  bool _stale(int e, String uid) =>
+      _disposed || e != _epoch || (!_localOnly && _latestUser?.uid != uid) || _uid != uid;
+
+  /// Dev mode: (re)open the on-phone DB unless the session is already ready.
+  Future<void> _reconcileLocal(int e) async {
+    if (_disposed || e != _epoch) return;
+    if (_uid == kLocalOwnerId && _phase == SessionPhase.ready) return;
+    _token?.cancel();
+    _token = SyncCancelToken();
+    _uid = kLocalOwnerId;
+    _readyUid = null;
+    _failure = null;
+    _approval = ApprovalStatus.approved;
+    _setPhase(SessionPhase.opening);
+    await _open(kLocalOwnerId, e);
+  }
 
   Future<void> _reconcile(int e, {required bool restart}) async {
     if (_disposed) return;
@@ -476,6 +522,7 @@ class SessionController with ChangeNotifier {
   /// of Google and Firebase; the auth event then closes the DB and drops
   /// the Firestore and image caches.
   Future<void> signOut() async {
+    if (_localOnly) return; // dev mode: there is no account to leave
     _token?.cancel();
     _clearProviders();
     await _platform.signOutGoogle();

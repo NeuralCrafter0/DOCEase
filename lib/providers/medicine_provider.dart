@@ -1,6 +1,8 @@
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'database_helper.dart';
 
 /// The doctor's frequently used medicine names.
 ///
@@ -8,10 +10,26 @@ import 'package:firebase_auth/firebase_auth.dart';
 /// field firestore.rules allows there). Older builds kept the list in a
 /// `frequentMedicines` field on the profile document; [load] copies it over
 /// once, the first time the settings document is missing.
+///
+/// With `cloudSync: false` (dev mode) Firebase is never touched: the list is
+/// a JSON array under [localSettingKey] in the open encrypted DB.
 class MedicineProvider with ChangeNotifier {
-  MedicineProvider({FirebaseAuth? auth, FirebaseFirestore? firestore})
-      : _authOverride = auth,
-        _firestoreOverride = firestore;
+  MedicineProvider({
+    FirebaseAuth? auth,
+    FirebaseFirestore? firestore,
+    bool cloudSync = true,
+    LocalDatabase? localDb,
+  })  : _authOverride = auth,
+        _firestoreOverride = firestore,
+        _cloud = cloudSync,
+        _localDbOverride = localDb;
+
+  /// Settings key of the on-phone list (dev mode).
+  static const localSettingKey = 'frequent_medicines';
+
+  final bool _cloud;
+  final LocalDatabase? _localDbOverride;
+  LocalDatabase get _local => _localDbOverride ?? DatabaseHelper.instance;
 
   final FirebaseAuth? _authOverride;
   final FirebaseFirestore? _firestoreOverride;
@@ -50,12 +68,13 @@ class MedicineProvider with ChangeNotifier {
 
   /// Kept for existing callers: loads for the signed-in doctor.
   Future<void> fetchMedicines() async {
-    final uid = _auth.currentUser?.uid;
+    final uid = _cloud ? _auth.currentUser?.uid : _uid;
     if (uid == null) return;
     await load(uid);
   }
 
   Future<void> _load(String uid, int gen) async {
+    if (!_cloud) return _loadLocal(gen);
     try {
       final settings = await _settingsDoc(uid).get();
       if (gen != _generation) return;
@@ -83,6 +102,18 @@ class MedicineProvider with ChangeNotifier {
     }
   }
 
+  Future<void> _loadLocal(int gen) async {
+    try {
+      final raw = await _local.getSetting(localSettingKey);
+      if (gen != _generation) return;
+      _frequentMedicines = raw == null ? [] : sanitize(jsonDecode(raw));
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Error reading medicines: ${_code(e)}');
+      if (gen == _generation) _loading = null; // allow a retry
+    }
+  }
+
   Future<void> addMedicineIfNew(String med) async {
     final cleanMed = med.trim();
     if (!_isValidItem(cleanMed) || _frequentMedicines.contains(cleanMed)) return;
@@ -91,6 +122,16 @@ class MedicineProvider with ChangeNotifier {
     _frequentMedicines = [..._frequentMedicines, cleanMed];
     notifyListeners();
 
+    if (!_cloud) {
+      if (_uid == null) return; // no session yet: memory only
+      final gen = _generation;
+      try {
+        await _local.putSetting(localSettingKey, jsonEncode(_frequentMedicines));
+      } catch (e) {
+        if (gen == _generation) debugPrint('Medicines save failed: ${_code(e)}');
+      }
+      return;
+    }
     final uid = _uid ?? _auth.currentUser?.uid;
     if (uid == null || uid != _auth.currentUser?.uid) return;
     final gen = _generation;
