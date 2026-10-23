@@ -8,6 +8,7 @@ import '../providers/doctor_provider.dart';
 import '../providers/medicine_provider.dart';
 import '../providers/patient_provider.dart';
 import 'legacy_db_inspector.dart';
+import 'local_attachment_files.dart';
 import 'log_codes.dart';
 import 'session_platform.dart';
 import 'sync_cancel_token.dart';
@@ -91,8 +92,10 @@ class SessionController with ChangeNotifier {
     required DoctorProvider doctor,
     required MedicineProvider medicines,
     SessionPlatform? platform,
+    LocalAttachmentFiles? localFiles,
     bool observeAppLifecycle = true,
   })  : _patients = patients,
+        _localFiles = localFiles ?? LocalAttachmentFiles(),
         _doctor = doctor,
         _medicines = medicines,
         _db = db ?? DatabaseHelper.instance,
@@ -118,6 +121,7 @@ class SessionController with ChangeNotifier {
   final MedicineProvider _medicines;
   final LocalDatabase _db;
   final SessionPlatform _platform;
+  final LocalAttachmentFiles _localFiles;
 
   StreamSubscription<DbOpenState>? _dbSub;
   StreamSubscription<User?>? _authSub;
@@ -208,6 +212,10 @@ class SessionController with ChangeNotifier {
     await _wipeLegacyCacheOnce();
     if (e != _epoch) return;
     if (user == null) {
+      // Also covers a cold start that is already signed out (e.g. the app
+      // was killed before the previous sign-out finished its cleanup).
+      await _purgePickedPhotos();
+      if (e != _epoch) return;
       _setPhase(SessionPhase.signedOut);
       return;
     }
@@ -240,6 +248,14 @@ class SessionController with ChangeNotifier {
     try {
       _platform.clearImageCache();
     } catch (_) {}
+    // Picked visit photos are plain JPEGs outside the encrypted DB; none
+    // may survive into the next account (or a signed-out phone).
+    await _purgePickedPhotos();
+  }
+
+  Future<void> _purgePickedPhotos() async {
+    final n = await _localFiles.purgePickedPhotos();
+    if (n > 0) debugPrint('Deleted $n leftover picked photo(s)');
   }
 
   void _clearProviders() {

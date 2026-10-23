@@ -10,6 +10,7 @@ import '../models/patient.dart';
 import '../services/attachments.dart';
 import '../services/local_database_sync.dart';
 import '../services/log_codes.dart';
+import '../services/local_attachment_files.dart';
 import '../services/sync_cancel_token.dart';
 import 'database_helper.dart';
 import 'firestore_helper.dart';
@@ -35,9 +36,11 @@ class PatientProvider with ChangeNotifier {
     FirestoreHelper? firestore,
     FirebaseAuth? auth,
     FirebaseStorage? storage,
+    LocalAttachmentFiles? localFiles,
     Duration retryBaseDelay = const Duration(seconds: 30),
     Duration retryMaxDelay = const Duration(minutes: 5),
   })  : _db = db ?? DatabaseHelper.instance,
+        _localFiles = localFiles ?? LocalAttachmentFiles(),
         _firestoreOverride = firestore,
         _authOverride = auth,
         _storageOverride = storage,
@@ -46,6 +49,7 @@ class PatientProvider with ChangeNotifier {
         _retryDelay = retryBaseDelay;
 
   final LocalDatabase _db;
+  final LocalAttachmentFiles _localFiles;
   final FirestoreHelper? _firestoreOverride;
   final FirebaseAuth? _authOverride;
   final FirebaseStorage? _storageOverride;
@@ -413,6 +417,9 @@ class PatientProvider with ChangeNotifier {
         debugPrint('Saving uploaded paths failed for $patientId: ${errorCode(e)}');
         sentVersion = null; // stays dirty; retried later
       }
+      // Upload confirmed and the visit now saved locally with the Storage
+      // path: the plain local copy (outside the encrypted DB) can go.
+      if (sentVersion != null) await _deleteUploadedCopies(current, replacements);
       if (!_live(uid, token)) return false;
       notifyListeners();
     }
@@ -447,6 +454,22 @@ class PatientProvider with ChangeNotifier {
     } else if (_retryTimer != null && uid != null) {
       _resetRetry();
       unawaited(_pushDirty(uid, token));
+    }
+  }
+
+  /// Deletes the local copy of each uploaded file whose Storage path is in
+  /// [saved] (the row just written locally), unless something still refers
+  /// to the local path. Only app-owned files are deleted (see
+  /// [LocalAttachmentFiles]); a failed upload never reaches here, so its
+  /// file stays for the retry.
+  Future<void> _deleteUploadedCopies(Patient saved, Map<String, String> replacements) async {
+    final savedEntries = {for (final r in saved.history) ...r.attachmentPaths};
+    for (final MapEntry(key: local, value: storagePath) in replacements.entries) {
+      if (!savedEntries.contains(storagePath)) continue; // visit edited meanwhile
+      if (savedEntries.contains(local) || _pendingUploads.contains(local)) continue;
+      final stillUsed = _patients.any((p) => p.history.any((r) => r.attachmentPaths.contains(local)));
+      if (stillUsed) continue;
+      await _localFiles.deleteIfAppOwned(local);
     }
   }
 

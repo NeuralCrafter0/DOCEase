@@ -69,6 +69,22 @@ any successful write and by the backoff timer, along with the dirty rows.
 A tombstoned patient never comes back on merge, because `applyCloudPatient`
 skips it. A refused local delete changes nothing and is reported.
 
+**Picked-photo copies are deleted (for PR #8's picker).** The picker writes
+plain JPEG copies to `<app documents>/attachments/<uuid>.jpg`, outside the
+encrypted DB. `PatientProvider` deletes a copy once its Storage upload
+succeeded and the visit was saved locally with the Storage path. A failed
+upload, or a refused local save, keeps the file for the in-session retry.
+`SessionController` deletes every leftover `*.jpg`/`*.jpeg` in that folder
+on sign-out, on account switch and on a cold start that is already signed
+out. Every delete goes through `LocalAttachmentFiles`
+(`lib/services/local_attachment_files.dart`). It deletes only regular files
+whose resolved path is inside the temp/cache directory, the support
+directory or `<app documents>/attachments` (not the rest of documents). It
+never follows symlinks and never touches relative paths or URLs.
+Not covered: a copy whose Storage path couldn't be saved locally stays
+until sign-out, and image_picker's own temp copies in the cache directory
+aren't deleted.
+
 ## Interface dependencies on the DB branch
 
 | Used here | Status |
@@ -97,8 +113,8 @@ When the DB branch adds these to `LocalDatabase`:
 
 ## Tests
 
-- `flutter test test/backend test/data test/models test/providers`: 121 pass
-  (80 of them are this branch's own in `test/backend`).
+- `flutter test test/backend test/data test/models test/providers`: 136 pass
+  (95 of them are this branch's own in `test/backend`).
 - `test/widget_test.dart` already fails on `main`: it imports
   `package:medhistory`, but the package is `docease`. It's left alone. QA
   found that when it's in the same run it can also crash the test compiler
