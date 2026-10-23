@@ -67,9 +67,16 @@ Future<void> pumpWrapper(WidgetTester t) async {
   await settle(t);
 }
 
-bool protectedSubtreeBuilt() =>
-    find.byType(StreamBuilder<User?>, skipOffstage: false).evaluate().isNotEmpty ||
-    find.byType(LoginScreen, skipOffstage: false).evaluate().isNotEmpty;
+/// Whatever sits behind the lock: the auth StreamBuilder or LoginScreen
+/// today, or `Consumer<SessionController>` once the session branch lands
+/// (matched by name so this file builds on both).
+bool protectedSubtreeBuilt() => find
+    .byWidgetPredicate(
+      (w) => w is StreamBuilder<User?> || w is LoginScreen || w.runtimeType.toString() == 'Consumer<SessionController>',
+      skipOffstage: false,
+    )
+    .evaluate()
+    .isNotEmpty;
 
 void expectLocked() {
   expect(find.text(lockTitle), findsOneWidget);
