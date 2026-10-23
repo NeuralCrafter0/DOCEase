@@ -53,8 +53,13 @@ jobs:
       - name: Scan git history
         # --redact keeps any detected secret values out of the job log.
         # Known, reviewed findings are listed by fingerprint in .gitleaksignore.
+        # Scan the full history reachable from the commit under test (for PRs,
+        # the merge of the PR into main). fetch-depth: 0 also fetches every other
+        # branch, and gitleaks defaults to --all, so without this a leak on an
+        # unrelated branch would fail every PR; each branch is checked on its own PR.
         run: |
-          "$RUNNER_TEMP/gitleaks" git . --redact --no-banner --verbose --exit-code 1
+          "$RUNNER_TEMP/gitleaks" git . --redact --no-banner --verbose --exit-code 1 \
+            --log-opts="--full-history HEAD"
 
   analyze:
     name: flutter analyze
@@ -274,10 +279,22 @@ jobs:
           set -euo pipefail
           apk="$APK"
           test -f "$apk"
-          apksigner="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)/apksigner"
-          certs="$("$apksigner" verify --print-certs "$apk")"
-          cert_dn="$(printf '%s\n' "$certs" | sed -n 's/^Signer #1 certificate DN: //p')"
-          cert_sha256="$(printf '%s\n' "$certs" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')"
+          # Newest stable build-tools (skip -rc). apksigner output differs by version
+          # ("Signer #1 certificate DN:" in 36, "V2 Signer: certificate DN:" in 37),
+          # so match on the field name only.
+          bt="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | grep -vE -- '-rc[0-9]*$' | sort -V | tail -1)"
+          certs="$("$bt/apksigner" verify --print-certs "$apk")"
+          dns="$(printf '%s\n' "$certs" | sed -n 's/^.*certificate DN: //p' | sort -u)"
+          shas="$(printf '%s\n' "$certs" | sed -n 's/^.*certificate SHA-256 digest: //p' | sort -u)"
+          # Fail closed: exactly one readable signer certificate is required.
+          if [ -z "$dns" ] || [ -z "$shas" ] || [ "$(printf '%s\n' "$shas" | wc -l)" -ne 1 ]; then
+            echo "::error title=Signature check::Could not read exactly one signer certificate from $apk with $(basename "$bt") apksigner."
+            exit 1
+          fi
+          cert_dn="$(printf '%s\n' "$dns" | head -1)"
+          cert_sha256="$shas"
+          # Public certificate details only (no secrets).
+          echo "APK signer (apksigner $(basename "$bt")): $cert_dn, SHA-256 $cert_sha256"
           debug_cert=false
           if printf '%s' "$cert_dn" | grep -q 'CN=Android Debug'; then debug_cert=true; fi
           # Never label a debug-key APK as release-signed.
