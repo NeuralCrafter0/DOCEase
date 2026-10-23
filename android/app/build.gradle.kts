@@ -1,4 +1,6 @@
+import java.io.File
 import java.util.Base64
+import java.util.Properties
 
 plugins {
     id("com.android.application")
@@ -76,7 +78,10 @@ val docEaseDevModeDefine = docEaseDartDefines.contains("DOCEASE_DEV_MODE=true")
 // (flutter run/build, ./gradlew assembleDebug or build, an IDE), each app
 // it produces shows up as a package/bundle/assemble/install<Flavor><BuildType>
 // task. The dart-defines apply to every variant in one build. Refused:
-//   - the dev flavor in release (also has no variant, see above),
+//   - any devRelease task at all (compile, sign, merge, package, ...), with
+//     or without the define, so a dev APK can never be release-signed. The
+//     variant does not exist (see above); this catches it coming back, e.g.
+//     a plain `flutter build apk --release` with no --flavor,
 //   - DOCEASE_DEV_MODE=true in any non-dev app (the prod app id),
 //   - a dev app without DOCEASE_DEV_MODE=true.
 // So a build producing both flavors (e.g. assembleDebug) is refused either
@@ -85,6 +90,10 @@ val docEaseDevModeDefine = docEaseDartDefines.contains("DOCEASE_DEV_MODE=true")
 // whose output is never packaged into the app being built.
 val docEaseOutputTask = Regex("^(package|bundle|assemble|install)((Dev|Prod)(Debug|Profile|Release))$")
 gradle.taskGraph.whenReady {
+    allTasks.firstOrNull { it.project == project && it.name.contains("DevRelease") }?.let {
+        throw GradleException(
+            "Refused: the dev flavor never builds in release mode (${it.name}). Use --debug or --profile.")
+    }
     val variants = allTasks
         .filter { it.project == project }
         .mapNotNull { docEaseOutputTask.find(it.name)?.groupValues?.get(2) }
