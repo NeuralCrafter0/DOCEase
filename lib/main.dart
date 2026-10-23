@@ -9,6 +9,7 @@ import 'providers/doctor_provider.dart';
 import 'providers/medicine_provider.dart';
 import 'providers/database_helper.dart';
 import 'providers/firestore_settings.dart';
+import 'services/log_codes.dart';
 import 'services/session_controller.dart';
 import 'widgets/session_status_view.dart';
 import 'screens/home_screen.dart';
@@ -26,7 +27,7 @@ void main() async {
     );
     firebaseReady = true;
   } catch (e) {
-    debugPrint('Init Error: $e');
+    debugPrint('Init Error: ${errorCode(e)}');
   }
 
   runApp(
