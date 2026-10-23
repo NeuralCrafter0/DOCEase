@@ -7,6 +7,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart' show Hmac, sha256;
 import 'package:docease/models/patient.dart';
 import 'package:docease/providers/database_helper.dart';
 import 'package:flutter/foundation.dart';
@@ -21,8 +22,8 @@ abstract class DbSuiteHarness {
   /// The key store the helper uses (real secure storage on device).
   DbKeyStore get keys;
 
-  /// SQLCipher opener; must throw if [key] does not decrypt the file. A
-  /// null key opens plaintext.
+  /// SQLCipher opener; [CipherDatabaseOpener.open] must throw if the key
+  /// does not decrypt the file.
   CipherDatabaseOpener get opener;
 
   /// Registers one test (testWidgets on device, test on host).
@@ -43,14 +44,21 @@ void runDbSuite(DbSuiteHarness h) {
   String dbPath(String uid) => path(DatabaseHelper.dbFileNameFor(uid));
   String legacyPath() => path(DatabaseHelper.legacyDbFileName);
 
-  DatabaseHelper helper({DbKeyStore? keys, int? schemaVersion, MigrationHook? hook}) =>
+  final excluder = _RecordingExcluder();
+  DatabaseHelper helper(
+          {DbKeyStore? keys,
+          int? schemaVersion,
+          MigrationHook? hook,
+          Future<String> Function()? databasesPath}) =>
       DatabaseHelper(
         keyStore: keys ?? h.keys,
         opener: h.opener,
-        databasesPath: h.databasesPath,
+        databasesPath: databasesPath ?? h.databasesPath,
         schemaVersion: schemaVersion ?? DatabaseHelper.currentSchemaVersion,
         migrationHook: hook,
+        backupExcluder: excluder,
       );
+  String kcvPath(String uid) => DatabaseHelper.kcvPathFor(dbPath(uid));
 
   Future<String?> keyOf(String uid) => h.keys.read(DatabaseHelper.keyNameFor(uid));
   Future<String?> counterOf(String uid) =>
@@ -74,7 +82,7 @@ void runDbSuite(DbSuiteHarness h) {
       .listSync()
       .map((e) => p.basename(e.path))
       .where((n) => n.contains('.migrating') || n.contains('.encrypting') ||
-          n.endsWith('.claimed'))
+          n.endsWith('.claimed') || n.endsWith('.tmp'))
       .toList();
 
   bool isPlainSqlite(String file) {
@@ -100,7 +108,9 @@ void runDbSuite(DbSuiteHarness h) {
   Future<void> expectCannotOpen(String file, String? key) async {
     Object? error;
     try {
-      final db = await h.opener.open(file, key: key);
+      final db = key == null
+          ? await h.opener.openPlaintext(file)
+          : await h.opener.open(file, key: key);
       await db.rawQuery('SELECT COUNT(*) FROM patients');
       await db.close();
     } catch (e) {
@@ -119,10 +129,13 @@ void runDbSuite(DbSuiteHarness h) {
         ]),
       };
 
-  /// Old-build legacy file: v1 schema, [password] null = plaintext.
-  Future<Map<String, String>> seedLegacy({String? password, int rows = 25}) async {
-    final db = await h.opener.open(legacyPath(),
-        key: password, version: 1, onCreate: (db, _) => db.execute(_v1Ddl));
+  /// Old-build legacy file: v1 schema, [cipherKey] null = plaintext.
+  Future<Map<String, String>> seedLegacy({String? cipherKey, int rows = 25}) async {
+    Future<void> create(Database db, int _) => db.execute(_v1Ddl);
+    final db = cipherKey == null
+        ? await h.opener.openPlaintext(legacyPath(), version: 1, onCreate: create)
+        : await h.opener.open(legacyPath(),
+            key: cipherKey, version: 1, onCreate: create);
     final history = <String, String>{};
     for (var i = 0; i < rows; i++) {
       final r = v1Row(i);
@@ -187,7 +200,7 @@ void runDbSuite(DbSuiteHarness h) {
     await expectCannotOpen(file, '');
     await expectCannotOpen(file, fallbackKey);
     await expectCannotOpen(file, DatabaseHelper.generateKey());
-    final key = await keyOf(uidA);
+    final key = (await keyOf(uidA))!;
     expect(key, matches(RegExp(r'^[0-9a-f]{64}$')));
     final db = await h.opener.open(file, key: key);
     expect((await rawRows(db)).single['name'], uniqueName);
@@ -306,10 +319,20 @@ void runDbSuite(DbSuiteHarness h) {
     expect((await d.dirtyPatients()).map((p) => p.id), ['b', 'a']);
     expect(await counterOf(uidA), '2');
 
-    // Deleting a dirty row uncounts it.
-    await d.deletePatient('b');
-    expect(await d.unsyncedCount(), const UnsyncedCount.known(1));
-    expect(await counterOf(uidA), '1');
+    // Deleting a dirty row turns it into one tombstone: still 2 unsynced
+    // until Firestore confirms the delete.
+    await d.markPendingDelete('b');
+    expect(await d.unsyncedCount(), const UnsyncedCount.known(2));
+    expect(await counterOf(uidA), '2');
+    expect(await d.pendingDeletes(), ['b']);
+    // Deleting a clean row adds one.
+    await d.markPendingDelete('c1');
+    expect(await counterOf(uidA), '3');
+    await d.clearPendingDelete('b');
+    await d.clearPendingDelete('b'); // repeated confirmation: no-op
+    expect(await counterOf(uidA), '2');
+    expect(await d.unsyncedCount(), const UnsyncedCount.known(2));
+    expect(await d.pendingDeletes(), ['c1']);
     await d.close();
   });
 
@@ -365,8 +388,10 @@ void runDbSuite(DbSuiteHarness h) {
     await d.insertPatient(patient('p1'));
     await d.insertPatient(patient('p2'));
     await d.close();
+    final oldKey = (await keyOf(uidA))!;
     await h.keys.write(DatabaseHelper.keyNameFor(uidA), DatabaseHelper.generateKey());
     final before = File(dbPath(uidA)).readAsBytesSync();
+    final kcvBefore = File(kcvPath(uidA)).readAsStringSync();
 
     await expectLater(d.openFor(uidA), throwsA(isA<DbOpenException>()));
     expect((d.state as DbFailed).error, DbOpenError.keyMismatch);
@@ -388,14 +413,31 @@ void runDbSuite(DbSuiteHarness h) {
     expect(await d.fetchPatients(), isEmpty);
     expect(await counterOf(uidA), '0');
     await d.close();
+
+    // Reset moved the old file (and its KCV) aside instead of deleting it;
+    // it still opens with the old key, which was kept.
+    final moved = Directory(dir)
+        .listSync()
+        .map((e) => e.path)
+        .where((f) => p.basename(f).startsWith(
+                '${p.basename(dbPath(uidA))}.undecryptable-') &&
+            !f.endsWith('.kcv'))
+        .toList();
+    expect(moved, hasLength(1));
+    expect(File(moved.single).readAsBytesSync(), before);
+    expect(File(DatabaseHelper.kcvPathFor(moved.single)).readAsStringSync(),
+        kcvBefore);
+    final old = await h.opener.open(moved.single, key: oldKey);
+    expect((await rawRows(old)).length, 2);
+    await old.close();
   });
 
   for (final c in [
-    (id: 'MIG-01', name: 'plaintext', password: null as String?,
+    (id: 'MIG-01', name: 'plaintext', cipherKey: null as String?,
         step: DbMigrationStep.encryptingPlaintext, storedKey: null as String?),
-    (id: 'MIG-02', name: 'fallback-key', password: fallbackKey,
+    (id: 'MIG-02', name: 'fallback-key', cipherKey: fallbackKey,
         step: DbMigrationStep.rekeyingFromFallback, storedKey: null),
-    (id: 'MIG-03', name: 'old prod-key', password: '0f0e0d0c-0b0a-4908-8706-050403020100',
+    (id: 'MIG-03', name: 'old prod-key', cipherKey: '0f0e0d0c-0b0a-4908-8706-050403020100',
         step: DbMigrationStep.rekeyingFromLegacyKey,
         storedKey: '0f0e0d0c-0b0a-4908-8706-050403020100'),
   ]) {
@@ -405,8 +447,8 @@ void runDbSuite(DbSuiteHarness h) {
       if (c.storedKey != null) {
         await h.keys.write(DatabaseHelper.legacyKeyName, c.storedKey!);
       }
-      final before = await seedLegacy(password: c.password);
-      expect(isPlainSqlite(legacyPath()), c.password == null);
+      final before = await seedLegacy(cipherKey: c.cipherKey);
+      expect(isPlainSqlite(legacyPath()), c.cipherKey == null);
 
       final d = helper();
       final states = <DbOpenState>[];
@@ -455,7 +497,7 @@ void runDbSuite(DbSuiteHarness h) {
     final legacyBefore = File(legacyPath()).readAsBytesSync();
     final d = helper(hook: (point, file) async {
       if (point != MigrationCheckpoint.converted) return;
-      final db = await h.opener.open(file, key: await keyOf(uidA));
+      final db = await h.opener.open(file, key: (await keyOf(uidA))!);
       await db.delete('patients', where: 'id = ?', whereArgs: ['p3']);
       await db.close();
     });
@@ -475,7 +517,7 @@ void runDbSuite(DbSuiteHarness h) {
   ]) {
     h.define('claim forced to fail at ${point.name}: legacy untouched', () async {
       await wipe();
-      await seedLegacy(password: fallbackKey, rows: 5);
+      await seedLegacy(cipherKey: fallbackKey, rows: 5);
       final legacyBefore = File(legacyPath()).readAsBytesSync();
       final d = helper(hook: (at, _) async {
         if (at == point) throw StateError('injected failure at ${at.name}');
@@ -507,11 +549,12 @@ void runDbSuite(DbSuiteHarness h) {
   h.define('legacy DB under an unknown key: keyMismatch, legacy untouched',
       () async {
     await wipe();
-    await seedLegacy(password: 'some-other-key', rows: 3);
+    await seedLegacy(cipherKey: 'some-other-key', rows: 3);
     final legacyBefore = File(legacyPath()).readAsBytesSync();
     final d = helper();
     await expectLater(d.claimLegacyDb(uidA), throwsA(isA<DbOpenException>()));
-    await expectClaimFailedSafely(d, legacyBefore, DbOpenError.keyMismatch);
+    await expectClaimFailedSafely(d, legacyBefore, DbOpenError.legacyUnreadable);
+    expect((d.state as DbFailed).canReset, isFalse);
   });
 
   h.define('claim never overwrites a doctor DB that has patients (opens it, '
@@ -528,7 +571,11 @@ void runDbSuite(DbSuiteHarness h) {
     expect(File(legacyPath()).readAsBytesSync(), legacyBefore);
     expect(await d.hasLegacyDb(), isTrue);
     expect((await d.fetchPatients()).single.id, 'mine');
-    await d.deletePatient('mine');
+    await d.markPendingDelete('mine');
+    await d.close();
+    expect(await d.claimLegacyDb(uidA), isFalse,
+        reason: 'a pending delete is unsynced: never replaced');
+    await d.clearPendingDelete('mine');
     await d.close();
 
     expect(await d.claimLegacyDb(uidA), isTrue);
@@ -540,8 +587,8 @@ void runDbSuite(DbSuiteHarness h) {
   h.define('a plaintext doctor DB found in place is encrypted on open',
       () async {
     await wipe();
-    final db = await h.opener.open(dbPath(uidA),
-        key: null, version: 2, onCreate: (db, _) async {
+    final db = await h.opener.openPlaintext(dbPath(uidA),
+        version: 2, onCreate: (db, _) async {
       await db.execute(_v1Ddl);
       await db.execute("ALTER TABLE patients ADD COLUMN sync_state TEXT NOT NULL DEFAULT 'dirty'");
       await db.execute('ALTER TABLE patients ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0');
@@ -555,6 +602,218 @@ void runDbSuite(DbSuiteHarness h) {
     expect((await d.fetchPatients()).single.id, 'p1');
     await d.close();
     expect(isPlainSqlite(dbPath(uidA)), isFalse);
+    expect(strayFiles(), isEmpty);
+  });
+
+  // --- key-check value (KCV) ------------------------------------------------
+
+  String expectedKcv(String key, String uid) {
+    final raw = [
+      for (var i = 0; i < 64; i += 2) int.parse(key.substring(i, i + 2), radix: 16)
+    ];
+    return 'v1:${Hmac(sha256, raw).convert(utf8.encode('docease-keycheck:$uid'))}';
+  }
+
+  h.define('KCV-01 create writes the KCV atomically, keyed with the raw key '
+      'bytes (not the hex string); excluded from backup', () async {
+    await wipe();
+    final d = helper();
+    await d.openFor(uidA);
+    final key = (await keyOf(uidA))!;
+    final kcv = File(kcvPath(uidA)).readAsStringSync();
+    expect(kcv, expectedKcv(key, uidA));
+    final hexKeyed =
+        'v1:${Hmac(sha256, utf8.encode(key)).convert(utf8.encode('docease-keycheck:$uidA'))}';
+    expect(kcv, isNot(hexKeyed));
+    expect(strayFiles(), isEmpty, reason: 'no .kcv.tmp left behind');
+    expect(excluder.excluded,
+        containsAll([dir, dbPath(uidA), kcvPath(uidA)].map(p.normalize)));
+    await d.close();
+  });
+
+  h.define('KCV-02 wrong key (KCV mismatch) -> keyMismatch, file untouched',
+      () async {
+    await wipe();
+    final d = helper();
+    await d.openFor(uidA);
+    await d.insertPatient(patient('p1'));
+    await d.close();
+    await h.keys.write(DatabaseHelper.keyNameFor(uidA), DatabaseHelper.generateKey());
+    final before = File(dbPath(uidA)).readAsBytesSync();
+    await expectLater(d.openFor(uidA), throwsA(isA<DbOpenException>()));
+    expect((d.state as DbFailed).error, DbOpenError.keyMismatch);
+    expect(File(dbPath(uidA)).readAsBytesSync(), before);
+  });
+
+  h.define('KCV-03 corrupt file with the right key -> retryable, no reset, '
+      'file untouched', () async {
+    await wipe();
+    final d = helper();
+    await d.openFor(uidA);
+    await d.insertPatient(patient('p1'));
+    await d.close();
+    final raf = File(dbPath(uidA)).openSync(mode: FileMode.append)
+      ..setPositionSync(0)
+      ..writeFromSync(List.filled(4096, 0x5a))
+      ..closeSync();
+    expect(raf, isNotNull);
+    final before = File(dbPath(uidA)).readAsBytesSync();
+    final keyBefore = await keyOf(uidA);
+    await expectLater(d.openFor(uidA), throwsA(isA<DbOpenException>()));
+    final failed = d.state as DbFailed;
+    expect(failed.error, DbOpenError.migrationFailed);
+    expect(failed.canReset, isFalse);
+    await expectLater(
+        d.resetAndResync(acknowledgedUnsynced: UnsyncedCount.unknown),
+        throwsA(isA<StateError>()));
+    expect(File(dbPath(uidA)).readAsBytesSync(), before);
+    expect(await keyOf(uidA), keyBefore);
+  });
+
+  h.define('KCV-04 missing KCV (earlier build) -> retryable; written after '
+      'the next successful open', () async {
+    await wipe();
+    final d = helper();
+    await d.openFor(uidA);
+    await d.insertPatient(patient('p1'));
+    await d.close();
+    final rightKey = (await keyOf(uidA))!;
+    File(kcvPath(uidA)).deleteSync();
+
+    // Missing KCV and an open failure (here: a stored key that does not
+    // fit): ambiguous, so retryable, never keyMismatch.
+    await h.keys.write(DatabaseHelper.keyNameFor(uidA), DatabaseHelper.generateKey());
+    await expectLater(d.openFor(uidA), throwsA(isA<DbOpenException>()));
+    expect((d.state as DbFailed).error, DbOpenError.migrationFailed);
+    expect((d.state as DbFailed).canReset, isFalse);
+    expect(File(kcvPath(uidA)).existsSync(), isFalse);
+
+    await h.keys.write(DatabaseHelper.keyNameFor(uidA), rightKey);
+    await d.openFor(uidA);
+    expect((await d.fetchPatients()).single.id, 'p1');
+    expect(File(kcvPath(uidA)).readAsStringSync(), expectedKcv(rightKey, uidA));
+    await d.close();
+  });
+
+  h.define('KCV-05 the KCV and the key never appear in logs, DbFailed or '
+      'exceptions', () async {
+    await wipe();
+    final logs = <String>[];
+    final states = <DbOpenState>[];
+    final errors = <Object>[];
+    final previous = debugPrint;
+    debugPrint = (String? m, {int? wrapWidth}) {
+      if (m != null) logs.add(m);
+    };
+    try {
+      final d = helper();
+      final sub = d.states.listen(states.add);
+      Future<void> tryOpen() async {
+        try {
+          await d.openFor(uidA);
+        } catch (e) {
+          errors.add(e);
+        }
+      }
+      await d.openFor(uidA);
+      await d.insertPatient(patient('p1'));
+      await d.close();
+      final key = (await keyOf(uidA))!;
+      final kcv = File(kcvPath(uidA)).readAsStringSync();
+      // Wrong key, then corrupt file, then missing KCV.
+      await h.keys.write(DatabaseHelper.keyNameFor(uidA), DatabaseHelper.generateKey());
+      await tryOpen();
+      await h.keys.write(DatabaseHelper.keyNameFor(uidA), key);
+      File(kcvPath(uidA)).deleteSync();
+      File(dbPath(uidA)).writeAsBytesSync(List.filled(8192, 7));
+      await tryOpen();
+      await Future<void>.delayed(Duration.zero);
+      await sub.cancel();
+      final sensitive = [kcv, kcv.substring(3), key];
+      final failed = states.whereType<DbFailed>().toList();
+      expect(failed, hasLength(2));
+      final texts = [
+        ...logs,
+        for (final f in failed) ...[f.toString(), '${f.cause}'],
+        for (final e in errors) e.toString(),
+      ];
+      for (final t in texts) {
+        for (final value in sensitive) {
+          expect(t.contains(value), isFalse, reason: 'leaked in: $t');
+        }
+      }
+    } finally {
+      debugPrint = previous;
+    }
+  });
+
+  h.define('CLS-02 file locked by another connection -> retryable, no reset',
+      () async {
+    await wipe();
+    final d = helper();
+    await d.openFor(uidA);
+    await d.insertPatient(patient('p1'));
+    await d.close();
+    final locker = await h.opener.open(dbPath(uidA), key: (await keyOf(uidA))!);
+    await locker.execute('BEGIN EXCLUSIVE');
+    try {
+      await expectLater(d.openFor(uidA), throwsA(isA<DbOpenException>()));
+      expect((d.state as DbFailed).error, DbOpenError.migrationFailed);
+      expect((d.state as DbFailed).canReset, isFalse);
+    } finally {
+      await locker.execute('ROLLBACK');
+      await locker.close();
+    }
+    await d.openFor(uidA);
+    expect((await d.fetchPatients()).single.id, 'p1');
+    await d.close();
+  });
+
+  h.define('CLS-03 unusable database directory -> retryable, never keyMismatch',
+      () async {
+    await wipe();
+    final d = helper(databasesPath: () async => '/proc/docease_nope');
+    await expectLater(d.openFor(uidA), throwsA(isA<DbOpenException>()));
+    expect((d.state as DbFailed).error, isNot(DbOpenError.keyMismatch));
+    expect((d.state as DbFailed).canReset, isFalse);
+  });
+
+  h.define('SYNC-01 cloud copy never overwrites a dirty row or undoes a '
+      'pending delete; counter unchanged', () async {
+    await wipe();
+    final d = helper();
+    await d.openFor(uidA);
+    await d.insertPatient(patient('dirty', name: 'Local edit'));
+    await d.insertPatient(patient('gone'));
+    await d.markPendingDelete('gone');
+    expect(await counterOf(uidA), '2');
+
+    expect(await d.applyCloudPatient(patient('dirty', name: 'Cloud')), isFalse);
+    expect(await d.applyCloudPatient(patient('gone', name: 'Cloud')), isFalse);
+    expect(await d.applyCloudPatient(patient('new', name: 'Cloud')), isTrue);
+    expect(await d.applyCloudPatient(patient('new', name: 'Cloud 2')), isTrue,
+        reason: 'a clean row is updated');
+    expect(await counterOf(uidA), '2');
+    expect(await d.unsyncedCount(), const UnsyncedCount.known(2));
+    final byId = {for (final p in await d.fetchPatients()) p.id: p};
+    expect(byId['dirty']!.name, 'Local edit');
+    expect(byId.containsKey('gone'), isFalse);
+    expect(byId['new']!.name, 'Cloud 2');
+    expect((await d.dirtyPatients()).map((p) => p.id), ['dirty']);
+    await d.close();
+  });
+
+  h.define('LOW crash leftovers (work copies, KCV temp) are swept on start',
+      () async {
+    await wipe();
+    final base = dbPath(uidA);
+    for (final f in ['$base.migrating', '$base.encrypting-journal',
+        '${DatabaseHelper.kcvPathFor(base)}.tmp',
+        path('${DatabaseHelper.legacyDbFileName}.migrating')]) {
+      File(f).writeAsStringSync(uniqueName);
+    }
+    final d = helper();
+    await d.hasLegacyDb();
     expect(strayFiles(), isEmpty);
   });
 }
@@ -584,4 +843,10 @@ class _FailingKeys implements DbKeyStore {
     if (name == failDeleteOf) throw const OSError('injected delete failure');
     return _inner.delete(name);
   }
+}
+
+class _RecordingExcluder implements BackupExcluder {
+  final List<String> excluded = [];
+  @override
+  Future<void> exclude(String path) async => excluded.add(p.normalize(path));
 }

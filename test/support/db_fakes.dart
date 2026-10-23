@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:docease/models/patient.dart';
 import 'package:docease/providers/database_helper.dart';
 import 'package:docease/providers/firestore_helper.dart';
+import 'package:flutter/foundation.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart' show Database;
 
 /// In-memory [DbKeyStore] with switchable failures.
@@ -61,13 +62,44 @@ class RecordingOpener implements CipherDatabaseOpener {
 
   @override
   Future<Database> open(String path,
-      {String? key,
+      {required String key,
       int? version,
       onCreate,
       onUpgrade,
       onDowngrade}) async {
     calls.add(OpenCall(path, key, version));
     throw error ?? StateError('RecordingOpener: open() must not be called');
+  }
+
+  @override
+  Future<Database> openPlaintext(String path,
+      {int? version, onCreate}) async {
+    calls.add(OpenCall(path, null, version));
+    throw error ?? StateError('RecordingOpener: openPlaintext() must not be called');
+  }
+}
+
+/// Records backup-exclusion requests; never touches the platform.
+class RecordingBackupExcluder implements BackupExcluder {
+  final List<String> excluded = [];
+  bool fail = false;
+  @override
+  Future<void> exclude(String path) async {
+    if (fail) throw const OSError('exclusion failed');
+    excluded.add(path);
+  }
+}
+
+/// Captures debugPrint output while [body] runs.
+Future<T> captureLogs<T>(List<String> sink, Future<T> Function() body) async {
+  final previous = debugPrint;
+  debugPrint = (String? message, {int? wrapWidth}) {
+    if (message != null) sink.add(message);
+  };
+  try {
+    return await body();
+  } finally {
+    debugPrint = previous;
   }
 }
 
@@ -83,6 +115,11 @@ class FakeLocalDatabase implements LocalDatabase {
   DbOpenState state = const DbReady('doctorA');
 
   @override
+  String? get openUid => state is DbReady ? state.uid : null;
+
+  final Set<String> tombstones = {};
+
+  @override
   Stream<DbOpenState> get states => Stream.value(state);
 
   @override
@@ -92,7 +129,7 @@ class FakeLocalDatabase implements LocalDatabase {
 
   @override
   Future<UnsyncedCount> unsyncedCount() async =>
-      UnsyncedCount.known(dirty.values.where((d) => d).length);
+      UnsyncedCount.known(dirty.values.where((d) => d).length + tombstones.length);
 
   @override
   Future<void> resetAndResync(
@@ -118,7 +155,11 @@ class FakeLocalDatabase implements LocalDatabase {
   @override
   Future<String?> insertPatient(Patient patient, {bool fromCloud = false}) async {
     if (patient.hasParseErrors) return null;
-    if (refuseWrites && !fromCloud) throw const UnsyncedCounterException('doctorA');
+    if (fromCloud) {
+      if (!await applyCloudPatient(patient)) return null;
+      return versions[patient.id];
+    }
+    if (refuseWrites) throw UnsyncedCounterException('doctorA');
     log.add('insert:${patient.id}:${fromCloud ? 'synced' : 'dirty'}');
     rows[patient.id] = patient;
     dirty[patient.id] = !fromCloud;
@@ -142,12 +183,48 @@ class FakeLocalDatabase implements LocalDatabase {
     return true;
   }
 
+  /// Same gate as the real helper: never over a dirty row or a tombstone.
   @override
-  Future<void> deletePatient(String id) async {
-    log.add('delete:$id');
+  Future<bool> applyCloudPatient(Patient patient) async {
+    if (patient.hasParseErrors ||
+        dirty[patient.id] == true ||
+        tombstones.contains(patient.id)) {
+      log.add('cloudSkipped:${patient.id}');
+      return false;
+    }
+    log.add('insert:${patient.id}:synced');
+    rows[patient.id] = patient;
+    dirty[patient.id] = false;
+    versions[patient.id] = '${++_version}';
+    return true;
+  }
+
+  /// When true, markPendingDelete throws as if no database were open.
+  bool refuseDeletes = false;
+
+  @override
+  Future<void> markPendingDelete(String id) async {
+    if (refuseWrites) throw UnsyncedCounterException('doctorA');
+    if (refuseDeletes) {
+      throw DbOpenException(DbOpenError.migrationFailed, uid: 'doctorA');
+    }
+    log.add('tombstone:$id');
     rows.remove(id);
     dirty.remove(id);
     versions.remove(id);
+    tombstones.add(id);
+  }
+
+  @override
+  Future<void> deletePatient(String id) => markPendingDelete(id);
+
+  @override
+  Future<List<String>> pendingDeletes() async => tombstones.toList();
+
+  @override
+  Future<void> clearPendingDelete(String id) async {
+    log.add('clearTombstone:$id');
+    tombstones.remove(id);
   }
 }
 
@@ -173,11 +250,22 @@ class FakeFirestoreHelper implements FirestoreHelper {
     return syncResult;
   }
 
-  @override
-  Future<bool> deletePatient(String patientId) async => syncResult;
+  final List<String> deleted = [];
+
+  /// Result of each cloud delete (default: [syncResult]).
+  bool? deleteResult;
 
   @override
-  Future<List<Patient>> fetchAllPatients() async => [];
+  Future<bool> deletePatient(String patientId) async {
+    deleted.add(patientId);
+    return deleteResult ?? syncResult;
+  }
+
+  /// What fetchAllPatients returns.
+  List<Patient> cloud = [];
+
+  @override
+  Future<List<Patient>> fetchAllPatients() async => cloud;
 }
 
 Patient testPatient(String id, {String name = 'Asha', List<VisitRecord>? history}) =>
@@ -195,3 +283,7 @@ Future<void> flushMicrotasks() async {
     await Future<void>.delayed(Duration.zero);
   }
 }
+
+/// Lowercase hex of [bytes].
+String hexOf(List<int> bytes) =>
+    bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();

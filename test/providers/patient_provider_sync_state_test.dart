@@ -114,4 +114,109 @@ void main() {
     expect(db.log, isEmpty);
     expect(fs.synced, isEmpty);
   });
+
+  // The merge loop itself is the backend engineer's (fixed on their stacked
+  // branch); it calls insertPatient(fromCloud: true), which goes through the
+  // DB-layer guard (applyCloudPatient). These tests pin that guard: the
+  // stored row, its sync state and the counter. In-memory list handling is
+  // the loop's concern and is not asserted here.
+  group('cloud merge (review item 5)', () {
+    VisitRecord visit(String id) => VisitRecord(
+        id: id,
+        date: DateTime(2026, 1, 1),
+        visitType: 'Routine',
+        symptoms: 's',
+        diagnosis: 'Dx',
+        prescription: 'rx');
+
+    test('never overwrites a dirty local row or marks it synced; counter '
+        'unchanged', () async {
+      fs.syncResult = false; // the local edit never reached Firestore
+      await provider.addPatient(testPatient('p1', name: 'Local edit'));
+      await flushMicrotasks();
+      expect(await db.unsyncedCount(), const UnsyncedCount.known(1));
+
+      // The cloud copy has more history, which the old merge treated as
+      // "newer" and wrote over the local row as synced.
+      fs.cloud = [testPatient('p1', name: 'Cloud', history: [visit('r1')])];
+      await provider.syncNowForTesting();
+
+      expect(db.rows['p1']!.name, 'Local edit');
+      expect(db.dirty['p1'], isTrue);
+      expect(db.log, contains('cloudSkipped:p1'));
+      expect(db.log.where((l) => l.startsWith('markSynced')), isEmpty);
+      expect(await db.unsyncedCount(), const UnsyncedCount.known(1));
+    });
+
+    test('a clean row and a new patient are still taken from the cloud',
+        () async {
+      await provider.addPatient(testPatient('p1', name: 'Old'));
+      await flushMicrotasks();
+      fs.cloud = [
+        testPatient('p1', name: 'Cloud', history: [visit('r1')]),
+        testPatient('p2', name: 'New'),
+      ];
+      await provider.syncNowForTesting();
+      expect({for (final p in provider.patients) p.id: p.name},
+          {'p1': 'Cloud', 'p2': 'New'});
+      expect(db.dirty['p1'], isFalse);
+      expect(db.dirty['p2'], isFalse);
+      expect(await db.unsyncedCount(), const UnsyncedCount.known(0));
+    });
+
+    test('a pending delete is never resurrected by the cloud copy', () async {
+      await provider.addPatient(testPatient('p1'));
+      await flushMicrotasks();
+      fs.deleteResult = false; // offline: delete not confirmed
+      await provider.deletePatient('p1');
+      expect(db.tombstones, {'p1'});
+      expect(await db.unsyncedCount(), const UnsyncedCount.known(1));
+
+      // The cloud still has p1 at the next sync.
+      fs.cloud = [testPatient('p1', name: 'Cloud')];
+      await provider.syncNowForTesting();
+      expect(db.rows.containsKey('p1'), isFalse);
+      expect(db.tombstones, {'p1'});
+      expect(db.log, contains('cloudSkipped:p1'));
+      expect(await db.unsyncedCount(), const UnsyncedCount.known(1));
+    });
+  });
+
+  group('deletes are unsynced changes (review low item)', () {
+    test('delete counts until Firestore confirms it', () async {
+      await provider.addPatient(testPatient('p1'));
+      await flushMicrotasks();
+      expect(await db.unsyncedCount(), const UnsyncedCount.known(0));
+      fs.deleteResult = false;
+      await provider.deletePatient('p1');
+      expect(await db.unsyncedCount(), const UnsyncedCount.known(1));
+      expect(db.log, isNot(contains('clearTombstone:p1')));
+    });
+
+    test('a refused delete restores the patient and never deletes in the '
+        'cloud', () async {
+      await provider.addPatient(testPatient('p1'));
+      await flushMicrotasks();
+      db.refuseDeletes = true;
+      await expectLater(
+          provider.deletePatient('p1'), throwsA(isA<DbOpenException>()));
+      expect(provider.patients.single.id, 'p1');
+      expect(fs.deleted, isEmpty);
+
+      db.refuseDeletes = false;
+      db.refuseWrites = true;
+      await expectLater(provider.deletePatient('p1'),
+          throwsA(isA<UnsyncedCounterException>()));
+      expect(provider.patients.single.id, 'p1');
+      expect(fs.deleted, isEmpty);
+    });
+
+    test('sync does nothing unless the database is ready', () async {
+      db.state = const DbFailed('doctorA', DbOpenError.keyUnavailable);
+      fs.cloud = [testPatient('p1')];
+      await provider.syncNowForTesting();
+      expect(db.log, isEmpty);
+      expect(fs.deleted, isEmpty);
+    });
+  });
 }

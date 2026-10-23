@@ -31,6 +31,10 @@ void main() {
     return List<int>.generate(n, (_) => r.nextInt(256));
   }
 
+  /// Writes the key-check value that [key] would have written on create.
+  void writeKcvFor(String key) => File(DatabaseHelper.kcvPathFor(target()))
+      .writeAsStringSync('v1:${hexOf(DatabaseHelper.keyCheckBytes(key, uid))}');
+
   setUp(() {
     dir = Directory.systemTemp.createTempSync('docease_db_unit_');
     keys = MemoryKeyStore();
@@ -85,10 +89,11 @@ void main() {
       expect(opener.calls, isEmpty);
     });
 
-    test('wrong key: keyMismatch after exactly one keyed open, file untouched '
-        '(DB-03)', () async {
+    test('wrong key (KCV of another key): keyMismatch after exactly one keyed '
+        'open, file untouched (DB-03)', () async {
       final bytes = randomBytes(4096);
       File(target()).writeAsBytesSync(bytes);
+      writeKcvFor('d' * 64);
       keys.values[DatabaseHelper.keyNameFor(uid)] = 'a' * 64;
       opener.error = Exception('file is not a database (code 26)');
       final h = helper();
@@ -103,15 +108,19 @@ void main() {
       expect(opener.calls.any((c) => c.key == null || c.key == ''), isFalse);
       expect(opener.calls.any((c) => c.key == fallbackKey), isFalse);
       expect(File(target()).readAsBytesSync(), bytes);
-      expect(files(), [DatabaseHelper.dbFileNameFor(uid)]);
+      expect(files(), [
+        DatabaseHelper.dbFileNameFor(uid),
+        '${DatabaseHelper.dbFileNameFor(uid)}.kcv',
+      ]);
     });
 
-    test('encrypted file but no key at all: keyMismatch, never opened',
-        () async {
+    test('encrypted file but no key at all: keyUnavailable (retry only, no '
+        'reset), never opened', () async {
       File(target()).writeAsBytesSync(randomBytes(4096));
       final h = helper();
       await expectLater(h.openFor(uid), throwsA(isA<DbOpenException>()));
-      expect((h.state as DbFailed).error, DbOpenError.keyMismatch);
+      expect((h.state as DbFailed).error, DbOpenError.keyUnavailable);
+      expect((h.state as DbFailed).canReset, isFalse);
       expect(opener.calls, isEmpty);
       // No key was generated for a file it could never open.
       expect(keys.values, isEmpty);
@@ -173,6 +182,7 @@ void main() {
   group('unsynced counter (outside the database)', () {
     Future<DatabaseHelper> mismatched() async {
       File(target()).writeAsBytesSync(randomBytes(4096));
+      writeKcvFor('e' * 64);
       keys.values[DatabaseHelper.keyNameFor(uid)] = 'c' * 64;
       opener.error = Exception('file is not a database');
       final h = helper();
@@ -231,6 +241,7 @@ void main() {
   group('resetAndResync gating', () {
     Future<DatabaseHelper> mismatched() async {
       File(target()).writeAsBytesSync(randomBytes(4096));
+      writeKcvFor('e' * 64);
       keys.values[DatabaseHelper.keyNameFor(uid)] = 'c' * 64;
       opener.error = Exception('file is not a database');
       final h = helper();
@@ -303,7 +314,8 @@ void main() {
       expect(files(), isEmpty);
     });
 
-    test('undecryptable legacy file: keyMismatch, legacy byte-identical, no '
+    test('undecryptable legacy file: legacyUnreadable (no reset), legacy '
+        'byte-identical, no '
         'temp files left, fallback only tried on a copy', () async {
       final bytes = randomBytes(8192);
       File(legacy()).writeAsBytesSync(bytes);
@@ -314,7 +326,8 @@ void main() {
 
       await expectLater(h.claimLegacyDb(uid), throwsA(isA<DbOpenException>()));
 
-      expect((h.state as DbFailed).error, DbOpenError.keyMismatch);
+      expect((h.state as DbFailed).error, DbOpenError.legacyUnreadable);
+      expect((h.state as DbFailed).canReset, isFalse);
       expect(File(legacy()).readAsBytesSync(), bytes);
       expect(files(), [DatabaseHelper.legacyDbFileName]);
       expect(await h.hasLegacyDb(), isTrue);
