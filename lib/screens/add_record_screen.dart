@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
@@ -7,11 +8,14 @@ import 'package:flutter_typeahead/flutter_typeahead.dart';
 import '../models/patient.dart';
 import '../providers/patient_provider.dart';
 import '../providers/medicine_provider.dart';
+import '../utils/attachment_processor.dart';
 
 class AddRecordScreen extends StatefulWidget {
   final String patientId;
   final VisitRecord? existingRecord;
-  const AddRecordScreen({super.key, required this.patientId, this.existingRecord});
+  /// Converts picked photos to JPEG files. Injectable for tests.
+  final AttachmentProcessor? attachmentProcessor;
+  const AddRecordScreen({super.key, required this.patientId, this.existingRecord, this.attachmentProcessor});
 
   @override
   State<AddRecordScreen> createState() => _AddRecordScreenState();
@@ -32,6 +36,13 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   late String _selectedVisitType;
   late List<String> _attachmentPaths;
   final ImagePicker _picker = ImagePicker();
+  late final AttachmentProcessor _processor = widget.attachmentProcessor ?? AttachmentProcessor();
+  /// JPEGs created on this screen that are not saved yet; deleted if the
+  /// doctor removes them or leaves without saving.
+  final Set<String> _newAttachmentPaths = {};
+  int _processingPhotos = 0;
+  bool _picking = false;
+  bool _saved = false;
   bool _isSaving = false;
 
   @override
@@ -49,6 +60,94 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
     _selectedDate = r?.date ?? DateTime.now();
     _selectedVisitType = r?.visitType ?? 'Initial Visit';
     _attachmentPaths = List.from(r?.attachmentPaths ?? []);
+  }
+
+  @override
+  void dispose() {
+    if (!_saved) {
+      for (final path in _newAttachmentPaths) {
+        _deleteQuietly(path);
+      }
+    }
+    super.dispose();
+  }
+
+  static void _deleteQuietly(String path) {
+    File(path).delete().catchError((_) => File(path));
+  }
+
+  void _showMessage(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(text), behavior: SnackBarBehavior.floating));
+  }
+
+  static String _pickerErrorMessage(PlatformException e, ImageSource source) {
+    switch (e.code) {
+      case 'camera_access_denied':
+        return 'Camera access is off for DOCEase. Turn it on in Settings to take photos.';
+      case 'photo_access_denied':
+        return 'Photo access is off for DOCEase. Turn it on in Settings to add photos.';
+      case 'no_available_camera':
+        return 'No camera is available on this device.';
+      default:
+        return source == ImageSource.camera
+            ? "Couldn't open the camera. Please try again."
+            : "Couldn't open your photos. Please try again.";
+    }
+  }
+
+  /// Picks photos, re-encodes each to a .jpg file and adds it to the visit.
+  /// Anything that can't be converted is not attached; the doctor is told.
+  Future<void> _addPhotos(ImageSource source) async {
+    if (_picking) return;
+    _picking = true;
+    List<XFile> picked;
+    try {
+      if (source == ImageSource.camera) {
+        final shot = await _picker.pickImage(source: ImageSource.camera, maxWidth: 2048, maxHeight: 2048);
+        picked = shot == null ? const [] : [shot];
+      } else {
+        picked = await _picker.pickMultiImage(maxWidth: 2048, maxHeight: 2048);
+      }
+    } on PlatformException catch (e) {
+      _showMessage(_pickerErrorMessage(e, source));
+      return;
+    } finally {
+      _picking = false;
+    }
+    if (picked.isEmpty || !mounted) return;
+
+    setState(() => _processingPhotos += picked.length);
+    final failures = <String>[];
+    for (final file in picked) {
+      try {
+        final path = await _processor.toJpegFile(file);
+        if (!mounted) {
+          _deleteQuietly(path);
+          continue;
+        }
+        setState(() {
+          _attachmentPaths.add(path);
+          _newAttachmentPaths.add(path);
+        });
+      } on AttachmentException catch (e) {
+        failures.add(e.message);
+      } catch (_) {
+        failures.add(const AttachmentException(AttachmentError.unreadable).message);
+      } finally {
+        if (mounted) setState(() => _processingPhotos--);
+      }
+    }
+    if (failures.isNotEmpty) {
+      _showMessage(picked.length == 1 ? failures.first : '${failures.length} of ${picked.length} photos weren\'t added. ${failures.first}');
+    }
+  }
+
+  void _removeAttachment(String path) {
+    setState(() => _attachmentPaths.remove(path));
+    if (_newAttachmentPaths.remove(path)) _deleteQuietly(path);
   }
 
   void _repeatLastVisit() {
@@ -70,6 +169,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   }
 
   Future<void> _saveRecord() async {
+    if (_processingPhotos > 0) return;
     if (_formKey.currentState!.validate()) {
       setState(() => _isSaving = true);
       
@@ -90,6 +190,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
       if (widget.existingRecord == null) await provider.addRecord(widget.patientId, record);
       else await provider.updateRecord(widget.patientId, record);
       
+      _saved = true;
       if (mounted) Navigator.pop(context);
     }
   }
@@ -132,8 +233,10 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
             _buildSmartPrescriptionField(medProvider),
             const SizedBox(height: 12),
             _buildDosageTemplates(medProvider),
+            const SizedBox(height: 32),
+            _buildAttachmentsSection(),
             const SizedBox(height: 48),
-            _isSaving ? const Center(child: CircularProgressIndicator()) : ElevatedButton(onPressed: _saveRecord, style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF1E293B), minimumSize: const Size(double.infinity, 64), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24))), child: const Text('Save Clinical Record', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18))),
+            _isSaving ? const Center(child: CircularProgressIndicator()) : ElevatedButton(onPressed: _processingPhotos > 0 ? null : _saveRecord, style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF1E293B), minimumSize: const Size(double.infinity, 64), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24))), child: const Text('Save Clinical Record', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18))),
             const SizedBox(height: 40),
           ]),
         ),
@@ -249,12 +352,36 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
     );
   }
 
+  Widget _buildAttachmentsSection() {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      _buildLabel('Attachments'),
+      Row(children: [
+        _buildIconButton(Icons.photo_camera_outlined, 'Camera', () => _addPhotos(ImageSource.camera)),
+        const SizedBox(width: 12),
+        _buildIconButton(Icons.photo_library_outlined, 'Gallery', () => _addPhotos(ImageSource.gallery)),
+      ]),
+      if (_processingPhotos > 0)
+        const Padding(
+          padding: EdgeInsets.only(top: 12, left: 4),
+          child: Row(children: [
+            SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+            SizedBox(width: 10),
+            Text('Preparing photo...', style: TextStyle(color: Color(0xFF64748B), fontWeight: FontWeight.w600)),
+          ]),
+        ),
+      if (_attachmentPaths.isNotEmpty) ...[
+        const SizedBox(height: 16),
+        SizedBox(height: 120, child: ListView(scrollDirection: Axis.horizontal, children: _attachmentPaths.map(_buildThumbnail).toList())),
+      ],
+    ]);
+  }
+
   Widget _buildIconButton(IconData icon, String label, VoidCallback onTap) {
     return Expanded(child: GestureDetector(onTap: onTap, child: Container(padding: const EdgeInsets.symmetric(vertical: 16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), border: Border.all(color: const Color(0xFFE2E8F0))), child: Column(children: [Icon(icon, color: const Color(0xFF6366F1)), const SizedBox(height: 4), Text(label, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12))]))));
   }
 
   Widget _buildThumbnail(String path) {
     final isNetwork = path.startsWith('http');
-    return Padding(padding: const EdgeInsets.only(right: 12), child: Stack(children: [ClipRRect(borderRadius: BorderRadius.circular(16), child: isNetwork ? Image.network(path, width: 100, height: 120, fit: BoxFit.cover) : Image.file(File(path), width: 100, height: 120, fit: BoxFit.cover)), Positioned(right: 4, top: 4, child: GestureDetector(onTap: () => setState(() => _attachmentPaths.remove(path)), child: const CircleAvatar(radius: 12, backgroundColor: Colors.redAccent, child: Icon(Icons.close, size: 14, color: Colors.white))))]));
+    return Padding(padding: const EdgeInsets.only(right: 12), child: Stack(children: [ClipRRect(borderRadius: BorderRadius.circular(16), child: isNetwork ? Image.network(path, width: 100, height: 120, fit: BoxFit.cover) : Image.file(File(path), width: 100, height: 120, fit: BoxFit.cover)), Positioned(right: 4, top: 4, child: GestureDetector(onTap: () => _removeAttachment(path), child: const CircleAvatar(radius: 12, backgroundColor: Colors.redAccent, child: Icon(Icons.close, size: 14, color: Colors.white))))]));
   }
 }
