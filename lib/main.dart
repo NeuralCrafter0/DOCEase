@@ -11,6 +11,7 @@ import 'providers/medicine_provider.dart';
 import 'providers/database_helper.dart';
 import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
+import 'widgets/db_gate.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -32,6 +33,7 @@ void main() async {
         ChangeNotifierProvider(create: (ctx) => PatientProvider()),
         ChangeNotifierProvider(create: (ctx) => DoctorProvider()),
         ChangeNotifierProvider(create: (ctx) => MedicineProvider()),
+        Provider<LocalDatabase>.value(value: DatabaseHelper.instance),
       ],
       child: DOCEaseApp(ready: firebaseReady),
     ),
@@ -149,7 +151,9 @@ class _SecurityWrapperState extends State<SecurityWrapper> with WidgetsBindingOb
       stream: FirebaseAuth.instance.authStateChanges(),
       builder: (ctx, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) return const Scaffold(body: Center(child: CircularProgressIndicator()));
-        if (snapshot.hasData) return const HomeScreen();
+        // Built only after unlock, so the doctor's database opens after it.
+        final user = snapshot.data;
+        if (user != null) return DbGate(key: ValueKey(user.uid), uid: user.uid, child: const HomeScreen());
         return const LoginScreen();
       },
     );
