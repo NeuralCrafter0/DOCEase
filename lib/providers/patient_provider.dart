@@ -1,3 +1,4 @@
+import 'dart:math' show min;
 import 'package:flutter/foundation.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
@@ -131,10 +132,26 @@ class PatientProvider with ChangeNotifier {
   }
 
   Future<void> deletePatient(String id) async {
+    final index = _patients.indexWhere((p) => p.id == id);
+    final removed = index == -1 ? null : _patients[index];
     _patients.removeWhere((p) => p.id == id);
     notifyListeners();
-    await _db.deletePatient(id);
-    await _firestore.deletePatient(id);
+    void restore() {
+      if (removed != null) {
+        _patients.insert(min(index, _patients.length), removed);
+        notifyListeners();
+      }
+    }
+
+    // Tombstone first, so a failed cloud delete is retried, never undone.
+    // Refused (nothing recorded locally): restore, and don't touch the cloud.
+    try {
+      await _db.markPendingDelete(id);
+    } catch (_) {
+      restore();
+      rethrow;
+    }
+    if (await _firestore.deletePatient(id)) await _db.clearPendingDelete(id);
   }
 
   Future<void> addRecord(String patientId, VisitRecord record) async {
@@ -218,4 +235,8 @@ class PatientProvider with ChangeNotifier {
   }
 
   Patient findById(String id) => _patients.firstWhere((p) => p.id == id);
+
+  /// Runs one background sync now (tests only; no Firebase sign-in check).
+  @visibleForTesting
+  Future<void> syncNowForTesting() => _performBackgroundSync();
 }

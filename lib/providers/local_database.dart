@@ -1,3 +1,8 @@
+import 'dart:io' show FileSystemException, OSError;
+
+import 'package:flutter/services.dart' show PlatformException;
+import 'package:sqflite_sqlcipher/sqlite_api.dart' show DatabaseException;
+
 import '../models/patient.dart';
 
 // ---------------------------------------------------------------------------
@@ -23,24 +28,36 @@ enum DbMigrationStep {
 /// [LocalDatabase.openFor] / [LocalDatabase.claimLegacyDb]; only
 /// [keyMismatch] may offer [LocalDatabase.resetAndResync].
 enum DbOpenError {
-  /// Secure storage threw while reading or writing the key. Retry only; never
-  /// offer a reset (the key, and therefore the data, is probably fine).
+  /// Secure storage threw while reading or writing the key, returned a
+  /// value that is not a well-formed key (exactly 64 hex chars), or has no
+  /// key although the doctor's encrypted database exists. Retry only; never
+  /// offer a reset (the key, and therefore the data, may well be fine).
   keyUnavailable,
 
-  /// A database file exists but no available key decrypts it. This is the
-  /// only error that offers [LocalDatabase.resetAndResync].
+  /// The stored key provably does not belong to the database file: the
+  /// file's key-check value (HMAC-SHA256 of `docease-keycheck:<uid>` under
+  /// the key, in the `.kcv` sidecar) does not match the stored key. This is
+  /// the only error that offers [LocalDatabase.resetAndResync].
   keyMismatch,
 
-  /// A recovery migration or schema upgrade failed (or an unclassified open
-  /// error occurred). The original file is untouched; safe to retry.
+  /// A recovery migration or schema upgrade failed, or the database could
+  /// not be opened for a reason that is not provably a wrong key: a lock,
+  /// an I/O error, corruption (key-check value matches) or no key-check
+  /// value to compare (files from earlier builds; it is written on the next
+  /// successful open). The original file is untouched; safe to retry.
   migrationFailed,
+
+  /// The legacy (pre-per-doctor) database could not be decrypted with any
+  /// legacy key. Never offers a reset: a reset would not touch the legacy
+  /// file. It stays where it is; the doctor's own database is unaffected.
+  legacyUnreadable,
 
   /// The device ran out of space. The original file is untouched.
   storageFull,
 }
 
 /// Lifecycle of the doctor-scoped database. Every state except [DbClosed]
-/// carries the Firebase uid it refers to, so a listener can ignore events
+/// carries the owner id (uid) it refers to, so a listener can ignore events
 /// for a doctor who is no longer current.
 sealed class DbOpenState {
   const DbOpenState(this.uid);
@@ -83,8 +100,11 @@ final class DbFailed extends DbOpenState {
   const DbFailed(String super.uid, this.error, [this.cause]);
   final DbOpenError error;
 
-  /// Underlying exception, for logging only (never show it to the user).
-  final Object? cause;
+  /// Sanitized error code for logs, e.g. `sqlite:26` or `fs:28`: the
+  /// exception type plus a numeric result code, never the raw exception or
+  /// its message (sqflite messages include SQL arguments, which can contain
+  /// the database key). See [describeDbError].
+  final String? cause;
 
   /// Only a key mismatch may offer a destructive reset. The file cannot be
   /// read in this state; [LocalDatabase.unsyncedCount] then comes from a
@@ -95,13 +115,52 @@ final class DbFailed extends DbOpenState {
 }
 
 class DbOpenException implements Exception {
-  DbOpenException(this.error, {this.uid, this.cause});
+  /// [cause] is reduced to a sanitized code ([describeDbError]) here; the
+  /// raw exception is never kept.
+  DbOpenException(this.error, {this.uid, Object? cause})
+      : cause = describeDbError(cause);
   final DbOpenError error;
   final String? uid;
-  final Object? cause;
+
+  /// Sanitized error code, never raw exception text. See [DbFailed.cause].
+  final String? cause;
   @override
-  String toString() =>
-      'DbOpenException(${error.name}, uid: $uid, cause: ${cause.runtimeType})';
+  String toString() => 'DbOpenException(${error.name}, uid: $uid, '
+      'cause: $cause)';
+}
+
+/// The only strings [describeDbError] passes through: the codes it emits
+/// itself (so an already-sanitized cause survives re-wrapping). Short and
+/// narrow on purpose: a 64-hex key, or any free text, never matches.
+final RegExp _ownCode = RegExp(r'^(?:(?:sqlite|fs|os):(?:-?\d{1,6}|unknown)'
+    r'|platform(?::[a-z_]{1,32})?'
+    r'|_?[A-Z][A-Za-z0-9]{0,40}'
+    r'|[a-z][A-Za-z]{0,24})$');
+
+/// Plugin error codes (`PlatformException.code`) kept in a cause.
+final RegExp _platformCode = RegExp(r'^[a-z_]{1,32}$');
+
+/// A log-safe description of [e]: its kind plus a numeric result code, and
+/// never its message. sqflite's `DatabaseException.toString()` includes the
+/// SQL and its arguments, which can contain the database key.
+String? describeDbError(Object? e) {
+  if (e == null) return null;
+  if (e is String) return _ownCode.hasMatch(e) ? e : 'String';
+  if (e is DbOpenException) return e.cause ?? e.error.name;
+  if (e is DatabaseException) {
+    int? code;
+    try {
+      code = e.getResultCode();
+    } catch (_) {}
+    return 'sqlite:${code ?? 'unknown'}';
+  }
+  if (e is FileSystemException) return 'fs:${e.osError?.errorCode ?? 'unknown'}';
+  if (e is OSError) return 'os:${e.errorCode}';
+  if (e is PlatformException) {
+    return _platformCode.hasMatch(e.code) ? 'platform:${e.code}' : 'platform';
+  }
+  final type = e.runtimeType.toString();
+  return _ownCode.hasMatch(type) ? type : 'error';
 }
 
 /// How many local patient changes Firestore has not confirmed yet.
@@ -170,17 +229,22 @@ class ResetNotConfirmedException implements Exception {
 /// incremented nor cleared to "unknown" (secure storage failing). Saving
 /// anyway could let a later reset under-report what would be lost.
 class UnsyncedCounterException implements Exception {
-  const UnsyncedCounterException(this.uid, [this.cause]);
+  UnsyncedCounterException(this.uid, [Object? cause])
+      : cause = describeDbError(cause);
   final String uid;
-  final Object? cause;
+
+  /// Sanitized error code ([describeDbError]).
+  final String? cause;
   @override
-  String toString() =>
-      'UnsyncedCounterException($uid, cause: ${cause.runtimeType})';
+  String toString() => 'UnsyncedCounterException($uid, cause: $cause)';
 }
 
 /// Row-level sync marker stored in `patients.sync_state`.
 abstract final class SyncState {
+  /// Local change not yet confirmed by Firestore.
   static const dirty = 'dirty';
+
+  /// Matches what Firestore last confirmed.
   static const synced = 'synced';
 }
 
@@ -198,6 +262,10 @@ abstract class LocalDatabase {
   /// The current state.
   DbOpenState get state;
 
+  /// The uid whose database is open and ready, or null. Sync code should
+  /// check this equals the active account/profile id before reading, merging or writing.
+  String? get openUid;
+
   /// Opens (creating if needed) the database for [uid] with that doctor's own
   /// key, closing any other doctor's database first. Fails closed: if the key
   /// is unavailable nothing is opened or created. Also the retry path after
@@ -213,9 +281,11 @@ abstract class LocalDatabase {
   /// secure storage, or [UnsyncedCount.unknown]. Never throws.
   Future<UnsyncedCount> unsyncedCount();
 
-  /// Only valid in `DbFailed(keyMismatch)`: discards the current doctor's
-  /// undecryptable database, starts a fresh one under a new key, then runs
-  /// [resync] (for example a Firestore pull). [acknowledgedUnsynced] is the
+  /// Only valid in `DbFailed(keyMismatch)`: moves the current doctor's
+  /// undecryptable database aside (renamed to `<file>.undecryptable-<ms>`,
+  /// never deleted, with its old key kept under a separate secure-storage
+  /// name), starts a fresh one under a new key, then runs [resync] (for
+  /// example a Firestore pull). [acknowledgedUnsynced] is the
   /// count the user was shown and accepted; if the current count is worse,
   /// throws [ResetNotConfirmedException] and deletes nothing. Throws
   /// [StateError] in any other state.
@@ -244,13 +314,27 @@ abstract class LocalDatabase {
   /// ([Patient.hasParseErrors]) with their original data kept.
   Future<List<Patient>> fetchPatients();
 
-  /// Inserts or replaces [patient]: dirty for local edits, synced when
-  /// [fromCloud]. Returns the row's new `updated_at` (pass it to
-  /// [markSynced] once Firestore confirms), or `null` if nothing was written
-  /// (including patients with parse errors). Throws
-  /// [UnsyncedCounterException] (nothing written) if the unsynced counter
-  /// cannot be kept from under-reporting.
+  /// Inserts or replaces [patient] as a local edit (dirty). Returns the
+  /// row's new `updated_at` (pass it to [markSynced] once Firestore
+  /// confirms), or `null` if nothing was written (including patients with
+  /// parse errors). Throws [UnsyncedCounterException] (nothing written) if
+  /// the unsynced counter cannot be kept from under-reporting.
+  ///
+  /// With [fromCloud] this behaves exactly like [applyCloudPatient] (it
+  /// never overwrites a dirty or deleted row) and returns the new
+  /// `updated_at`, or `null` if the cloud copy was not applied.
   Future<String?> insertPatient(Patient patient, {bool fromCloud = false});
+
+  /// Applies a copy that just came from Firestore, as synced, only if the
+  /// local row is missing or clean and the id has no delete tombstone. One
+  /// conditional statement (insert guarded by NOT EXISTS on
+  /// `pending_deletes`, update only when the local row is synced): for a
+  /// dirty row or a tombstoned id it returns false and writes nothing, so
+  /// unsynced local edits are never overwritten or counted as synced and a
+  /// pending delete is never undone. False (a skip, not an error) also for
+  /// a cloud copy that failed to parse. Throws if no database is open or
+  /// the write fails.
+  Future<bool> applyCloudPatient(Patient patient);
 
   /// Updates [patient] and marks it dirty. Returns the new `updated_at` or
   /// null. Throws [UnsyncedCounterException] like [insertPatient].
@@ -266,5 +350,22 @@ abstract class LocalDatabase {
   /// if it was edited while the write was in flight.
   Future<bool> markSynced(String patientId, String syncedUpdatedAt);
 
+  /// In one transaction, deletes row [id] and inserts a tombstone in
+  /// `pending_deletes` (patient_id, deleted_at). The tombstone counts toward
+  /// the unsynced counter (a dirty row it replaces was already counted)
+  /// until [clearPendingDelete]. Throws if refused, with nothing written:
+  /// [DbOpenException] (no database open), [UnsyncedCounterException] or
+  /// the database error.
+  Future<void> markPendingDelete(String id);
+
+  /// Same as [markPendingDelete]; kept for existing callers.
   Future<void> deletePatient(String id);
+
+  /// Ids with a delete tombstone, oldest first.
+  Future<List<String>> pendingDeletes();
+
+  /// Call only after Firestore confirmed deleting [id]: removes its
+  /// tombstone and decrements the unsynced counter. A no-op if there is
+  /// none (never double-decrements). Throws on database errors.
+  Future<void> clearPendingDelete(String id);
 }

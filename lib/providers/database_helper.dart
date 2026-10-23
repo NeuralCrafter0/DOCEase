@@ -3,7 +3,9 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:crypto/crypto.dart' show Hmac, sha256;
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show MethodChannel, PlatformException;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite_sqlcipher/sqflite.dart' as sqlcipher;
@@ -33,33 +35,90 @@ abstract class DbKeyStore {
 }
 
 class SecureStorageKeyStore implements DbKeyStore {
-  // Same (default) options as the previous implementation so the existing
-  // legacy key stays readable; changing options can hide it.
-  const SecureStorageKeyStore([this._storage = const FlutterSecureStorage()]);
+  const SecureStorageKeyStore({
+    FlutterSecureStorage storage = defaultStorage,
+    FlutterSecureStorage previousAccessibilityStorage =
+        previousAccessibility,
+  })  : _storage = storage,
+        _previous = previousAccessibilityStorage;
+
+  /// flutter_secure_storage 10 defaults `resetOnError` to true: on a decrypt
+  /// error it deletes the entry (or every entry) and returns null, turning a
+  /// transient Keystore failure into permanent key loss. Never reset; a
+  /// read error then throws and surfaces as [DbOpenError.keyUnavailable].
+  /// The shared-preferences name, key prefix and ciphers stay the defaults,
+  /// so existing entries (including the legacy key) remain readable.
+  static const AndroidOptions androidOptions =
+      AndroidOptions(resetOnError: false);
+
+  /// New entries are readable after first unlock and never leave this
+  /// device (no iCloud Keychain, no restore onto another device).
+  static const IOSOptions iosOptions = IOSOptions(
+      accessibility: KeychainAccessibility.first_unlock_this_device);
+
+  /// The iOS default accessibility used by earlier builds (and so by the
+  /// legacy key). The keychain read query matches on accessibility, so
+  /// entries written that way are only found by a query using it too.
+  static const IOSOptions previousIosOptions = IOSOptions.defaultOptions;
+
+  static const FlutterSecureStorage defaultStorage =
+      FlutterSecureStorage(aOptions: androidOptions, iOptions: iosOptions);
+  static const FlutterSecureStorage previousAccessibility = FlutterSecureStorage(
+      aOptions: androidOptions, iOptions: previousIosOptions);
+
   final FlutterSecureStorage _storage;
+  final FlutterSecureStorage _previous;
+
+  static bool get _isApple => Platform.isIOS || Platform.isMacOS;
 
   @override
-  Future<String?> read(String name) => _storage.read(key: name);
+  Future<String?> read(String name) async {
+    final value = await _storage.read(key: name);
+    if (value != null || !_isApple) return value;
+    // Written by an earlier build with the default accessibility.
+    return _previous.read(key: name);
+  }
+
   @override
-  Future<void> write(String name, String value) =>
-      _storage.write(key: name, value: value);
+  Future<void> write(String name, String value) async {
+    try {
+      await _storage.write(key: name, value: value);
+    } on PlatformException {
+      // An entry written with the previous accessibility has the same
+      // keychain identity, so adding one with the new accessibility fails
+      // as a duplicate. Replace it (the plugin's delete ignores
+      // accessibility); callers keep a copy of anything they overwrite.
+      if (!_isApple || await _previous.read(key: name) == null) rethrow;
+      await _storage.delete(key: name);
+      await _storage.write(key: name, value: value);
+    }
+  }
+
   @override
   Future<void> delete(String name) => _storage.delete(key: name);
 }
 
-/// Opens SQLCipher databases. Implementations MUST verify the key during
-/// [open] (throw if it does not decrypt the file). A `null` key means
-/// plaintext. Every call returns a fresh connection (no single-instance
-/// caching) that the caller must close.
+/// Opens SQLCipher databases. Every call returns a fresh connection (no
+/// single-instance caching) that the caller must close.
 abstract class CipherDatabaseOpener {
+  /// Opens an encrypted database with [key], which must not be empty (an
+  /// empty SQLCipher key silently creates a plaintext database).
+  /// Implementations MUST verify the key during open (throw if it does not
+  /// decrypt the file).
   Future<Database> open(
     String path, {
-    String? key,
+    required String key,
     int? version,
     OnDatabaseCreateFn? onCreate,
     OnDatabaseVersionChangeFn? onUpgrade,
     OnDatabaseVersionChangeFn? onDowngrade,
   });
+
+  /// Opens an unencrypted SQLite file. Only for the recovery migration's
+  /// work copy of a legacy plaintext database (and test fixtures); never
+  /// used for a live database.
+  Future<Database> openPlaintext(String path,
+      {int? version, OnDatabaseCreateFn? onCreate});
 }
 
 /// Production opener backed by sqflite_sqlcipher. Both the Android and iOS
@@ -69,21 +128,54 @@ class SqlCipherOpener implements CipherDatabaseOpener {
   @override
   Future<Database> open(
     String path, {
-    String? key,
+    required String key,
     int? version,
     OnDatabaseCreateFn? onCreate,
     OnDatabaseVersionChangeFn? onUpgrade,
     OnDatabaseVersionChangeFn? onDowngrade,
   }) {
+    if (key.isEmpty) {
+      throw ArgumentError('An empty key would open the file unencrypted.');
+    }
     return sqlcipher.openDatabase(
       path,
-      password: key ?? '',
+      password: key,
       version: version,
       onCreate: onCreate,
       onUpgrade: onUpgrade,
       onDowngrade: onDowngrade,
       singleInstance: false,
     );
+  }
+
+  @override
+  Future<Database> openPlaintext(String path,
+      {int? version, OnDatabaseCreateFn? onCreate}) {
+    return sqlcipher.openDatabase(path,
+        password: null,
+        version: version,
+        onCreate: onCreate,
+        singleInstance: false);
+  }
+}
+
+/// Keeps database files out of device backups. iOS: sets
+/// NSURLIsExcludedFromBackupKey through the `docease/backup_exclusion`
+/// channel (ios/Runner/AppDelegate.swift). Android backups are disabled in
+/// the manifest, so the production implementation does nothing there.
+abstract class BackupExcluder {
+  Future<void> exclude(String path);
+}
+
+class PlatformBackupExcluder implements BackupExcluder {
+  const PlatformBackupExcluder();
+  static const MethodChannel channel =
+      MethodChannel('docease/backup_exclusion');
+
+  @override
+  Future<void> exclude(String path) async {
+    if (!Platform.isIOS) return;
+    await channel.invokeMethod<void>('excludeFromBackup', {'path': path});
   }
 }
 
@@ -125,12 +217,14 @@ class DatabaseHelper implements LocalDatabase {
     DbKeyStore? keyStore,
     CipherDatabaseOpener? opener,
     Future<String> Function()? databasesPath,
+    BackupExcluder? backupExcluder,
     @visibleForTesting int schemaVersion = currentSchemaVersion,
     @visibleForTesting MigrationHook? migrationHook,
   })  : assert(schemaVersion >= 1 && schemaVersion <= currentSchemaVersion),
         _keys = keyStore ?? const SecureStorageKeyStore(),
         _opener = opener ?? const SqlCipherOpener(),
         _databasesPath = databasesPath ?? sqlcipher.getDatabasesPath,
+        _backup = backupExcluder ?? const PlatformBackupExcluder(),
         _schemaVersion = schemaVersion,
         _hook = migrationHook;
 
@@ -140,6 +234,7 @@ class DatabaseHelper implements LocalDatabase {
   final DbKeyStore _keys;
   final CipherDatabaseOpener _opener;
   final Future<String> Function() _databasesPath;
+  final BackupExcluder _backup;
   final int _schemaVersion;
   final MigrationHook? _hook;
 
@@ -163,14 +258,59 @@ class DatabaseHelper implements LocalDatabase {
   /// to open or create a live database.
   static const String _legacyFallbackKey = 'fallback_secure_key_123';
 
-  static String dbFileNameFor(String uid) => 'docease_$uid.db';
+  /// The file name is derived from a hash of the uid, so uids that differ
+  /// only in case never share a file on case-insensitive file systems
+  /// (APFS by default). Secure-storage names keep the uid itself.
+  static String dbFileNameFor(String uid) =>
+      'docease_${sha256.convert(utf8.encode(uid)).toString().substring(0, 32)}.db';
   static String keyNameFor(String uid) => 'db_key_$uid';
   static String unsyncedCounterKeyFor(String uid) => 'unsynced_count_$uid';
 
-  // Firebase uids are <=128 chars, alphanumeric in practice. Anything else is
-  // rejected so a uid can never escape the databases directory.
+  /// Key-check sidecar next to a database file: `v1:` + hex of
+  /// HMAC-SHA256(raw 32 key bytes, `docease-keycheck:<uid>`). Written
+  /// atomically whenever a key is bound to the file (creation, migration,
+  /// rekey, claim, reset) and after any successful open where it is missing
+  /// or stale. It proves whether the stored key belongs to the file, which
+  /// the open error cannot: sqflite_sqlcipher reports a wrong key, a lock,
+  /// CANTOPEN and many I/O errors alike as `open_failed <path>`. Never
+  /// logged. Not secret beyond the key itself (HMAC output reveals nothing
+  /// about a 256-bit random key).
+  static String kcvPathFor(String dbPath) => '$dbPath.kcv';
+
+  /// The KCV bytes for [key] (64 hex chars, decoded to its raw 32 bytes and
+  /// used as the HMAC key; never the hex string itself).
+  @visibleForTesting
+  static List<int> keyCheckBytes(String key, String uid) =>
+      Hmac(sha256, hexDecodeKey(key))
+          .convert(utf8.encode('docease-keycheck:$uid'))
+          .bytes;
+
+  static String _kcvText(String key, String uid) =>
+      'v1:${_toHex(keyCheckBytes(key, uid))}';
+
+  /// Where [resetAndResync] keeps the previous key of a file it moved aside.
+  static String quarantinedKeyNameFor(String uid, int stamp) =>
+      'db_key_${uid}_undecryptable_$stamp';
+
+  /// Suffix of a database file moved aside by [resetAndResync].
+  static String quarantineSuffix(int stamp) => '.undecryptable-$stamp';
+
+  // The uid is an opaque owner id (a Firebase uid today, possibly a local
+  // profile id later): any 1-128 chars of [A-Za-z0-9_-]. It is hashed into
+  // the file name; the check still rejects anything path-like outright.
   static final RegExp _uidPattern = RegExp(r'^[A-Za-z0-9_-]{1,128}$');
-  static final RegExp _hexKeyPattern = RegExp(r'^[0-9a-f]{64}$');
+
+  /// Every key this code creates or accepts: 32 bytes as 64 hex chars.
+  static final RegExp _hexKeyPattern = RegExp(r'^[0-9a-fA-F]{64}$');
+
+  /// The old unscoped key (`Uuid().v4()`), accepted only as a legacy source.
+  static final RegExp _legacyUuidPattern = RegExp(
+      r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-'
+      r'[0-9a-fA-F]{12}$');
+
+  /// Migration work files (and sidecars) of any doctor or the legacy file.
+  static final RegExp _tempFilePattern = RegExp(
+      r'^docease_[^/\\]+\.db(\.(migrating|encrypting)(-journal|-wal|-shm)?|\.kcv\.tmp)$');
   static const List<String> _sidecars = ['-journal', '-wal', '-shm'];
   static const String _sqliteHeader = 'SQLite format 3\u0000';
 
@@ -193,6 +333,9 @@ class DatabaseHelper implements LocalDatabase {
 
   /// The uid whose database is open (or being opened), if any.
   String? get currentUid => _uid;
+
+  @override
+  String? get openUid => (_db != null && _state is DbReady) ? _uid : null;
 
   @override
   Stream<DbOpenState> get states {
@@ -251,6 +394,7 @@ class DatabaseHelper implements LocalDatabase {
   Future<Database> openFor(String uid) {
     _checkUid(uid);
     return _track(_serial(() async {
+      await _sweepStrayTemps();
       if (_uid == uid && _db != null) return _db!;
       await _closeLocked();
       _uid = uid;
@@ -299,7 +443,7 @@ class DatabaseHelper implements LocalDatabase {
       rethrow;
     } catch (e) {
       final err = _classifyFatal(e, DbOpenError.migrationFailed);
-      _emit(DbFailed(uid, err, e));
+      _emit(DbFailed(uid, err, describeDbError(e)));
       throw DbOpenException(err, uid: uid, cause: e);
     }
   }
@@ -307,7 +451,6 @@ class DatabaseHelper implements LocalDatabase {
   Future<Database> _openScopedLocked(String uid) async {
     final path = await _pathFor(dbFileNameFor(uid));
     final keyName = keyNameFor(uid);
-    await _deleteStrayTemps(path);
 
     // Fail closed: if secure storage throws, nothing is opened or created.
     String? key = await _readKey(keyName, uid);
@@ -329,50 +472,99 @@ class DatabaseHelper implements LocalDatabase {
         targetKey: key,
         step: DbMigrationStep.encryptingPlaintext,
       );
+      await _writeKcv(path, key, uid);
       await _replaceFile(out!, path);
     }
 
     if (key == null) {
-      // An encrypted file and no key for it: nothing can decrypt it.
-      throw DbOpenException(DbOpenError.keyMismatch, uid: uid);
+      // An encrypted file but no stored key. keyMismatch (and its reset)
+      // needs a key that exists and provably does not fit; a missing entry
+      // may be storage trouble, so this is retry-only and never deletes.
+      throw DbOpenException(DbOpenError.keyUnavailable, uid: uid);
     }
     return _openMain(path, key, uid);
   }
 
   Future<Database> _openMain(String path, String key, String uid) async {
+    final Database db;
     try {
-      return await _opener.open(
+      db = await _opener.open(
         path,
-        key: key,
+        key: _requireKey(key),
         version: _schemaVersion,
         onCreate: _onCreate,
         onUpgrade: _onUpgrade,
         onDowngrade: _onDowngrade,
       );
     } catch (e) {
-      if (_isNotADatabase(e) && await _isReadable(path)) {
-        throw DbOpenException(DbOpenError.keyMismatch, uid: uid, cause: e);
-      }
-      throw DbOpenException(_classifyFatal(e, DbOpenError.migrationFailed),
+      throw DbOpenException(await _classifyOpenFailure(e, path, key, uid),
           uid: uid, cause: e);
     }
+    await _afterOpen(uid, path, key);
+    return db;
+  }
+
+  /// Why an existing file did not open with the doctor's (well-formed) key,
+  /// from evidence that holds on every platform (never the error text):
+  /// whether the file is readable, and the key-check sidecar. Only a KCV
+  /// that does not match the stored key is [DbOpenError.keyMismatch]. A
+  /// matching KCV (corruption or a lock), a missing or unreadable KCV
+  /// (ambiguous, e.g. a file from an earlier build) or an unreadable file
+  /// is retryable and never offers a reset.
+  Future<DbOpenError> _classifyOpenFailure(
+      Object e, String path, String key, String uid) async {
+    final fatal = _classifyFatal(e, DbOpenError.migrationFailed);
+    if (fatal != DbOpenError.migrationFailed) return fatal;
+    if (!await _isReadable(path)) return DbOpenError.migrationFailed;
+    return await _checkKcv(path, key, uid) == _Kcv.mismatch
+        ? DbOpenError.keyMismatch
+        : DbOpenError.migrationFailed;
   }
 
   Future<Database> _createFresh(String path, String key, String uid) async {
     try {
       await Directory(p.dirname(path)).create(recursive: true);
       await _deleteDbFiles(path); // only an empty/zero-byte file can be here
-      return await _opener.open(path,
-          key: key,
+      await _writeKcv(path, key, uid);
+      final db = await _opener.open(path,
+          key: _requireKey(key),
           version: _schemaVersion,
           onCreate: _onCreate,
           onUpgrade: _onUpgrade,
           onDowngrade: _onDowngrade);
+      if (await _isPlaintext(path)) {
+        await db.close();
+        throw StateError('Refusing a database that was created unencrypted.');
+      }
+      await _afterOpen(uid, path, key);
+      return db;
     } catch (e) {
-      // A brand-new file holds no user data: remove partial output.
-      await _deleteDbFiles(path);
+      // A brand-new file holds no user data: remove partial output, and
+      // its key-check value (it vouches for a file that does not exist).
+      await _shredDbFiles(path);
+      await _safeDelete(kcvPathFor(path));
       throw DbOpenException(_classifyFatal(e, DbOpenError.migrationFailed),
           uid: uid, cause: e);
+    }
+  }
+
+  /// After the doctor's database opened with its key: (re)write a missing
+  /// or stale key-check value, and keep the files out of device backups.
+  /// Neither failure blocks the open; both are retried on every open.
+  Future<void> _afterOpen(String uid, String path, String key) async {
+    if (await _checkKcv(path, key, uid) != _Kcv.match) {
+      try {
+        await _writeKcv(path, key, uid);
+      } catch (e) {
+        debugPrint('Key-check value not saved: ${_describe(e)}');
+      }
+    }
+    for (final target in [p.dirname(path), path, kcvPathFor(path)]) {
+      try {
+        await _backup.exclude(target);
+      } catch (e) {
+        debugPrint('Backup exclusion failed: ${_describe(e)}');
+      }
     }
   }
 
@@ -380,6 +572,7 @@ class DatabaseHelper implements LocalDatabase {
 
   @override
   Future<bool> hasLegacyDb() => _serial(() async {
+        await _sweepStrayTemps();
         final legacy = await _pathFor(legacyDbFileName);
         await _finishInterruptedClaim(legacy);
         return _hasData(legacy);
@@ -389,15 +582,17 @@ class DatabaseHelper implements LocalDatabase {
   /// now open), or false, changing nothing, if there was nothing to claim, so
   /// a repeated claim (or a claim by another doctor afterwards) is a no-op.
   ///
-  /// If `docease_{uid}.db` already exists it is replaced only when it holds
-  /// no patients; otherwise this throws [StateError] (merging two databases
-  /// is a product decision made elsewhere).
+  /// If the doctor's database already exists it is replaced only when it
+  /// holds no patients; otherwise the claim is skipped (returns false), the
+  /// doctor's database is opened as usual and the legacy file is left as it
+  /// is (merging two databases is a product decision made elsewhere).
   @override
   Future<bool> claimLegacyDb(String uid) {
     _checkUid(uid);
     return _serial(() async {
       final legacy = await _pathFor(legacyDbFileName);
       final target = await _pathFor(dbFileNameFor(uid));
+      await _sweepStrayTemps();
       await _finishInterruptedClaim(legacy);
       if (!await _hasData(legacy)) return false;
       await _closeLocked();
@@ -413,11 +608,12 @@ class DatabaseHelper implements LocalDatabase {
 
   Future<Database> _claimLocked(String uid, String legacy, String target,
       {required void Function() onTargetNotEmpty}) async {
-    await _deleteStrayTemps(target);
     final keyName = keyNameFor(uid);
     String? key = await _readKey(keyName, uid);
     if (await _hasData(target)) {
-      if (key == null) throw DbOpenException(DbOpenError.keyMismatch, uid: uid);
+      if (key == null) {
+        throw DbOpenException(DbOpenError.keyUnavailable, uid: uid);
+      }
       if (!await _isEmptyTarget(target, key, uid)) {
         // Never merge or overwrite: open the doctor's own DB as usual and
         // leave the legacy file exactly as it is.
@@ -431,7 +627,9 @@ class DatabaseHelper implements LocalDatabase {
     final out = await _convertLegacy(uid, legacy, target, key);
     final marker = await _pathFor(claimMarkerFileName);
     try {
-      // Commit: marker (with the new file's salt), then atomic rename.
+      // Commit: key-check value for the target key, marker (with the new
+      // file's salt), then atomic rename.
+      await _writeKcv(target, key, uid);
       final salt = await _headHex(out);
       await File(marker)
           .writeAsString(jsonEncode({'uid': uid, 'salt': salt}), flush: true);
@@ -463,20 +661,21 @@ class DatabaseHelper implements LocalDatabase {
     return db;
   }
 
-  /// Whether the existing target database has no patients.
+  /// Whether the existing target database has no patients and no pending
+  /// deletes.
   Future<bool> _isEmptyTarget(String target, String key, String uid) async {
     final Database db;
     try {
-      db = await _opener.open(target, key: key);
+      db = await _opener.open(target, key: _requireKey(key));
     } catch (e) {
-      if (_isNotADatabase(e)) {
-        throw DbOpenException(DbOpenError.keyMismatch, uid: uid, cause: e);
-      }
-      rethrow;
+      throw DbOpenException(await _classifyOpenFailure(e, target, key, uid),
+          uid: uid, cause: e);
     }
     try {
       final counts = await _rowCounts(db);
-      return (counts['patients'] ?? 0) == 0;
+      // A pending delete is an unsynced change too: never replace it.
+      return (counts['patients'] ?? 0) == 0 &&
+          (counts['pending_deletes'] ?? 0) == 0;
     } finally {
       await db.close();
     }
@@ -502,6 +701,10 @@ class DatabaseHelper implements LocalDatabase {
     } catch (e) {
       legacyKeyError = e;
     }
+    if (legacyKey != null && !_legacyUuidPattern.hasMatch(legacyKey)) {
+      debugPrint('Legacy key is not a UUID; not trying it.');
+      legacyKey = null;
+    }
     final candidates = <(String, DbMigrationStep)>[
       if (legacyKey != null) (legacyKey, DbMigrationStep.rekeyingFromLegacyKey),
       (_legacyFallbackKey, DbMigrationStep.rekeyingFromFallback),
@@ -523,7 +726,8 @@ class DatabaseHelper implements LocalDatabase {
       throw DbOpenException(DbOpenError.keyUnavailable,
           uid: uid, cause: legacyKeyError);
     }
-    throw DbOpenException(DbOpenError.keyMismatch, uid: uid);
+    // Never keyMismatch: a reset would not touch the legacy file.
+    throw DbOpenException(DbOpenError.legacyUnreadable, uid: uid);
   }
 
   /// Finishes or rolls back a claim that was interrupted between writing the
@@ -546,7 +750,7 @@ class DatabaseHelper implements LocalDatabase {
     }
     // Committed: the new file is in place, so finish removing the source.
     // Not committed: the legacy file is still the only copy; keep it.
-    if (committed) await _deleteDbFiles(legacy);
+    if (committed) await _shredDbFiles(legacy);
     await marker.delete();
   }
 
@@ -558,7 +762,9 @@ class DatabaseHelper implements LocalDatabase {
   /// count, user_version and quick_check. Returns the verified output path.
   /// The source file itself is never opened or modified.
   ///
-  /// With [probeOnly], a wrong [sourceKey] returns `null` instead of failing.
+  /// With [probeOnly], a [sourceKey] that does not open the copy returns
+  /// `null` instead of failing (the plugin reports a wrong key only as a
+  /// generic open failure, and the copy has no other user).
   Future<String?> _convertToEncrypted({
     required String uid,
     required String sourcePath,
@@ -568,13 +774,13 @@ class DatabaseHelper implements LocalDatabase {
     required DbMigrationStep step,
     bool probeOnly = false,
   }) async {
-    if (!_hexKeyPattern.hasMatch(targetKey) && !_isLegacyUuidKey(targetKey)) {
+    if (!_hexKeyPattern.hasMatch(targetKey)) {
       throw StateError('Refusing to migrate to a malformed key.');
     }
     final work = '$workBase.migrating';
     final exported = '$workBase.encrypting';
-    await _deleteDbFiles(work);
-    await _deleteDbFiles(exported);
+    await _shredDbFiles(work);
+    await _shredDbFiles(exported);
     _lastStep = step;
     Database? db;
     try {
@@ -587,10 +793,12 @@ class DatabaseHelper implements LocalDatabase {
       _emit(DbMigrating(uid, step, 0.15));
 
       try {
-        db = await _opener.open(work, key: sourceKey);
+        db = sourceKey == null
+            ? await _opener.openPlaintext(work)
+            : await _opener.open(work, key: _requireKey(sourceKey));
       } catch (e) {
-        if (probeOnly && _isNotADatabase(e)) {
-          await _deleteDbFiles(work);
+        if (probeOnly) {
+          await _shredDbFiles(work);
           return null;
         }
         rethrow;
@@ -600,21 +808,29 @@ class DatabaseHelper implements LocalDatabase {
       _emit(DbMigrating(uid, step, 0.3));
 
       final String out;
+      // These statements carry the key (as an argument or in the SQL), and
+      // sqflite exceptions print both: keep only a sanitized code.
+      try {
+        if (sourceKey == null) {
+          await db.execute(
+              'ATTACH DATABASE ? AS docease_enc KEY ?', [exported, targetKey]);
+          await db.rawQuery("SELECT sqlcipher_export('docease_enc')");
+          await db.rawQuery('PRAGMA docease_enc.user_version = $userVersion');
+          await db.execute('DETACH DATABASE docease_enc');
+        } else {
+          await db.rawQuery('PRAGMA journal_mode = DELETE');
+          await db.rawQuery("PRAGMA rekey = '${_sqlQuote(targetKey)}'");
+        }
+      } catch (e) {
+        throw DbOpenException(_classifyFatal(e, DbOpenError.migrationFailed),
+            uid: uid, cause: e);
+      }
+      await db.close();
+      db = null;
       if (sourceKey == null) {
-        await db.execute(
-            'ATTACH DATABASE ? AS docease_enc KEY ?', [exported, targetKey]);
-        await db.rawQuery("SELECT sqlcipher_export('docease_enc')");
-        await db.rawQuery('PRAGMA docease_enc.user_version = $userVersion');
-        await db.execute('DETACH DATABASE docease_enc');
-        await db.close();
-        db = null;
-        await _deleteDbFiles(work);
+        await _shredDbFiles(work);
         out = exported;
       } else {
-        await db.rawQuery('PRAGMA journal_mode = DELETE');
-        await db.rawQuery("PRAGMA rekey = '${_sqlQuote(targetKey)}'");
-        await db.close();
-        db = null;
         out = work;
       }
       await _runHook(MigrationCheckpoint.converted, out);
@@ -628,8 +844,8 @@ class DatabaseHelper implements LocalDatabase {
       try {
         await db?.close();
       } catch (_) {}
-      await _deleteDbFiles(work);
-      await _deleteDbFiles(exported);
+      await _shredDbFiles(work);
+      await _shredDbFiles(exported);
       if (e is DbOpenException) rethrow;
       throw DbOpenException(_classifyFatal(e, DbOpenError.migrationFailed),
           uid: uid, cause: e);
@@ -646,7 +862,7 @@ class DatabaseHelper implements LocalDatabase {
     if (await _isPlaintext(path)) {
       throw StateError('Migration output is not encrypted.');
     }
-    final db = await _opener.open(path, key: key);
+    final db = await _opener.open(path, key: _requireKey(key));
     try {
       final actual = await _rowCounts(db);
       if (!mapEquals(actual, expected)) {
@@ -696,8 +912,9 @@ class DatabaseHelper implements LocalDatabase {
 
   // --- reset ---------------------------------------------------------------
 
-  /// Discards the current doctor's undecryptable database, starts a fresh one
-  /// under a new key, then runs [resync] (for example a Firestore pull).
+  /// Moves the current doctor's undecryptable database aside (never deletes
+  /// it; its previous key is kept under [quarantinedKeyNameFor]), starts a
+  /// fresh one under a new key, then runs [resync] (e.g. a Firestore pull).
   ///
   /// Only allowed in `DbFailed(keyMismatch)`. [acknowledgedUnsynced] must be
   /// the [unsyncedCount] the user was warned about; if the current count is
@@ -710,6 +927,7 @@ class DatabaseHelper implements LocalDatabase {
     Future<void> Function()? resync,
   }) async {
     await _serial(() async {
+      await _sweepStrayTemps();
       final s = _state;
       if (s is! DbFailed || !s.canReset) {
         throw StateError('resetAndResync is only allowed after keyMismatch.');
@@ -721,9 +939,30 @@ class DatabaseHelper implements LocalDatabase {
       }
       await _track(_guard(uid, () async {
         final path = await _pathFor(dbFileNameFor(uid));
-        // New key first: if storage fails, nothing has been deleted yet.
-        final key = await _createKey(keyNameFor(uid), uid);
-        await _deleteDbFiles(path);
+        final keyName = keyNameFor(uid);
+        final stamp = DateTime.now().millisecondsSinceEpoch;
+        // Keys first: if storage fails, nothing has been moved yet.
+        final String? oldKey;
+        try {
+          oldKey = await _keys.read(keyName);
+          if (oldKey != null) {
+            await _keys.write(quarantinedKeyNameFor(uid, stamp), oldKey);
+          }
+        } catch (e) {
+          throw DbOpenException(DbOpenError.keyUnavailable, uid: uid, cause: e);
+        }
+        final key = await _createKey(keyName, uid);
+        try {
+          await _quarantine(path, quarantineSuffix(stamp));
+        } catch (e) {
+          // Nothing was moved: restore the old key so key and file match.
+          if (oldKey != null) {
+            try {
+              await _keys.write(keyName, oldKey);
+            } catch (_) {}
+          }
+          rethrow;
+        }
         return _createFresh(path, key, uid);
       }));
     });
@@ -760,6 +999,9 @@ class DatabaseHelper implements LocalDatabase {
           'patients', {'updated_at': DateTime.now().millisecondsSinceEpoch});
       await db.execute(
           'CREATE INDEX idx_patients_sync_state ON patients(sync_state)');
+      // Tombstones for deletes Firestore has not confirmed yet.
+      await db.execute('CREATE TABLE pending_deletes ('
+          'patient_id TEXT PRIMARY KEY, deleted_at INTEGER NOT NULL)');
     }
   }
 
@@ -784,37 +1026,82 @@ class DatabaseHelper implements LocalDatabase {
         'history': jsonEncode(patient.history.map((e) => e.toJson()).toList()),
       };
 
-  /// Inserts or replaces a patient. Local edits are marked dirty; pass
-  /// [fromCloud] for data that just came from Firestore. Returns the row's
-  /// write version (for [markSynced]), or `null` if nothing was written.
-  /// A patient with parse errors is never written (it would overwrite the
-  /// stored data with placeholders).
+  /// Inserts or replaces a patient as a local edit (dirty). Returns the
+  /// row's write version (for [markSynced]), or `null` if nothing was
+  /// written. A patient with parse errors is never written (it would
+  /// overwrite the stored data with placeholders). With [fromCloud] this is
+  /// [applyCloudPatient] and returns its write version, or `null` if the
+  /// cloud copy was not applied.
   @override
   Future<String?> insertPatient(Patient patient, {bool fromCloud = false}) {
     if (_refuseUnparsed(patient)) return Future.value(null);
+    if (fromCloud) {
+      return _applyCloud(patient)
+          .then((v) => v == null ? null : '$v', onError: (Object _) => null);
+    }
     return _rowSerial(() async {
       final (db, wasDirty) = await _prepareWrite(patient.id);
       if (db == null) return null;
-      final uid = _uid!;
       // Counter never under-reports: count a new dirty row before writing it
-      // (throws UnsyncedCounterException, refusing the save, if it can't)...
-      if (!fromCloud && !wasDirty) await _incrementCounter(uid, db);
+      // (throws UnsyncedCounterException, refusing the save, if it can't).
+      if (!wasDirty) await _incrementCounter(_uid!, db);
       try {
         final version = _nextVersion();
         await db.insert(
             'patients',
             {
               ..._row(patient),
-              'sync_state': fromCloud ? SyncState.synced : SyncState.dirty,
+              'sync_state': SyncState.dirty,
               'updated_at': version,
             },
             conflictAlgorithm: ConflictAlgorithm.replace);
-        // ...and uncount a cleaned row only after the write succeeded.
-        if (fromCloud && wasDirty) await _decrementCounter(uid, db);
         return '$version';
       } catch (e) {
         debugPrint('SQLITE insert error: ${_describe(e)}');
         return null;
+      }
+    });
+  }
+
+  /// False means skipped, not an error: the local row is dirty, the id has
+  /// a tombstone, or the cloud copy failed to parse. Throws if no database
+  /// is open or the write fails.
+  @override
+  Future<bool> applyCloudPatient(Patient patient) async =>
+      !_refuseUnparsed(patient) && await _applyCloud(patient) != null;
+
+  /// One statement, so nothing can change between the check and the write:
+  /// insert when the id has no row and no tombstone, update only a clean
+  /// (synced) row. A dirty row or a tombstone means no change at all, so
+  /// the unsynced counter is untouched. Returns the write version, or null
+  /// if skipped. Throws on database errors.
+  Future<int?> _applyCloud(Patient patient) {
+    return _rowSerial(() async {
+      final db = await database;
+      final version = _nextVersion();
+      final row = {
+        ..._row(patient),
+        'sync_state': SyncState.synced,
+        'updated_at': version,
+      };
+      final cols = row.keys.toList();
+      final updates = cols
+          .where((c) => c != 'id')
+          .map((c) => '$c = excluded.$c')
+          .join(', ');
+      try {
+        final n = await db.rawUpdate(
+            'INSERT INTO patients (${cols.join(', ')}) '
+            'SELECT ${List.filled(cols.length, '?').join(', ')} '
+            'WHERE NOT EXISTS '
+            '(SELECT 1 FROM pending_deletes WHERE patient_id = ?) '
+            'ON CONFLICT(id) DO UPDATE SET $updates '
+            'WHERE patients.sync_state = ?',
+            [...row.values, patient.id, SyncState.synced]);
+        return n > 0 ? version : null;
+      } catch (e) {
+        debugPrint('SQLITE cloud apply error: ${_describe(e)}');
+        rethrow;
       }
     });
   }
@@ -911,17 +1198,68 @@ class DatabaseHelper implements LocalDatabase {
     }
   }
 
+  /// Deletes row [id] and records a tombstone for it in one transaction.
+  /// The tombstone counts as one unsynced change (a dirty row it replaces
+  /// was already counted), is never undone by [applyCloudPatient], and
+  /// stays until [clearPendingDelete]. Throws if refused, with nothing
+  /// written: [DbOpenException] (no database open),
+  /// [UnsyncedCounterException] (counter cannot be kept honest) or the
+  /// database error.
   @override
-  Future<void> deletePatient(String id) {
+  Future<void> markPendingDelete(String id) {
     return _rowSerial(() async {
+      final db = await database;
+      final before = (await _isDirty(db, id) ? 1 : 0) +
+          (await _hasTombstone(db, id) ? 1 : 0);
+      if (before == 0) await _incrementCounter(_uid!, db);
       try {
-        final db = await database;
-        final wasDirty = await _isDirty(db, id);
-        final n = await db.delete('patients', where: 'id = ?', whereArgs: [id]);
-        if (wasDirty && n > 0) await _decrementCounter(_uid!, db);
+        await db.transaction((txn) async {
+          await txn.delete('patients', where: 'id = ?', whereArgs: [id]);
+          await txn.insert(
+              'pending_deletes',
+              {
+                'patient_id': id,
+                'deleted_at': DateTime.now().millisecondsSinceEpoch,
+              },
+              conflictAlgorithm: ConflictAlgorithm.replace);
+        });
       } catch (e) {
+        // The counter may now over-count by one: safe, reconciled on open.
         debugPrint('SQLITE delete error: ${_describe(e)}');
+        rethrow;
       }
+      // A dirty row and an older tombstone became one tombstone.
+      if (before == 2) await _decrementCounter(_uid!, db);
+    });
+  }
+
+  /// Same as [markPendingDelete] (kept for existing callers).
+  @override
+  Future<void> deletePatient(String id) => markPendingDelete(id);
+
+  @override
+  Future<List<String>> pendingDeletes() async {
+    try {
+      final db = await database;
+      final rows = await db.query('pending_deletes',
+          columns: ['patient_id'], orderBy: 'deleted_at ASC, patient_id ASC');
+      return [for (final r in rows) r['patient_id'] as String];
+    } catch (e) {
+      debugPrint('SQLITE pending deletes error: ${_describe(e)}');
+      return [];
+    }
+  }
+
+  /// Only after Firestore confirmed deleting [id]: removes the tombstone,
+  /// then decrements the counter. A no-op if there is none (a repeated
+  /// confirmation never double-decrements). Throws on database errors.
+  @override
+  Future<void> clearPendingDelete(String id) {
+    return _rowSerial(() async {
+      final db = await database;
+      final n = await db.delete('pending_deletes',
+          where: 'patient_id = ?', whereArgs: [id]);
+      if (n > 0) await _decrementCounter(_uid!, db);
     });
   }
 
@@ -1065,11 +1403,22 @@ class DatabaseHelper implements LocalDatabase {
     }
   }
 
+  /// Unsynced changes: dirty rows plus delete tombstones.
   Future<int> _countDirty(Database db) async {
     final r = await db.rawQuery(
-        'SELECT COUNT(*) AS c FROM patients WHERE sync_state != ?',
+        'SELECT (SELECT COUNT(*) FROM patients WHERE sync_state != ?) + '
+        '(SELECT COUNT(*) FROM pending_deletes) AS c',
         [SyncState.synced]);
     return r.first['c'] as int;
+  }
+
+  Future<bool> _hasTombstone(Database db, String id) async {
+    final r = await db.query('pending_deletes',
+        columns: ['patient_id'],
+        where: 'patient_id = ?',
+        whereArgs: [id],
+        limit: 1);
+    return r.isNotEmpty;
   }
 
   Future<bool> _isDirty(Database db, String id) async {
@@ -1089,13 +1438,95 @@ class DatabaseHelper implements LocalDatabase {
     return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 
+  /// The stored key, or null if there is none. Fails closed: a storage
+  /// error, or a value that is not exactly 64 hex chars (an empty key would
+  /// make SQLCipher create a plaintext file), is keyUnavailable, and the
+  /// entry is left as it is.
   Future<String?> _readKey(String name, String uid) async {
+    final String? value;
     try {
-      return await _keys.read(name);
+      value = await _keys.read(name);
     } catch (e) {
-      debugPrint('Secure storage read failed: ${e.runtimeType}');
+      debugPrint('Secure storage read failed: ${_describe(e)}');
       throw DbOpenException(DbOpenError.keyUnavailable, uid: uid, cause: e);
     }
+    if (value != null && !_hexKeyPattern.hasMatch(value)) {
+      debugPrint('Stored database key is malformed; refusing to use it.');
+      throw DbOpenException(DbOpenError.keyUnavailable, uid: uid);
+    }
+    return value;
+  }
+
+  /// Last line of defence before any keyed open: never an empty or
+  /// malformed key (legacy keys are only used on migration copies).
+  static String _requireKey(String key) {
+    if (!_hexKeyPattern.hasMatch(key) &&
+        !_legacyUuidPattern.hasMatch(key) &&
+        key != _legacyFallbackKey) {
+      throw StateError('Refusing to open with a malformed key.');
+    }
+    return key;
+  }
+
+  /// The raw 32 bytes of a 64-hex-char key.
+  @visibleForTesting
+  static Uint8List hexDecodeKey(String key) {
+    if (!_hexKeyPattern.hasMatch(key)) {
+      throw StateError('Not a 64-hex-char key.');
+    }
+    return Uint8List.fromList([
+      for (var i = 0; i < key.length; i += 2)
+        int.parse(key.substring(i, i + 2), radix: 16),
+    ]);
+  }
+
+  static String _toHex(List<int> bytes) =>
+      bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+  static final RegExp _kcvFormat = RegExp(r'^v1:([0-9a-f]{64})$');
+
+  /// Whether the key-check sidecar matches [key]. Missing, unreadable or
+  /// malformed sidecars are [_Kcv.missing] (ambiguous).
+  Future<_Kcv> _checkKcv(String path, String key, String uid) async {
+    final String stored;
+    try {
+      final f = File(kcvPathFor(path));
+      if (!await f.exists()) return _Kcv.missing;
+      stored = (await f.readAsString()).trim();
+    } catch (_) {
+      return _Kcv.missing;
+    }
+    final m = _kcvFormat.firstMatch(stored);
+    if (m == null) return _Kcv.missing;
+    final storedBytes = [
+      for (var i = 0; i < 64; i += 2)
+        int.parse(m.group(1)!.substring(i, i + 2), radix: 16),
+    ];
+    return constantTimeEquals(storedBytes, keyCheckBytes(key, uid))
+        ? _Kcv.match
+        : _Kcv.mismatch;
+  }
+
+  /// Atomically (temp file, flush, rename) binds [key] to the file at
+  /// [path]. Throws on failure.
+  Future<void> _writeKcv(String path, String key, String uid) async {
+    final target = kcvPathFor(path);
+    final tmp = '$target.tmp';
+    await Directory(p.dirname(path)).create(recursive: true);
+    await File(tmp).writeAsString(_kcvText(key, uid), flush: true);
+    await File(tmp).rename(target);
+  }
+
+  /// Length first, then XOR-accumulates over every byte (no early exit), so
+  /// the time taken does not depend on where the values differ.
+  @visibleForTesting
+  static bool constantTimeEquals(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    var diff = 0;
+    for (var i = 0; i < a.length; i++) {
+      diff |= a[i] ^ b[i];
+    }
+    return diff == 0;
   }
 
   /// Generates and persists a new key, reading it back before anything is
@@ -1114,15 +1545,11 @@ class DatabaseHelper implements LocalDatabase {
     }
   }
 
-  // Pre-v2 keys were UUID v4 strings; they remain valid passphrases.
-  static bool _isLegacyUuidKey(String k) =>
-      RegExp(r'^[0-9a-fA-F-]{36}$').hasMatch(k);
-
   // --- files & errors ------------------------------------------------------
 
   void _checkUid(String uid) {
     if (!_uidPattern.hasMatch(uid)) {
-      throw ArgumentError.value(uid, 'uid', 'Not a valid Firebase uid');
+      throw ArgumentError.value(uid, 'uid', 'Not a valid owner id (1-128 chars of A-Za-z0-9_-)');
     }
   }
 
@@ -1162,9 +1589,80 @@ class DatabaseHelper implements LocalDatabase {
     return head.length == 16 && String.fromCharCodes(head) == _sqliteHeader;
   }
 
-  Future<void> _deleteStrayTemps(String base) async {
-    await _deleteDbFiles('$base.migrating');
-    await _deleteDbFiles('$base.encrypting');
+  /// Removes migration work files left by a crash, for every doctor and the
+  /// legacy file (they can hold a plaintext copy of patient data).
+  Future<void> _sweepStrayTemps() async {
+    try {
+      final dir = Directory(await _databasesPath());
+      if (!await dir.exists()) return;
+      await for (final f in dir.list(followLinks: false)) {
+        if (f is File && _tempFilePattern.hasMatch(p.basename(f.path))) {
+          await _shred(f.path);
+        }
+      }
+    } catch (e) {
+      debugPrint('Temp file sweep failed: ${_describe(e)}');
+    }
+  }
+
+  /// Best effort: overwrite with zeros, then delete. On flash storage this
+  /// does not guarantee the old blocks are gone (wear levelling, APFS
+  /// copy-on-write); it removes the easy recovery path.
+  Future<void> _shred(String path) async {
+    final f = File(path);
+    try {
+      if (!await f.exists()) return;
+      var left = await f.length();
+      final raf = await f.open(mode: FileMode.append);
+      try {
+        await raf.setPosition(0);
+        final zeros = Uint8List(64 * 1024);
+        while (left > 0) {
+          final n = min(left, zeros.length);
+          await raf.writeFrom(zeros, 0, n);
+          left -= n;
+        }
+        await raf.flush();
+      } finally {
+        await raf.close();
+      }
+    } catch (e) {
+      debugPrint('Overwrite before delete failed: ${_describe(e)}');
+    }
+    await _safeDelete(path);
+  }
+
+  Future<void> _shredDbFiles(String path) async {
+    for (final s in ['', ..._sidecars]) {
+      await _shred('$path$s');
+    }
+  }
+
+  /// Renames the database, its sidecars and its key-check value to
+  /// `<name><suffix>...`. Sidecars first; if anything cannot be moved, what
+  /// was moved is moved back and the error is rethrown (nothing changed).
+  Future<void> _quarantine(String path, String suffix) async {
+    final moved = <(String, String)>[];
+    Future<void> move(String from, String to) async {
+      if (!await File(from).exists()) return;
+      await File(from).rename(to);
+      moved.add((from, to));
+    }
+
+    try {
+      for (final s in _sidecars) {
+        await move('$path$s', '$path$suffix$s');
+      }
+      await move(kcvPathFor(path), kcvPathFor('$path$suffix'));
+      await move(path, '$path$suffix');
+    } catch (e) {
+      for (final (from, to) in moved.reversed) {
+        try {
+          await File(to).rename(from);
+        } catch (_) {}
+      }
+      rethrow;
+    }
   }
 
   Future<void> _deleteDbFiles(String path) async {
@@ -1184,20 +1682,9 @@ class DatabaseHelper implements LocalDatabase {
 
   static String _sqlQuote(String s) => s.replaceAll("'", "''");
 
-  /// Error description without SQL arguments (which can contain patient data).
-  static String _describe(Object e) => e is DatabaseException
-      ? 'DatabaseException(code ${e.getResultCode()})'
-      : e.runtimeType.toString();
-
-  static bool _isNotADatabase(Object e) {
-    if (e is DatabaseException && e.getResultCode() == 26) return true;
-    final m = e.toString().toLowerCase();
-    // Android/FFI: "file is not a database (code 26)". iOS reports a failed
-    // key check only as a generic "open_failed".
-    return m.contains('not a database') ||
-        m.contains('sqlite_notadb') ||
-        m.contains('open_failed');
-  }
+  /// Sanitized description (kind + result code), never the message: sqflite
+  /// messages include SQL arguments, which can hold keys or patient data.
+  static String _describe(Object e) => describeDbError(e) ?? 'unknown';
 
   static DbOpenError _classifyFatal(Object e, DbOpenError otherwise) {
     if (e is DbOpenException) return e.error;
@@ -1220,3 +1707,5 @@ class DatabaseHelper implements LocalDatabase {
     return otherwise;
   }
 }
+
+enum _Kcv { match, mismatch, missing }

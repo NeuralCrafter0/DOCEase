@@ -21,7 +21,7 @@ class FirestoreHelper {
       debugPrint('FIREBASE: Sync Success for ${patient.id}');
       return true;
     } catch (e) { 
-      debugPrint('FIREBASE: Sync Error for ${patient.id}: $e'); 
+      debugPrint('FIREBASE: Sync Error for ${patient.id}: ${_code(e)}'); 
       return false;
     }
   }
@@ -33,7 +33,7 @@ class FirestoreHelper {
     try {
       await _db.collection('doctors').doc(user.uid).collection('patients').doc(patientId).delete();
       return true;
-    } catch (e) { debugPrint('FIREBASE: Delete error: $e'); return false; }
+    } catch (e) { debugPrint('FIREBASE: Delete error: ${_code(e)}'); return false; }
   }
 
   Future<List<Patient>> fetchAllPatients() async {
@@ -48,8 +48,12 @@ class FirestoreHelper {
       debugPrint('FIREBASE: Found ${snapshot.docs.length} patients in cloud.');
       return snapshot.docs.map((doc) => Patient.fromJson(doc.data(), docId: doc.id)).toList();
     } catch (e) { 
-      debugPrint('FIREBASE: Fetch error: $e'); 
+      debugPrint('FIREBASE: Fetch error: ${_code(e)}'); 
       return []; 
     }
   }
+
+  /// Error code only: Firestore messages can echo document contents.
+  static String _code(Object e) =>
+      e is FirebaseException ? 'firebase:${e.code}' : e.runtimeType.toString();
 }
