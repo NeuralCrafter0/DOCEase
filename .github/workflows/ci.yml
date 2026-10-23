@@ -1,6 +1,7 @@
 name: CI
 
-# Pipeline: gitleaks secret scan, flutter analyze, flutter test, Android build
+# Pipeline: gitleaks secret scan, flutter analyze, flutter test, Android build,
+# Firebase rules emulator tests (only when firebase/ exists)
 # (release-mode, obfuscated APK; release-signed only when signing secrets exist).
 # Android only for now. Flutter is pinned to the version in .metadata.
 
@@ -240,8 +241,91 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/upload-keystore.jks" android/key.properties
 
-  # Reserved: Firebase security rules tests (backend engineer).
-  # Planned shape: a `firebase-rules` job that installs the Firebase CLI,
-  # starts the Firestore/Storage emulators, and runs the tests for
-  # firestore.rules and storage.rules. It needs no secrets (emulators only)
-  # and should keep `permissions: contents: read`.
+
+  firebase-rules:
+    name: Firebase rules (emulator tests)
+    # Runs the backend's Firestore/Storage rules tests from firebase/ against the
+    # local emulators only. Skips (job passes) when firebase/ does not exist yet.
+    # No Firebase credentials or secrets: the demo- project ID cannot reach any
+    # real project (med-history-299a1 is never used here).
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      NODE_VERSION: "24.22.1" # @firebase/rules-unit-testing 6 needs Node >= 24.12
+      FIREBASE_TOOLS_VERSION: "15.34.1" # must match firebase/package-lock.json
+      EMULATOR_JAVA_VERSION: "21" # firebase-tools 15 emulators need Java 21+
+      FIREBASE_PROJECT_ID: demo-docease
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Detect firebase/ folder
+        id: detect
+        env:
+          RULES_HASH: ${{ hashFiles('firebase/firebase.json', 'firebase/package-lock.json') }}
+        run: |
+          if [ -n "$RULES_HASH" ] && [ -f firebase/firebase.json ] && [ -f firebase/package-lock.json ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "## Firebase rules: skipped (no firebase/ folder on this ref)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Guard against real projects and credentials
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          case "$FIREBASE_PROJECT_ID" in
+            demo-*) ;;
+            *) echo "::error::FIREBASE_PROJECT_ID must start with demo- (emulator only)"; exit 1 ;;
+          esac
+          if [ -f firebase/.firebaserc ] || [ -f .firebaserc ]; then
+            echo "::error::.firebaserc found; CI rules tests must not target a real project"; exit 1
+          fi
+
+      - name: Set up Java ${{ env.EMULATOR_JAVA_VERSION }} (emulators)
+        if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: ${{ env.EMULATOR_JAVA_VERSION }}
+
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: firebase/package-lock.json
+
+      - name: npm ci (lockfile enforced, no install scripts)
+        if: steps.detect.outputs.present == 'true'
+        working-directory: firebase
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Verify pinned firebase-tools version
+        if: steps.detect.outputs.present == 'true'
+        working-directory: firebase
+        run: |
+          installed="$(npx --no-install firebase --version)"
+          if [ "$installed" != "$FIREBASE_TOOLS_VERSION" ]; then
+            echo "::error::firebase-tools $installed is locked in firebase/package-lock.json but CI pins $FIREBASE_TOOLS_VERSION. Update FIREBASE_TOOLS_VERSION in ci.yml together with the lockfile."
+            exit 1
+          fi
+          echo "firebase-tools $installed, node $(node --version)"
+
+      - name: Cache emulator binaries
+        if: steps.detect.outputs.present == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/firebase/emulators
+          key: firebase-emulators-${{ runner.os }}-${{ env.FIREBASE_TOOLS_VERSION }}
+
+      - name: Run rules tests on the Firestore and Storage emulators
+        if: steps.detect.outputs.present == 'true'
+        working-directory: firebase
+        run: |
+          npx --no-install firebase emulators:exec --only firestore,storage \
+            --project "$FIREBASE_PROJECT_ID" "npm run test:run"
