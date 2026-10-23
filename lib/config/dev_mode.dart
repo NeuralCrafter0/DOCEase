@@ -31,7 +31,16 @@ const bool kDevModeRequested =
     bool.fromEnvironment('DOCEASE_DEV_MODE', defaultValue: false);
 
 /// Dev mode is only ever active outside release builds.
+///
+/// A compile-time constant: dev-only code sits directly under
+/// `if (kDevMode) { ... }` (or `kDevMode && ...`), so the AOT compiler drops
+/// it, and `buildDevModeApp`, the banner and the dev strings are not in a
+/// build without the define.
 const bool kDevMode = kDevModeRequested && !kReleaseMode;
+
+/// A release build made with the define: main() shows only the refusal
+/// screen.
+const bool kDevBuildRefused = kDevModeRequested && kReleaseMode;
 
 /// How the app starts for a given define and build mode.
 enum StartMode {
@@ -47,6 +56,9 @@ enum StartMode {
 
 /// Pure version of the startup decision, for tests:
 /// release + requested is refused, never silently normal or dev.
+/// main() makes the same decision with the constants directly
+/// (`if (kDevBuildRefused)`, `if (kDevMode)`) so the compiler can remove the
+/// branches a build cannot take.
 StartMode decideStartMode({required bool requested, required bool release}) {
   if (!requested) return StartMode.normal;
   return release ? StartMode.refused : StartMode.dev;
