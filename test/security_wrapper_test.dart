@@ -76,6 +76,18 @@ void expectLocked() {
   expect(find.byType(LoginScreen), findsNothing);
 }
 
+void background(WidgetTester t) {
+  t.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+  t.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+  t.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+}
+
+void foreground(WidgetTester t) {
+  t.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+  t.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+  t.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setupFirebaseCoreMocks();
@@ -178,5 +190,100 @@ void main() {
     await settle(t);
     expect(find.text(lockTitle), findsNothing);
     expect(protectedSubtreeBuilt(), isTrue);
+  });
+
+  group('re-lock', () {
+    Future<void> unlockAndOpenPatientScreen(WidgetTester t) async {
+      await pumpWrapper(t);
+      expect(find.text(lockTitle), findsNothing);
+      t.state<NavigatorState>(find.byType(Navigator)).push(MaterialPageRoute<void>(
+          builder: (_) => const Scaffold(body: Center(child: Text('PATIENT DATA')))));
+      await settle(t);
+      expect(find.text('PATIENT DATA'), findsOneWidget);
+    }
+
+    testWidgets('BIO-08 re-locks on every resume, covering pushed screens', (t) async {
+      await unlockAndOpenPatientScreen(t);
+      fake.result = false;
+      background(t);
+      await settle(t);
+      expect(find.text(lockTitle), findsOneWidget, reason: 'locked as soon as the app is backgrounded');
+      expect(find.text('PATIENT DATA'), findsNothing);
+      foreground(t);
+      await settle(t);
+      expect(fake.authCalls, 2, reason: 'prompted again immediately on resume');
+      expect(find.text(lockTitle), findsOneWidget);
+      expect(find.text('PATIENT DATA'), findsNothing);
+    });
+
+    testWidgets('unlocking again restores the screen the user was on', (t) async {
+      await unlockAndOpenPatientScreen(t);
+      background(t);
+      foreground(t);
+      await settle(t);
+      expect(fake.authCalls, 2);
+      expect(find.text(lockTitle), findsNothing);
+      expect(find.text('PATIENT DATA'), findsOneWidget);
+    });
+
+    testWidgets('the lock route cannot be dismissed with back', (t) async {
+      await unlockAndOpenPatientScreen(t);
+      fake.result = false;
+      background(t);
+      foreground(t);
+      await settle(t);
+      await t.binding.handlePopRoute();
+      await settle(t);
+      expect(find.text(lockTitle), findsOneWidget);
+      expect(find.text('PATIENT DATA'), findsNothing);
+    });
+
+    testWidgets('BIO-09 inactive -> resumed only (notification shade) does not re-lock', (t) async {
+      await unlockAndOpenPatientScreen(t);
+      t.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      t.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await settle(t);
+      expect(fake.authCalls, 1);
+      expect(find.text('PATIENT DATA'), findsOneWidget);
+    });
+
+    testWidgets('BIO-10 two quick resumes prompt only once', (t) async {
+      await unlockAndOpenPatientScreen(t);
+      fake.pending = Completer<bool>();
+      background(t);
+      foreground(t);
+      background(t);
+      foreground(t);
+      await settle(t);
+      expect(fake.authCalls, 2, reason: '1 initial + 1 for the re-lock');
+      fake.pending!.complete(true);
+      await settle(t);
+      expect(find.text('PATIENT DATA'), findsOneWidget);
+    });
+
+    testWidgets('backgrounding caused by the system PIN screen does not loop', (t) async {
+      fake.pending = Completer<bool>();
+      await pumpWrapper(t);
+      // Device-credential UI is a separate activity: the app pauses and resumes
+      // while authenticate() is still pending.
+      background(t);
+      foreground(t);
+      fake.pending!.complete(true);
+      await settle(t);
+      expect(fake.authCalls, 1);
+      expect(find.text(lockTitle), findsNothing);
+    });
+
+    testWidgets('"Set a screen lock" re-checks when the user comes back from settings', (t) async {
+      fake.deviceSupported = false;
+      await pumpWrapper(t);
+      expect(find.text('Set a screen lock to use DOCEase'), findsOneWidget);
+      fake.deviceSupported = true;
+      background(t);
+      foreground(t);
+      await settle(t);
+      expect(find.text(lockTitle), findsNothing);
+      expect(protectedSubtreeBuilt(), isTrue);
+    });
   });
 }

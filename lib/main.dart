@@ -89,12 +89,22 @@ enum _LockReason {
 ///   "can't check" path leaves the app locked.
 /// * Nothing behind the lock (the auth gate, and with it any session or
 ///   account data) is built until the first successful unlock.
+/// * The app re-locks every time it goes to the background (hidden/paused)
+///   and prompts again on resume. A transient `inactive` (notification
+///   shade, system dialogs) does not re-lock, and lifecycle changes caused
+///   by the system auth UI itself are ignored.
+/// * After the first unlock, re-locking pushes an opaque, non-poppable lock
+///   route on the root navigator. It covers every screen and sheet the user
+///   had open while keeping their state (e.g. a half-written clinical note).
 class _SecurityWrapperState extends State<SecurityWrapper> with WidgetsBindingObserver {
   final LocalAuthentication auth = LocalAuthentication();
   final ValueNotifier<_LockReason> _lockReason = ValueNotifier(_LockReason.checking);
   bool _isAuthenticated = false;
   bool _isAuthenticating = false;
-  DateTime? _backgroundTimestamp;
+  bool _hasUnlockedOnce = false;
+  bool _wentToBackground = false;
+  NavigatorState? _relockNavigator;
+  Route<void>? _relockRoute;
 
   @override
   void initState() {
@@ -112,17 +122,21 @@ class _SecurityWrapperState extends State<SecurityWrapper> with WidgetsBindingOb
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused) {
-      _backgroundTimestamp = DateTime.now();
-    } else if (state == AppLifecycleState.resumed) {
-      if (_backgroundTimestamp != null) {
-        final diff = DateTime.now().difference(_backgroundTimestamp!);
-        if (diff.inMinutes >= 1) {
-          _backgroundTimestamp = null;
-          _lock(_LockReason.checking);
-          _authenticate();
-        }
-      }
+    switch (state) {
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+        // The system biometric / device-credential UI can background the app
+        // while a prompt is running. That is not the user leaving.
+        if (_isAuthenticating) return;
+        _wentToBackground = true;
+        if (_isAuthenticated) _lock(_LockReason.checking);
+      case AppLifecycleState.resumed:
+        if (!_wentToBackground || _isAuthenticating) return;
+        _wentToBackground = false;
+        if (!_isAuthenticated) _authenticate();
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.detached:
+        break;
     }
   }
 
@@ -183,11 +197,31 @@ class _SecurityWrapperState extends State<SecurityWrapper> with WidgetsBindingOb
 
   void _lock(_LockReason reason) {
     _lockReason.value = reason;
+    if (_hasUnlockedOnce && _relockRoute == null) {
+      final navigator = Navigator.of(context, rootNavigator: true);
+      final route = PageRouteBuilder<void>(
+        opaque: true,
+        transitionDuration: Duration.zero,
+        reverseTransitionDuration: Duration.zero,
+        pageBuilder: (_, _, _) => PopScope(canPop: false, child: _buildLockScreen()),
+      );
+      _relockNavigator = navigator;
+      _relockRoute = route;
+      navigator.push(route);
+    }
     setState(() => _isAuthenticated = false);
   }
 
   void _unlock() {
-    setState(() => _isAuthenticated = true);
+    final route = _relockRoute;
+    final navigator = _relockNavigator;
+    _relockRoute = null;
+    _relockNavigator = null;
+    if (route != null && navigator != null && route.isActive) navigator.removeRoute(route);
+    setState(() {
+      _isAuthenticated = true;
+      _hasUnlockedOnce = true;
+    });
   }
 
   Widget _buildLockScreen() {
@@ -199,9 +233,10 @@ class _SecurityWrapperState extends State<SecurityWrapper> with WidgetsBindingOb
 
   @override
   Widget build(BuildContext context) {
-    // Nothing behind the lock is built until authenticate() returns true, so
-    // no session or account data can load first.
-    if (!_isAuthenticated) return _buildLockScreen();
+    // Before the first successful unlock nothing behind the lock is built, so
+    // no session or account data can load. Later re-locks are drawn by the
+    // lock route on top of this subtree (see _lock).
+    if (!_hasUnlockedOnce) return _buildLockScreen();
 
     return StreamBuilder<User?>(
       stream: FirebaseAuth.instance.authStateChanges(),
