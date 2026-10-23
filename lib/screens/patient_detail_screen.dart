@@ -8,6 +8,7 @@ import 'package:share_plus/share_plus.dart';
 import '../providers/patient_provider.dart';
 import '../providers/doctor_provider.dart';
 import '../models/patient.dart';
+import '../config/dev_mode.dart';
 import '../utils/pdf_export.dart';
 import 'add_patient_screen.dart';
 import 'add_record_screen.dart';
@@ -100,7 +101,7 @@ class PatientDetailScreen extends StatelessWidget {
               IconButton(
                 icon: const Icon(Icons.picture_as_pdf_outlined, color: Color(0xFF6366F1)), 
                 // Passed the Doctor object to the PDF generator here:
-                onPressed: () => PdfExport.generateAndPrintPatientReport(patient, doctor: doctor),
+                onPressed: () => PdfExport.generateAndPrintPatientReport(patient, doctor: doctor, testData: DevMode.of(context)),
               ),
             ],
           ),

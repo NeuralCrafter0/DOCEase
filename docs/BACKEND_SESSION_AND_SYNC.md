@@ -1,8 +1,11 @@
-# Backend: session, sync and rules (branch `backend/rules-and-session`)
+# Backend: session and sync
 
-This branch is stacked on the DB engineer's `fix/db-fail-closed-encryption`
-(commit `09a405f`) and has to merge together with it. Nothing has been
-deployed to Firebase. For the rules, see [`firebase/README.md`](../firebase/README.md).
+Session controller, injected providers, per-uid sync, visit rollback and
+tombstones. On `app/dev-mode-local` (PR #13) this is stacked on the DB
+engineer's `fix/db-fail-closed-encryption` (PR #10) and has to merge after it.
+Nothing has been deployed to Firebase. The Firebase security rules and their
+emulator tests (`firebase/`) are **not on this branch**: they stay parked in
+PR #2 (`backend/rules-and-session`) until the owner resumes cloud work.
 
 ## What changed in the app
 
@@ -106,8 +109,7 @@ When the DB branch adds these to `LocalDatabase`:
 - `flutter analyze`: no new issues. Remaining errors and warnings are
   pre-existing (`home_screen.dart` imports a missing
   `patient_detail_screen.dart`, `widget_test.dart`, unused imports).
-- Rules: `cd firebase && npm ci && npm test` gives 72 of 72 passing on the
-  emulators.
+- Rules: parked in PR #2 (72 of 72 emulator tests passing there).
 
 ## Follow-ups (not done here)
 

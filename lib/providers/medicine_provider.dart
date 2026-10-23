@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import '../config/dev_mode.dart';
 import 'database_helper.dart';
 
 /// The doctor's frequently used medicine names.
@@ -21,13 +22,16 @@ class MedicineProvider with ChangeNotifier {
     LocalDatabase? localDb,
   })  : _authOverride = auth,
         _firestoreOverride = firestore,
-        _cloud = cloudSync,
+        _cloudSync = cloudSync,
         _localDbOverride = localDb;
 
   /// Settings key of the on-phone list (dev mode).
   static const localSettingKey = 'frequent_medicines';
 
-  final bool _cloud;
+  final bool _cloudSync;
+
+  /// Cloud work only with cloudSync on and never for the dev owner.
+  bool get _cloud => _cloudSync && !isLocalOwner(_uid);
   final LocalDatabase? _localDbOverride;
   LocalDatabase get _local => _localDbOverride ?? DatabaseHelper.instance;
 
@@ -69,12 +73,13 @@ class MedicineProvider with ChangeNotifier {
   /// Kept for existing callers: loads for the signed-in doctor.
   Future<void> fetchMedicines() async {
     final uid = _cloud ? _auth.currentUser?.uid : _uid;
-    if (uid == null) return;
+    if (uid == null || (_cloud && isLocalOwner(uid))) return; // `local` account refused
     await load(uid);
   }
 
   Future<void> _load(String uid, int gen) async {
     if (!_cloud) return _loadLocal(gen);
+    if (isLocalOwner(uid)) return; // hard guard: no cloud fetch for the dev owner
     try {
       final settings = await _settingsDoc(uid).get();
       if (gen != _generation) return;
@@ -133,7 +138,7 @@ class MedicineProvider with ChangeNotifier {
       return;
     }
     final uid = _uid ?? _auth.currentUser?.uid;
-    if (uid == null || uid != _auth.currentUser?.uid) return;
+    if (uid == null || isLocalOwner(uid) || uid != _auth.currentUser?.uid) return;
     final gen = _generation;
     try {
       // Whole list, merge so nothing else on the document is touched.

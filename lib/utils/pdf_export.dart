@@ -6,8 +6,34 @@ import '../models/patient.dart';
 import '../models/doctor.dart';
 
 class PdfExport {
-  static Future<void> generateAndPrintPatientReport(Patient patient, {Doctor? doctor}) async {
-    final pdf = pw.Document();
+  /// Marker printed at the top and bottom of every page in dev mode.
+  static const testDataMarker = 'TEST DATA - NOT A MEDICAL RECORD';
+
+  /// [testData] (dev mode) puts [testDataMarker] on every page and in the
+  /// file name, so a dev-build letter can never pass as a real record.
+  static Future<void> generateAndPrintPatientReport(Patient patient,
+      {Doctor? doctor, bool testData = false}) async {
+    final pdf = buildPatientReport(patient, doctor: doctor, testData: testData);
+    final name = 'ClinicalReport_${patient.name.replaceAll(' ', '_')}.pdf';
+    await Printing.layoutPdf(
+        onLayout: (PdfPageFormat format) async => pdf.save(),
+        name: testData ? 'TEST_DATA_$name' : name);
+  }
+
+  static pw.Widget _testDataBand() => pw.Container(
+        width: double.infinity,
+        margin: const pw.EdgeInsets.symmetric(vertical: 4),
+        padding: const pw.EdgeInsets.symmetric(vertical: 4),
+        color: PdfColors.red700,
+        child: pw.Center(
+            child: pw.Text(testDataMarker,
+                style: pw.TextStyle(color: PdfColors.white, fontSize: 12, fontWeight: pw.FontWeight.bold))),
+      );
+
+  /// The report document ([compress] false only for tests that read it).
+  static pw.Document buildPatientReport(Patient patient,
+      {Doctor? doctor, bool testData = false, bool compress = true}) {
+    final pdf = pw.Document(compress: compress);
 
     final String docName = doctor != null ? "${doctor.title} ${doctor.name}" : "Clinical Practitioner";
     final String clinicName = doctor?.clinicName ?? "DOCEase Medical Center";
@@ -19,6 +45,8 @@ class PdfExport {
       pw.MultiPage(
         pageFormat: PdfPageFormat.a4,
         margin: const pw.EdgeInsets.all(32),
+        header: testData ? (pw.Context context) => _testDataBand() : null,
+        footer: testData ? (pw.Context context) => _testDataBand() : null,
         build: (pw.Context context) {
           return [
             pw.Row(
@@ -88,7 +116,7 @@ class PdfExport {
       ),
     );
 
-    await Printing.layoutPdf(onLayout: (PdfPageFormat format) async => pdf.save(), name: 'ClinicalReport_${patient.name.replaceAll(' ', '_')}.pdf');
+    return pdf;
   }
 
   static pw.Widget _buildPdfVisitCard(VisitRecord record) {

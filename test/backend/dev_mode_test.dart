@@ -167,13 +167,14 @@ void main() {
   }
 
   List<String> attachmentsOnDisk() {
-    final d = Directory(p.join(photos.supportPath!, LocalPhotoStore.attachmentsFolder));
+    final d = Directory(photos.visitFolderFor(kLocalOwnerId)!);
     return d.existsSync() ? d.listSync().map((e) => e.path).toList() : [];
   }
 
   test('the switch defaults to OFF in source and dev data has its own DB owner', () {
     final src = File('lib/config/dev_mode.dart').readAsStringSync();
     expect(src, contains("bool.fromEnvironment('DOCEASE_DEV_MODE', defaultValue: false)"));
+    expect(src, contains('kDevModeRequested && !kReleaseMode'));
     expect(kLocalOwnerId, 'local');
   });
 
@@ -277,7 +278,7 @@ void main() {
 
     test('a photo already in the app folder (PR #8 layout) is not copied again', () async {
       await patients.addPatient(newPatient('p1'));
-      final inFolder = await photos.keepVisitPhoto(pick('IMG_2.jpg'), UploadImageType.jpeg);
+      final inFolder = await photos.keepVisitPhoto(kLocalOwnerId, pick('IMG_2.jpg'), UploadImageType.jpeg);
       await patients.addRecord('p1', visit('v1', [inFolder]));
       expect(db.rows['p1']!.history.single.attachmentPaths, [inFolder]);
       expect(attachmentsOnDisk(), [inFolder]);
@@ -404,7 +405,7 @@ void main() {
 
   group('photo folder guard', () {
     test('only files inside the app photo folders count as app photos', () {
-      final inside = p.join(photos.supportPath!, 'attachments', 'a.jpg');
+      final inside = p.join(photos.visitFolderFor(kLocalOwnerId)!, 'a.jpg');
       expect(photos.isAppPhoto(inside), isTrue);
       expect(photos.isAppPhoto(p.join(photos.supportPath!, 'attachments', '..', '..', 'cache', 'a.jpg')), isFalse);
       expect(photos.isAppPhoto(p.join(photos.supportPath!, 'docease.db')), isFalse);
@@ -415,13 +416,13 @@ void main() {
 
     test('never deletes outside the folders, also through a symlink', () async {
       final outside = File(pick('keep.jpg'));
-      expect(await photos.deleteAppPhoto(outside.path), isFalse);
-      final dir = Directory(p.join(photos.supportPath!, 'attachments'))..createSync();
+      expect(await photos.deleteAppPhoto(outside.path, owner: kLocalOwnerId), isFalse);
+      final dir = Directory(photos.visitFolderFor(kLocalOwnerId)!)..createSync(recursive: true);
       final link = Link(p.join(dir.path, 'link.jpg'))..createSync(outside.path);
-      expect(await photos.deleteAppPhoto(link.path), isFalse);
+      expect(await photos.deleteAppPhoto(link.path, owner: kLocalOwnerId), isFalse);
       expect(outside.existsSync(), isTrue);
       final db = File(p.join(photos.supportPath!, 'docease.db'))..writeAsStringSync('x');
-      expect(await photos.deleteAppPhoto(db.path), isFalse);
+      expect(await photos.deleteAppPhoto(db.path, owner: kLocalOwnerId), isFalse);
       expect(db.existsSync(), isTrue);
     });
 
@@ -498,7 +499,7 @@ void main() {
   group('wiring (source checks)', () {
     test('main() returns into dev mode before any Firebase or Google Sign-In call', () {
       final main = File('lib/main.dart').readAsStringSync();
-      final dev = main.indexOf('if (kDevMode) {');
+      final dev = main.indexOf('case StartMode.dev:');
       expect(dev, greaterThan(0));
       expect(dev, lessThan(main.indexOf('Firebase.initializeApp')));
       expect(dev, lessThan(main.indexOf('GoogleSignIn.instance')));
@@ -508,7 +509,7 @@ void main() {
     });
 
     test('the dev-mode files import no Firebase or Google Sign-In package', () {
-      for (final f in ['lib/dev/dev_mode_app.dart', 'lib/config/dev_mode.dart', 'lib/services/local_photo_store.dart']) {
+      for (final f in ['lib/dev/dev_mode_app.dart', 'lib/dev/dev_build_refused.dart', 'lib/config/dev_mode.dart', 'lib/services/local_photo_store.dart']) {
         final src = File(f).readAsStringSync();
         expect(src, isNot(contains('package:firebase')), reason: f);
         expect(src, isNot(contains('package:cloud_firestore')), reason: f);
