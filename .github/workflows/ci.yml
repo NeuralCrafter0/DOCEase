@@ -1,0 +1,615 @@
+name: CI
+
+# Pipeline: gitleaks secret scan, flutter analyze, flutter test, Android build,
+# Firebase rules emulator tests (only when firebase/ exists), real-SQLCipher DB
+# tests (only when tool/sqlcipher_harness/run.sh exists)
+# (release-mode, obfuscated APK; DEV build with DOCEASE_DEV_MODE=true on PRs and
+# branches; release-signed only on main/v* with secrets and DOCEASE_DEV_MODE=false).
+# Android only for now. Flutter is pinned to the version in .metadata.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ["v*"] # release tags: the only runs that upload debug symbols
+  workflow_dispatch:
+
+# Least privilege: every job can only read the repository contents.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  FLUTTER_VERSION: "3.41.2" # keep in sync with .metadata (revision 90673a4eef)
+  JAVA_VERSION: "17"
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+
+jobs:
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks (checksum-verified)
+        run: |
+          set -euo pipefail
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" version
+
+      - name: Scan git history
+        # --redact keeps any detected secret values out of the job log.
+        # Known, reviewed findings are listed by fingerprint in .gitleaksignore.
+        # Scan the full history reachable from the commit under test (for PRs,
+        # the merge of the PR into main). fetch-depth: 0 also fetches every other
+        # branch, and gitleaks defaults to --all, so without this a leak on an
+        # unrelated branch would fail every PR; each branch is checked on its own PR.
+        run: |
+          "$RUNNER_TEMP/gitleaks" git . --redact --no-banner --verbose --exit-code 1 \
+            --log-opts="--full-history HEAD"
+
+  analyze:
+    name: flutter analyze
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Flutter ${{ env.FLUTTER_VERSION }}
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: flutter pub get (lockfile enforced)
+        run: flutter pub get --enforce-lockfile
+
+      - name: flutter analyze
+        # Errors fail the job. Infos/warnings are reported but not fatal yet;
+        # drop --no-fatal-warnings once the existing warnings are cleaned up.
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+  test:
+    # The suite runs twice: plain (DOCEASE_DEV_MODE unset, i.e. dev mode off) and
+    # with --dart-define=DOCEASE_DEV_MODE=true. Both entries always run.
+    name: flutter test (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: dev mode off
+            dev_mode: "false"
+          - mode: DEV mode on
+            dev_mode: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Flutter ${{ env.FLUTTER_VERSION }}
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: flutter pub get (lockfile enforced)
+        run: flutter pub get --enforce-lockfile
+
+      - name: flutter test (${{ matrix.mode }})
+        env:
+          DEV_MODE: ${{ matrix.dev_mode }}
+        run: |
+          set -euo pipefail
+          define=()
+          if [ "$DEV_MODE" = "true" ]; then define=(--dart-define=DOCEASE_DEV_MODE=true); fi
+          # Confirmed by the backend engineer: `flutter test` and `flutter test --dart-define=DOCEASE_DEV_MODE=true`;
+          # tests that need one mode skip themselves in the other. widget_test.dart is not excluded (QA PR #9 removes it).
+          flutter test --no-pub "${define[@]}"
+
+  android-build:
+    name: Android build (DEV profile APK / production release APK)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # DOCEASE_DEV_MODE (--dart-define, bool.fromEnvironment, defaults to false
+      # in the app). When true it skips Firebase, login and the screen lock and
+      # shows a "DEV MODE: test data only" banner. CI always passes it explicitly:
+      # - PR / branch / manual builds: DEV build, `--profile` with
+      #   DOCEASE_DEV_MODE=true (the app only honours dev mode outside release
+      #   mode and shows a "refused" screen in a release build with it on).
+      #   Debug-key signed, never release-signed, artifact labelled DEV.
+      # - Release-signed builds and every v* tag build: `--release`, obfuscated,
+      #   with DOCEASE_DEV_MODE=false. The job fails rather than release-sign or
+      #   tag a dev-mode build.
+      IS_RELEASE_TAG: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/v') }}
+      # Signing secrets are only exposed on main and v* tag runs, never on pull
+      # requests or other branches.
+      ANDROID_KEYSTORE_BASE64: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && secrets.ANDROID_KEYSTORE_BASE64 || '' }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && secrets.ANDROID_KEYSTORE_PASSWORD || '' }}
+      ANDROID_KEY_ALIAS: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && secrets.ANDROID_KEY_ALIAS || '' }}
+      ANDROID_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && secrets.ANDROID_KEY_PASSWORD || '' }}
+      DEBUG_INFO_DIR: build/debug-info
+      # Production application ID. The "dev" flavor (when present) adds ".dev".
+      APP_ID: com.medhistory.app.medhistory
+      # Product flavors are auto-detected from android/app/build.gradle(.kts):
+      # - no productFlavors (main today): no --flavor; APK app-<mode>.apk.
+      # - productFlavors with dev + prod (PR #13): DEV builds use --flavor dev
+      #   (app-dev-profile.apk, "DOCEase DEV", <APP_ID>.dev); production builds
+      #   use --flavor prod (app-prod-release.apk, bundle/prodRelease AAB).
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Java ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+
+      - name: Set up Flutter ${{ env.FLUTTER_VERSION }}
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Decide build mode (dev vs production, signing)
+        id: mode
+        run: |
+          set -euo pipefail
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ] \
+             && [ -n "$ANDROID_KEY_ALIAS" ] && [ -n "$ANDROID_KEY_PASSWORD" ]; then
+            signed=true
+          else
+            signed=false
+          fi
+          # Release-signed and v* tag builds are always production builds.
+          if [ "$signed" = "true" ] || [ "$IS_RELEASE_TAG" = "true" ]; then
+            dev_mode=false
+          else
+            dev_mode=true
+          fi
+          # Dev builds are profile builds; production builds are release builds.
+          if [ "$dev_mode" = "true" ]; then build_mode=profile; else build_mode=release; fi
+          if [ "$dev_mode" = "true" ]; then
+            label="DEV-profile-login-lock-OFF-not-for-patients"
+            echo "::warning title=DEV build (login and lock OFF)::Profile build with --dart-define=DOCEASE_DEV_MODE=true: Firebase, login and the screen lock are skipped and the app shows a DEV MODE banner. For testers only, not for patients. Debug-key signed."
+          elif [ "$signed" = "true" ]; then
+            label="release-signed"
+          else
+            label="prod-NOT-release-signed-debug-key"
+            echo "::warning title=APK is NOT release-signed::Production build (DOCEASE_DEV_MODE=false) on a release tag, but signing secrets (ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD) are not configured. Signed with the debug key; do not distribute."
+          fi
+          # Auto-detect Android product flavors (a `productFlavors {` block, not
+          # comments). If flavors exist, both dev and prod are required.
+          gradle_files=()
+          for f in android/app/build.gradle.kts android/app/build.gradle; do
+            if [ -f "$f" ]; then gradle_files+=("$f"); fi
+          done
+          flavor=""
+          if [ "${#gradle_files[@]}" -gt 0 ] && grep -qE '^[[:space:]]*productFlavors[[:space:]]*\{' "${gradle_files[@]}"; then
+            has_dev=false; has_prod=false
+            if grep -qE 'create\("dev"\)|^[[:space:]]*dev[[:space:]]*\{' "${gradle_files[@]}"; then has_dev=true; fi
+            if grep -qE 'create\("prod"\)|^[[:space:]]*prod[[:space:]]*\{' "${gradle_files[@]}"; then has_prod=true; fi
+            if [ "$has_dev" != "true" ] || [ "$has_prod" != "true" ]; then
+              echo "::error title=Flavor detection::productFlavors found in ${gradle_files[*]} but not both 'dev' and 'prod' (dev=$has_dev prod=$has_prod). Update ci.yml for the new flavors."
+              exit 1
+            fi
+            if [ "$dev_mode" = "true" ]; then flavor=dev; else flavor=prod; fi
+          fi
+          out=build/app/outputs
+          if [ -n "$flavor" ]; then
+            apk="$out/flutter-apk/app-$flavor-$build_mode.apk"
+            aab="$out/bundle/${flavor}Release/app-$flavor-release.aab"
+            mapping="$out/mapping/${flavor}Release/mapping.txt"
+          else
+            apk="$out/flutter-apk/app-$build_mode.apk"
+            aab="$out/bundle/release/app-release.aab"
+            mapping="$out/mapping/release/mapping.txt"
+          fi
+          echo "Flavor: ${flavor:-none (no productFlavors)}; APK: $apk"
+          {
+            echo "signed=$signed"
+            echo "dev_mode=$dev_mode"
+            echo "label=$label"
+            echo "build_mode=$build_mode"
+            echo "flavor=$flavor"
+            echo "apk=$apk"
+            echo "aab=$aab"
+            echo "mapping=$mapping"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Release guard (no dev mode in signed or tagged builds)
+        env:
+          SIGNED: ${{ steps.mode.outputs.signed }}
+          DEV_MODE: ${{ steps.mode.outputs.dev_mode }}
+          BUILD_MODE: ${{ steps.mode.outputs.build_mode }}
+          FLAVOR: ${{ steps.mode.outputs.flavor }}
+        run: |
+          case "$DEV_MODE/$BUILD_MODE" in
+            true/profile|false/release) ;;
+            *) echo "::error title=Release guard::Invalid combination DOCEASE_DEV_MODE=$DEV_MODE with --$BUILD_MODE (dev builds must be --profile, production builds --release)"; exit 1 ;;
+          esac
+          case "$DEV_MODE" in
+            true|false) ;;
+            *) echo "::error title=Release guard::DOCEASE_DEV_MODE must be true or false, got '$DEV_MODE'"; exit 1 ;;
+          esac
+          if { [ "$SIGNED" = "true" ] || [ "$IS_RELEASE_TAG" = "true" ]; } && [ "$DEV_MODE" != "false" ]; then
+            echo "::error title=Release guard::Refusing to build a release-signed or v* tag artifact with DOCEASE_DEV_MODE=$DEV_MODE. Release builds must use DOCEASE_DEV_MODE=false."
+            exit 1
+          fi
+          # With flavors: dev mode only with --flavor dev, production only with --flavor prod.
+          case "$FLAVOR/$DEV_MODE" in
+            /true|/false|dev/true|prod/false) ;;
+            *) echo "::error title=Release guard::Invalid combination --flavor $FLAVOR with DOCEASE_DEV_MODE=$DEV_MODE (dev flavor is DEV only, prod flavor is production only)"; exit 1 ;;
+          esac
+          echo "Release guard OK: signed=$SIGNED tag=$IS_RELEASE_TAG DOCEASE_DEV_MODE=$DEV_MODE build=--$BUILD_MODE flavor=${FLAVOR:-none}"
+
+      - name: Write upload keystore and android/key.properties
+        # Only for production builds: a dev-mode build is never release-signed.
+        if: steps.mode.outputs.signed == 'true' && steps.mode.outputs.dev_mode == 'false'
+        # Values come from secrets via env and are never echoed.
+        run: |
+          set -euo pipefail
+          umask 077
+          keystore="$RUNNER_TEMP/upload-keystore.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          {
+            printf 'storeFile=%s\n' "$keystore"
+            printf 'storePassword=%s\n' "$ANDROID_KEYSTORE_PASSWORD"
+            printf 'keyAlias=%s\n' "$ANDROID_KEY_ALIAS"
+            printf 'keyPassword=%s\n' "$ANDROID_KEY_PASSWORD"
+          } > android/key.properties
+
+      - name: flutter pub get (lockfile enforced)
+        run: flutter pub get --enforce-lockfile
+
+      - name: Build APK (DEV --profile, or production --release obfuscated)
+        env:
+          DOCEASE_DEV_MODE: ${{ steps.mode.outputs.dev_mode }}
+          BUILD_MODE: ${{ steps.mode.outputs.build_mode }}
+          FLAVOR: ${{ steps.mode.outputs.flavor }}
+        run: |
+          set -euo pipefail
+          flavor_args=()
+          if [ -n "$FLAVOR" ]; then flavor_args=(--flavor "$FLAVOR"); fi
+          # Second guard: signing material present means this must be a production release build.
+          if [ -f android/key.properties ] && { [ "$DOCEASE_DEV_MODE" != "false" ] || [ "$BUILD_MODE" != "release" ]; }; then
+            echo "::error title=Release guard::android/key.properties exists but DOCEASE_DEV_MODE=$DOCEASE_DEV_MODE, --$BUILD_MODE"
+            exit 1
+          fi
+          if [ "$BUILD_MODE" = "release" ] && [ "$DOCEASE_DEV_MODE" = "false" ] && [ "$FLAVOR" != "dev" ]; then
+            flutter build apk --release "${flavor_args[@]}" --obfuscate --split-debug-info="$DEBUG_INFO_DIR" \
+              --dart-define=DOCEASE_DEV_MODE=false
+          elif [ "$BUILD_MODE" = "profile" ] && [ "$DOCEASE_DEV_MODE" = "true" ] && [ "$FLAVOR" != "prod" ]; then
+            flutter build apk --profile "${flavor_args[@]}" --dart-define=DOCEASE_DEV_MODE=true
+          else
+            echo "::error title=Release guard::Invalid build: DOCEASE_DEV_MODE=$DOCEASE_DEV_MODE with --$BUILD_MODE, flavor '${FLAVOR:-none}'"
+            exit 1
+          fi
+
+      - name: Build release AAB (release-signed production runs only)
+        if: steps.mode.outputs.signed == 'true' && steps.mode.outputs.dev_mode == 'false'
+        env:
+          DOCEASE_DEV_MODE: ${{ steps.mode.outputs.dev_mode }}
+          FLAVOR: ${{ steps.mode.outputs.flavor }}
+          AAB: ${{ steps.mode.outputs.aab }}
+        run: |
+          set -euo pipefail
+          if [ "$DOCEASE_DEV_MODE" != "false" ] || [ "$FLAVOR" = "dev" ]; then
+            echo "::error title=Release guard::Refusing to build a release AAB with DOCEASE_DEV_MODE=$DOCEASE_DEV_MODE, flavor '${FLAVOR:-none}'"
+            exit 1
+          fi
+          flavor_args=()
+          if [ -n "$FLAVOR" ]; then flavor_args=(--flavor "$FLAVOR"); fi
+          flutter build appbundle --release "${flavor_args[@]}" --obfuscate --split-debug-info="$DEBUG_INFO_DIR" \
+            --dart-define=DOCEASE_DEV_MODE="$DOCEASE_DEV_MODE"
+          test -f "$AAB"
+
+      - name: Verify signature and dev mode, write job summary
+        env:
+          SIGNED: ${{ steps.mode.outputs.signed }}
+          DEV_MODE: ${{ steps.mode.outputs.dev_mode }}
+          BUILD_MODE: ${{ steps.mode.outputs.build_mode }}
+          FLAVOR: ${{ steps.mode.outputs.flavor }}
+          APK: ${{ steps.mode.outputs.apk }}
+        run: |
+          set -euo pipefail
+          apk="$APK"
+          test -f "$apk"
+          # Newest stable build-tools (skip -rc). apksigner output differs by version
+          # ("Signer #1 certificate DN:" in 36, "V2 Signer: certificate DN:" in 37),
+          # so match on the field name only.
+          bt="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | grep -vE -- '-rc[0-9]*$' | sort -V | tail -1)"
+          certs="$("$bt/apksigner" verify --print-certs "$apk")"
+          dns="$(printf '%s\n' "$certs" | sed -n 's/^.*certificate DN: //p' | sort -u)"
+          shas="$(printf '%s\n' "$certs" | sed -n 's/^.*certificate SHA-256 digest: //p' | sort -u)"
+          # Fail closed: exactly one readable signer certificate is required.
+          if [ -z "$dns" ] || [ -z "$shas" ] || [ "$(printf '%s\n' "$shas" | wc -l)" -ne 1 ]; then
+            echo "::error title=Signature check::Could not read exactly one signer certificate from $apk with $(basename "$bt") apksigner."
+            exit 1
+          fi
+          cert_dn="$(printf '%s\n' "$dns" | head -1)"
+          cert_sha256="$shas"
+          # Public certificate details only (no secrets).
+          echo "APK signer (apksigner $(basename "$bt")): $cert_dn, SHA-256 $cert_sha256"
+          # Package ID: production builds must be exactly APP_ID; dev-flavor builds APP_ID.dev.
+          pkg="$("$bt/aapt2" dump packagename "$apk")"
+          echo "APK package: $pkg (flavor ${FLAVOR:-none})"
+          if [ "$DEV_MODE" = "false" ] && [ "$pkg" != "$APP_ID" ]; then
+            echo "::error title=Release guard::Production build has package '$pkg', expected '$APP_ID'."
+            exit 1
+          fi
+          if [ "$FLAVOR" = "dev" ] && [ "$pkg" != "$APP_ID.dev" ]; then
+            echo "::error title=Release guard::Dev-flavor build has package '$pkg', expected '$APP_ID.dev'."
+            exit 1
+          fi
+          debug_cert=false
+          if printf '%s' "$cert_dn" | grep -q 'CN=Android Debug'; then debug_cert=true; fi
+          # Never label a debug-key APK as release-signed.
+          if [ "$SIGNED" = "true" ] && [ "$debug_cert" = "true" ]; then
+            echo "::error title=Release signing failed::Signing secrets were provided but the APK is signed with the debug key."
+            exit 1
+          fi
+          # Third guard: a non-debug (release) certificate on a dev-mode build is never allowed.
+          if [ "$debug_cert" = "false" ] && [ "$DEV_MODE" != "false" ]; then
+            echo "::error title=Release guard::The APK carries a release certificate but was built with DOCEASE_DEV_MODE=$DEV_MODE."
+            exit 1
+          fi
+          {
+            echo "## Android build"
+            echo ""
+            if [ "$DEV_MODE" = "true" ]; then
+              echo "> **DEV build: login, screen lock and Firebase are OFF** (\`DOCEASE_DEV_MODE=true\`, app shows a \"DEV MODE: test data only\" banner). For testers only, **not for patients**."
+            else
+              echo "> **Production build** (\`DOCEASE_DEV_MODE=false\`): Firebase, login and screen lock enabled."
+            fi
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            if [ "$BUILD_MODE" = "release" ]; then
+              echo "| Build mode | \`--release --obfuscate --split-debug-info\` |"
+            else
+              echo "| Build mode | \`--profile\` (DEV, not obfuscated) |"
+            fi
+            echo "| DOCEASE_DEV_MODE | \`${DEV_MODE}\` |"
+            echo "| Flavor | ${FLAVOR:-none (no productFlavors on this ref)} |"
+            echo "| Package | \`${pkg}\` |"
+            if [ "$SIGNED" = "true" ]; then
+              echo "| Signing | **Release-signed** with the upload key |"
+            else
+              echo "| Signing | **NOT release-signed** (debug key). Do not distribute. |"
+            fi
+            echo "| Signer cert | ${cert_dn} |"
+            echo "| Signer cert SHA-256 | \`${cert_sha256}\` |"
+            echo "| APK size | $(du -h "$apk" | cut -f1) |"
+            if [ "$IS_RELEASE_TAG" = "true" ]; then
+              echo "| Debug symbols | Uploaded as a separate artifact (release tag) |"
+            else
+              echo "| Debug symbols | Not uploaded (only on v* release tags) |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Scan release build for dev-mode markers (QA REL-07)
+        # Production (DOCEASE_DEV_MODE=false) builds only: the dev banner text must
+        # not be compiled into libapp.so of the release APK, or of the AAB when one
+        # is built. DEV profile builds contain it on purpose and skip this step.
+        if: steps.mode.outputs.dev_mode == 'false'
+        env:
+          SIGNED: ${{ steps.mode.outputs.signed }}
+          APK: ${{ steps.mode.outputs.apk }}
+          AAB: ${{ steps.mode.outputs.aab }}
+        run: |
+          set -euo pipefail
+          files=("$APK")
+          if [ "$SIGNED" = "true" ]; then files+=("$AAB"); fi
+          status=0
+          bash tool/ci/check_release_markers.sh "${files[@]}" || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "- Dev-marker scan (REL-07): clean, \"DEV MODE: test data only\" not in libapp.so (${#files[@]} file(s))" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Dev-marker scan (REL-07): **FAILED** (exit $status). Release build contains dev-mode code; nothing was uploaded" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
+      - name: Upload APK
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docease-apk-${{ steps.mode.outputs.label }}
+          path: ${{ steps.mode.outputs.apk }}
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload AAB
+        if: steps.mode.outputs.signed == 'true' && steps.mode.outputs.dev_mode == 'false'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docease-aab-release-signed
+          path: ${{ steps.mode.outputs.aab }}
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload debug symbols (release tags only)
+        # Dart split debug info + R8 mapping, needed to de-obfuscate crash traces.
+        # The repo is public, so symbols are only uploaded on v* release-tag runs;
+        # on PR, branch and manual runs they are discarded with the runner.
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docease-debug-symbols-${{ steps.mode.outputs.label }}
+          path: |
+            build/debug-info/
+            ${{ steps.mode.outputs.mapping }}
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Remove signing material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/upload-keystore.jks" android/key.properties
+
+  firebase-rules:
+    name: Firebase rules (emulator tests)
+    # Runs the backend's Firestore/Storage rules tests from firebase/ against the
+    # local emulators only. Skips (job passes) when firebase/ does not exist yet.
+    # No Firebase credentials or secrets: the demo- project ID cannot reach any
+    # real project (med-history-299a1 is never used here).
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      NODE_VERSION: "24.22.1" # @firebase/rules-unit-testing 6 needs Node >= 24.12
+      FIREBASE_TOOLS_VERSION: "15.34.1" # must match firebase/package-lock.json
+      EMULATOR_JAVA_VERSION: "21" # firebase-tools 15 emulators need Java 21+
+      FIREBASE_PROJECT_ID: demo-docease
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Detect firebase/ folder
+        id: detect
+        env:
+          RULES_HASH: ${{ hashFiles('firebase/firebase.json', 'firebase/package-lock.json') }}
+        run: |
+          if [ -n "$RULES_HASH" ] && [ -f firebase/firebase.json ] && [ -f firebase/package-lock.json ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "## Firebase rules: skipped (no firebase/ folder on this ref)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Guard against real projects and credentials
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          case "$FIREBASE_PROJECT_ID" in
+            demo-*) ;;
+            *) echo "::error::FIREBASE_PROJECT_ID must start with demo- (emulator only)"; exit 1 ;;
+          esac
+          if [ -f firebase/.firebaserc ] || [ -f .firebaserc ]; then
+            echo "::error::.firebaserc found; CI rules tests must not target a real project"; exit 1
+          fi
+
+      - name: Set up Java ${{ env.EMULATOR_JAVA_VERSION }} (emulators)
+        if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: ${{ env.EMULATOR_JAVA_VERSION }}
+
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: firebase/package-lock.json
+
+      - name: npm ci (lockfile enforced, no install scripts)
+        if: steps.detect.outputs.present == 'true'
+        working-directory: firebase
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Verify pinned firebase-tools version
+        if: steps.detect.outputs.present == 'true'
+        working-directory: firebase
+        run: |
+          installed="$(npx --no-install firebase --version)"
+          if [ "$installed" != "$FIREBASE_TOOLS_VERSION" ]; then
+            echo "::error::firebase-tools $installed is locked in firebase/package-lock.json but CI pins $FIREBASE_TOOLS_VERSION. Update FIREBASE_TOOLS_VERSION in ci.yml together with the lockfile."
+            exit 1
+          fi
+          echo "firebase-tools $installed, node $(node --version)"
+
+      - name: Cache emulator binaries
+        if: steps.detect.outputs.present == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/firebase/emulators
+          key: firebase-emulators-${{ runner.os }}-${{ env.FIREBASE_TOOLS_VERSION }}
+
+      - name: Run rules tests on the Firestore and Storage emulators
+        if: steps.detect.outputs.present == 'true'
+        working-directory: firebase
+        run: |
+          npx --no-install firebase emulators:exec --only firestore,storage \
+            --project "$FIREBASE_PROJECT_ID" "npm run test:run"
+
+  sqlcipher-db:
+    name: Real SQLCipher DB tests
+    # Runs the DB engineer's host harness (tool/sqlcipher_harness/run.sh): the
+    # DatabaseHelper suite against the system libsqlcipher through FFI. No
+    # Android SDK, Gradle or secrets. The harness adds its FFI packages to a temp
+    # copy only and fails if the real pubspec.yaml/pubspec.lock change.
+    # Skips (job passes) when the harness is not on this ref (main today).
+    runs-on: ubuntu-24.04 # pinned: the SQLCipher package below is the noble release
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      SQLCIPHER_APT_VERSION: "4.5.6-1build2" # Ubuntu 24.04 release pocket
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Detect SQLCipher harness
+        id: detect
+        env:
+          HARNESS_HASH: ${{ hashFiles('tool/sqlcipher_harness/run.sh') }}
+        run: |
+          if [ -n "$HARNESS_HASH" ] && [ -f tool/sqlcipher_harness/run.sh ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "## Real SQLCipher DB tests: skipped (no tool/sqlcipher_harness/run.sh on this ref)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Install libsqlcipher-dev ${{ env.SQLCIPHER_APT_VERSION }}
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            "libsqlcipher-dev=$SQLCIPHER_APT_VERSION" "libsqlcipher1=$SQLCIPHER_APT_VERSION"
+          dpkg-query -W libsqlcipher-dev libsqlcipher1
+      - name: Set up Flutter ${{ env.FLUTTER_VERSION }}
+        if: steps.detect.outputs.present == 'true'
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: Run the real-SQLCipher harness
+        if: steps.detect.outputs.present == 'true'
+        env:
+          FLUTTER_SUPPRESS_ANALYTICS: "true"
+        run: |
+          set -euo pipefail
+          status=0
+          bash tool/sqlcipher_harness/run.sh || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "## Real SQLCipher DB tests: passed (libsqlcipher $SQLCIPHER_APT_VERSION)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## Real SQLCipher DB tests: FAILED (harness exit $status)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
