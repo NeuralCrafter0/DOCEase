@@ -170,11 +170,19 @@ void main() {
       expect(main, isNot(contains('if (kDevMode)')), reason: 'one decision point only');
     });
 
-    test('the dev wiring itself refuses release builds too (defence in depth)', () {
+    test('every dev-mode entry point is gated on kDevMode (define AND not release; defence in depth)', () {
       expect(File('lib/dev/dev_mode_app.dart').readAsStringSync(),
-          contains('if (kReleaseMode) return const DevBuildRefusedApp();'));
-      expect(File('lib/services/session_controller.dart').readAsStringSync(),
-          contains("if (kReleaseMode) throw StateError('Dev mode is refused in release builds');"));
+          contains('if (!kDevMode) return const DevBuildRefusedApp();'));
+      final session = File('lib/services/session_controller.dart').readAsStringSync();
+      final local = session.indexOf('SessionController.localOnly({');
+      expect(session.indexOf('if (!kDevMode) {', local), greaterThan(local));
+      expect(session.indexOf('if (!kDevMode) {', local), lessThan(session.indexOf('_dbSub = _db.states.listen', local)),
+          reason: 'refuse before anything starts');
+      final platform = File('lib/services/session_platform.dart').readAsStringSync();
+      expect(platform, contains('LocalOnlySessionPlatform() {\n    if (!kDevMode) {'));
+      expect(File('lib/main.dart').readAsStringSync(), contains('bool get isDevMode => devMode && kDevMode;'));
+      expect(File('lib/config/dev_mode.dart').readAsStringSync(),
+          contains('kDevMode && (context.dependOnInheritedWidgetOfExactType<DevMode>()?.enabled ?? true)'));
     });
 
     testWidgets('refusal screen blocks: no home, no dev banner, back does nothing', (tester) async {

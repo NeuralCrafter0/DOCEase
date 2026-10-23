@@ -171,7 +171,17 @@ class FirebaseSessionPlatform implements SessionPlatform {
 
 /// Dev mode (kDevMode): no Firebase, Google Sign-In or secure-storage flags.
 /// Everyone is "approved"; sign-out and cache clears do nothing.
+///
+/// It approves every account, so it exists only in dev builds: the
+/// constructor throws [StateError] unless [kDevMode] is true, and it can
+/// never be injected into the normal SessionController to skip approval.
 class LocalOnlySessionPlatform implements SessionPlatform {
+  LocalOnlySessionPlatform() {
+    if (!kDevMode) {
+      throw StateError('LocalOnlySessionPlatform needs DOCEASE_DEV_MODE=true (debug/profile)');
+    }
+  }
+
   final Map<String, String> _flags = {};
 
   @override
