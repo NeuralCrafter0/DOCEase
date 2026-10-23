@@ -164,3 +164,28 @@ class FirebaseSessionPlatform implements SessionPlatform {
   @override
   Future<void> deleteFlag(String key) => _secure.delete(key: key);
 }
+
+/// Dev mode (kDevMode): no Firebase, Google Sign-In or secure-storage flags.
+/// Everyone is "approved"; sign-out and cache clears do nothing.
+class LocalOnlySessionPlatform implements SessionPlatform {
+  final Map<String, String> _flags = {};
+
+  @override
+  Future<ApprovalStatus> checkApproval(User user) async => ApprovalStatus.approved;
+  @override
+  Future<Set<String>?> cloudPatientIds(String uid) async => null;
+  @override
+  Future<void> signOutFirebase() async {}
+  @override
+  Future<void> signOutGoogle() async {}
+  @override
+  Future<void> clearFirestoreCache() async {}
+  @override
+  void clearImageCache() {}
+  @override
+  Future<String?> readFlag(String key) async => _flags[key];
+  @override
+  Future<void> writeFlag(String key, String value) async => _flags[key] = value;
+  @override
+  Future<void> deleteFlag(String key) async => _flags.remove(key);
+}

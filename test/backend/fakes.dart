@@ -227,7 +227,7 @@ class FakeUploadTask implements UploadTask {
 
 /// FakeFirestoreHelper that can return cloud patients and records payloads.
 class CloudFirestoreHelper extends FakeFirestoreHelper {
-  List<Patient> cloud = [];
+  // `cloud` (the patients fetchAllPatients returns) is inherited.
   Completer<List<Patient>>? fetchGate;
   final List<Patient> payloads = [];
   int fetches = 0;
