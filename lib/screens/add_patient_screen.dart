@@ -1,10 +1,50 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:intl_phone_field/intl_phone_field.dart';
 import 'package:intl_phone_field/country_picker_dialog.dart';
 import 'package:intl_phone_field/countries.dart';
 import '../models/patient.dart';
 import '../providers/patient_provider.dart';
+
+/// Validators for the patient form. Public so they can be unit-tested.
+class PatientFormValidators {
+  PatientFormValidators._();
+
+  static final RegExp _letter = RegExp(r'\p{L}', unicode: true);
+  static final RegExp _digit = RegExp(r'[0-9]');
+  static final RegExp _digitsOnly = RegExp(r'^[0-9]+$');
+
+  /// Collapses runs of whitespace and trims, e.g. "  Asha   Rao " -> "Asha Rao".
+  static String normalizeName(String value) => value.trim().replaceAll(RegExp(r'\s+'), ' ');
+
+  static String? name(String? value) {
+    final v = normalizeName(value ?? '');
+    if (v.isEmpty) return 'Enter the patient\'s name';
+    if (v.length > 80) return 'Name must be 80 characters or fewer';
+    if (_digit.hasMatch(v)) return 'Name cannot contain numbers';
+    if (!_letter.hasMatch(v)) return 'Enter a valid name';
+    return null;
+  }
+
+  static String? age(String? value) {
+    final v = (value ?? '').trim();
+    if (v.isEmpty) return 'Enter the age in years';
+    final years = int.tryParse(v);
+    if (years == null || !_digitsOnly.hasMatch(v)) return 'Age must be a whole number';
+    if (years > 120) return 'Enter an age between 0 and 120';
+    return null;
+  }
+
+  /// Required + digits only. The per-country length check is done by
+  /// IntlPhoneField itself.
+  static String? phone(String? value) {
+    final v = (value ?? '').trim();
+    if (v.isEmpty) return 'Enter the mobile number';
+    if (!_digitsOnly.hasMatch(v)) return 'Use digits only';
+    return null;
+  }
+}
 
 class AddPatientScreen extends StatefulWidget {
   final Patient? existingPatient;
@@ -21,8 +61,9 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
   late TextEditingController _phoneController;
   String _selectedGender = 'Male';
   String _selectedRelation = 'Self';
-  String _completePhoneNumber = '';
   String _initialCountryCode = 'IN';
+  late Country _selectedCountry;
+  bool _submitted = false;
 
   final List<String> _relations = ['Self', 'Son', 'Daughter', 'Spouse', 'Father', 'Mother'];
 
@@ -35,27 +76,31 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
     
     String initialNumber = '';
     if (widget.existingPatient != null) {
-      _completePhoneNumber = widget.existingPatient!.phone;
+      final existingPhone = widget.existingPatient!.phone;
       for (var country in countries) {
-        if (_completePhoneNumber.startsWith('+${country.dialCode}')) {
+        if (existingPhone.startsWith('+${country.dialCode}')) {
           _initialCountryCode = country.code;
-          initialNumber = _completePhoneNumber.replaceFirst('+${country.dialCode}', '');
+          initialNumber = existingPhone.replaceFirst('+${country.dialCode}', '');
           break;
         }
       }
     }
     _phoneController = TextEditingController(text: initialNumber);
+    _selectedCountry = countries.firstWhere((c) => c.code == _initialCountryCode);
     _selectedGender = widget.existingPatient?.gender ?? 'Male';
   }
 
   void _saveForm() {
+    if (!_submitted) setState(() => _submitted = true);
     if (_formKey.currentState!.validate()) {
       final patient = Patient(
         id: widget.existingPatient?.id,
-        name: _nameController.text,
-        age: _ageController.text,
+        name: PatientFormValidators.normalizeName(_nameController.text),
+        age: _ageController.text.trim(),
         gender: _selectedGender,
-        phone: _completePhoneNumber,
+        // Built from the country selected at save time, so changing the
+        // country after typing the number does not keep the old dial code.
+        phone: '+${_selectedCountry.fullCountryCode}${_phoneController.text.trim()}',
         relation: _selectedRelation,
         history: widget.existingPatient?.history,
       );
@@ -79,14 +124,19 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
         padding: const EdgeInsets.all(24.0),
         child: Form(
           key: _formKey,
+          autovalidateMode: _submitted ? AutovalidateMode.onUserInteraction : AutovalidateMode.disabled,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _buildLabel('Full Name'),
-              _buildModernInput(_nameController, 'Enter patient name', Icons.person_outline),
+              _buildModernInput(_nameController, 'Enter patient name', Icons.person_outline,
+                  validator: PatientFormValidators.name, textCapitalization: TextCapitalization.words),
               const SizedBox(height: 24),
               _buildLabel('Age'),
-              _buildModernInput(_ageController, 'Years', Icons.cake_outlined, keyboardType: TextInputType.number),
+              _buildModernInput(_ageController, 'Years', Icons.cake_outlined,
+                  keyboardType: TextInputType.number,
+                  validator: PatientFormValidators.age,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(3)]),
               const SizedBox(height: 24),
               _buildLabel('Relationship'),
               _buildHighPerfSelector(_relations, _selectedRelation, (val) => setState(() => _selectedRelation = val)),
@@ -95,12 +145,25 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
               _buildHighPerfSelector(['Male', 'Female', 'Other'], _selectedGender, (val) => setState(() => _selectedGender = val)),
               const SizedBox(height: 32),
               _buildLabel('Mobile Number'),
-              IntlPhoneField(
-                controller: _phoneController,
-                initialCountryCode: _initialCountryCode,
-                style: const TextStyle(fontWeight: FontWeight.w700),
-                decoration: InputDecoration(filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: Colors.grey.shade200))),
-                onChanged: (phone) => _completePhoneNumber = phone.completeNumber,
+              // IntlPhoneField skips its own validation while the field is
+              // empty, so this FormField makes the number required. The
+              // per-country length check stays inside IntlPhoneField.
+              FormField<String>(
+                validator: (_) => PatientFormValidators.phone(_phoneController.text),
+                builder: (field) => IntlPhoneField(
+                  controller: _phoneController,
+                  initialCountryCode: _initialCountryCode,
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                  keyboardType: TextInputType.phone,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  invalidNumberMessage: 'Enter a valid mobile number',
+                  autovalidateMode: _submitted ? AutovalidateMode.onUserInteraction : AutovalidateMode.disabled,
+                  decoration: InputDecoration(errorText: field.errorText, filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: Colors.grey.shade200))),
+                  onCountryChanged: (country) => _selectedCountry = country,
+                  onChanged: (_) {
+                    if (field.hasError) field.validate();
+                  },
+                ),
               ),
               const SizedBox(height: 48),
               ElevatedButton(onPressed: _saveForm, style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF1E293B), minimumSize: const Size(double.infinity, 64), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24))), child: Text(widget.existingPatient == null ? 'Register Profile' : 'Save Changes', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
@@ -113,8 +176,8 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
 
   Widget _buildLabel(String text) => Padding(padding: const EdgeInsets.only(bottom: 10, left: 4), child: Text(text, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Color(0xFF475569))));
 
-  Widget _buildModernInput(TextEditingController controller, String hint, IconData icon, {TextInputType? keyboardType}) {
-    return TextFormField(controller: controller, keyboardType: keyboardType, style: const TextStyle(fontWeight: FontWeight.w700), decoration: InputDecoration(hintText: hint, prefixIcon: Icon(icon, color: const Color(0xFF6366F1), size: 20), filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: Colors.grey.shade200))));
+  Widget _buildModernInput(TextEditingController controller, String hint, IconData icon, {TextInputType? keyboardType, FormFieldValidator<String>? validator, List<TextInputFormatter>? inputFormatters, TextCapitalization textCapitalization = TextCapitalization.none}) {
+    return TextFormField(controller: controller, keyboardType: keyboardType, validator: validator, inputFormatters: inputFormatters, textCapitalization: textCapitalization, style: const TextStyle(fontWeight: FontWeight.w700), decoration: InputDecoration(hintText: hint, prefixIcon: Icon(icon, color: const Color(0xFF6366F1), size: 20), filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: Colors.grey.shade200))));
   }
 
   Widget _buildHighPerfSelector(List<String> options, String selectedValue, Function(String) onSelected) {
