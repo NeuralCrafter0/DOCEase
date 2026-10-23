@@ -88,7 +88,16 @@ class PdfExport {
       ),
     );
 
-    await Printing.layoutPdf(onLayout: (PdfPageFormat format) async => pdf.save(), name: 'ClinicalReport_${patient.name.replaceAll(' ', '_')}.pdf');
+    await Printing.layoutPdf(onLayout: (PdfPageFormat format) async => pdf.save(), name: reportFileName(patient, DateTime.now()));
+  }
+
+  /// Non-identifying file name for the print / "Save as PDF" dialog
+  /// (security review C6): report_<first 8 id chars>_<yyyymmdd>.pdf.
+  /// Never contains the patient's name.
+  static String reportFileName(Patient patient, DateTime now) {
+    final cleanId = patient.id.replaceAll(RegExp(r'[^A-Za-z0-9]'), '');
+    final shortId = cleanId.isEmpty ? 'patient' : cleanId.substring(0, cleanId.length < 8 ? cleanId.length : 8);
+    return 'report_${shortId}_${DateFormat('yyyyMMdd').format(now)}.pdf';
   }
 
   static pw.Widget _buildPdfVisitCard(VisitRecord record) {
