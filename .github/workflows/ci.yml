@@ -2,7 +2,8 @@ name: CI
 
 # Pipeline: gitleaks secret scan, flutter analyze, flutter test, Android build,
 # Firebase rules emulator tests (only when firebase/ exists)
-# (release-mode, obfuscated APK; release-signed only when signing secrets exist).
+# (release-mode, obfuscated APK; DEV build with DOCEASE_DEV_MODE=true on PRs and
+# branches; release-signed only on main/v* with secrets and DOCEASE_DEV_MODE=false).
 # Android only for now. Flutter is pinned to the version in .metadata.
 
 on:
@@ -106,11 +107,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      # Signing secrets are only exposed on push/manual runs, never on pull requests.
-      ANDROID_KEYSTORE_BASE64: ${{ github.event_name != 'pull_request' && secrets.ANDROID_KEYSTORE_BASE64 || '' }}
-      ANDROID_KEYSTORE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.ANDROID_KEYSTORE_PASSWORD || '' }}
-      ANDROID_KEY_ALIAS: ${{ github.event_name != 'pull_request' && secrets.ANDROID_KEY_ALIAS || '' }}
-      ANDROID_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.ANDROID_KEY_PASSWORD || '' }}
+      # DOCEASE_DEV_MODE (--dart-define, bool.fromEnvironment, defaults to false
+      # in the app). When true it skips Firebase, login and the screen lock and
+      # shows a "DEV MODE: test data only" banner. CI always passes it explicitly:
+      # - PR / branch / manual builds: DEV build (DOCEASE_DEV_MODE=true), never
+      #   release-signed, artifact labelled DEV, not for patients.
+      # - Release-signed builds and every v* tag build: DOCEASE_DEV_MODE=false.
+      #   The job fails rather than release-sign or tag a dev-mode build.
+      IS_RELEASE_TAG: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/v') }}
+      # Signing secrets are only exposed on main and v* tag runs, never on pull
+      # requests or other branches.
+      ANDROID_KEYSTORE_BASE64: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && secrets.ANDROID_KEYSTORE_BASE64 || '' }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && secrets.ANDROID_KEYSTORE_PASSWORD || '' }}
+      ANDROID_KEY_ALIAS: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && secrets.ANDROID_KEY_ALIAS || '' }}
+      ANDROID_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && secrets.ANDROID_KEY_PASSWORD || '' }}
       DEBUG_INFO_DIR: build/debug-info
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -131,21 +141,54 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
 
-      - name: Decide signing mode
-        id: signing
+      - name: Decide build mode (dev vs production, signing)
+        id: mode
         run: |
           if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ] \
              && [ -n "$ANDROID_KEY_ALIAS" ] && [ -n "$ANDROID_KEY_PASSWORD" ]; then
-            echo "signed=true" >> "$GITHUB_OUTPUT"
-            echo "label=signed" >> "$GITHUB_OUTPUT"
+            signed=true
           else
-            echo "signed=false" >> "$GITHUB_OUTPUT"
-            echo "label=NOT-release-signed-debug-key" >> "$GITHUB_OUTPUT"
-            echo "::warning title=APK is NOT release-signed::Signing secrets are unavailable (pull request, or ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD not configured). The release-mode APK is signed with the debug key and must not be distributed."
+            signed=false
           fi
+          # Release-signed and v* tag builds are always production builds.
+          if [ "$signed" = "true" ] || [ "$IS_RELEASE_TAG" = "true" ]; then
+            dev_mode=false
+          else
+            dev_mode=true
+          fi
+          if [ "$dev_mode" = "true" ]; then
+            label="DEV-login-lock-OFF-not-for-patients"
+            echo "::warning title=DEV build (login and lock OFF)::Built with --dart-define=DOCEASE_DEV_MODE=true: Firebase, login and the screen lock are skipped and the app shows a DEV MODE banner. For testers only, not for patients. Debug-key signed."
+          elif [ "$signed" = "true" ]; then
+            label="release-signed"
+          else
+            label="prod-NOT-release-signed-debug-key"
+            echo "::warning title=APK is NOT release-signed::Production build (DOCEASE_DEV_MODE=false) on a release tag, but signing secrets (ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD) are not configured. Signed with the debug key; do not distribute."
+          fi
+          {
+            echo "signed=$signed"
+            echo "dev_mode=$dev_mode"
+            echo "label=$label"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Release guard (no dev mode in signed or tagged builds)
+        env:
+          SIGNED: ${{ steps.mode.outputs.signed }}
+          DEV_MODE: ${{ steps.mode.outputs.dev_mode }}
+        run: |
+          case "$DEV_MODE" in
+            true|false) ;;
+            *) echo "::error title=Release guard::DOCEASE_DEV_MODE must be true or false, got '$DEV_MODE'"; exit 1 ;;
+          esac
+          if { [ "$SIGNED" = "true" ] || [ "$IS_RELEASE_TAG" = "true" ]; } && [ "$DEV_MODE" != "false" ]; then
+            echo "::error title=Release guard::Refusing to build a release-signed or v* tag artifact with DOCEASE_DEV_MODE=$DEV_MODE. Release builds must use DOCEASE_DEV_MODE=false."
+            exit 1
+          fi
+          echo "Release guard OK: signed=$SIGNED tag=$IS_RELEASE_TAG DOCEASE_DEV_MODE=$DEV_MODE"
 
       - name: Write upload keystore and android/key.properties
-        if: steps.signing.outputs.signed == 'true'
+        # Only for production builds: a dev-mode build is never release-signed.
+        if: steps.mode.outputs.signed == 'true' && steps.mode.outputs.dev_mode == 'false'
         # Values come from secrets via env and are never echoed.
         run: |
           set -euo pipefail
@@ -163,16 +206,35 @@ jobs:
         run: flutter pub get --enforce-lockfile
 
       - name: Build release-mode APK (obfuscated, split debug info)
-        run: flutter build apk --release --obfuscate --split-debug-info="$DEBUG_INFO_DIR"
-
-      - name: Build release AAB (signed runs only)
-        if: steps.signing.outputs.signed == 'true'
-        run: flutter build appbundle --release --obfuscate --split-debug-info="$DEBUG_INFO_DIR"
-
-      - name: Verify signature and write job summary
         env:
-          SIGNED: ${{ steps.signing.outputs.signed }}
-          IS_RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          DOCEASE_DEV_MODE: ${{ steps.mode.outputs.dev_mode }}
+        run: |
+          set -euo pipefail
+          # Second guard: signing material present means this must be a production build.
+          if [ -f android/key.properties ] && [ "$DOCEASE_DEV_MODE" != "false" ]; then
+            echo "::error title=Release guard::android/key.properties exists but DOCEASE_DEV_MODE=$DOCEASE_DEV_MODE"
+            exit 1
+          fi
+          flutter build apk --release --obfuscate --split-debug-info="$DEBUG_INFO_DIR" \
+            --dart-define=DOCEASE_DEV_MODE="$DOCEASE_DEV_MODE"
+
+      - name: Build release AAB (release-signed production runs only)
+        if: steps.mode.outputs.signed == 'true' && steps.mode.outputs.dev_mode == 'false'
+        env:
+          DOCEASE_DEV_MODE: ${{ steps.mode.outputs.dev_mode }}
+        run: |
+          set -euo pipefail
+          if [ "$DOCEASE_DEV_MODE" != "false" ]; then
+            echo "::error title=Release guard::Refusing to build a release AAB with DOCEASE_DEV_MODE=$DOCEASE_DEV_MODE"
+            exit 1
+          fi
+          flutter build appbundle --release --obfuscate --split-debug-info="$DEBUG_INFO_DIR" \
+            --dart-define=DOCEASE_DEV_MODE="$DOCEASE_DEV_MODE"
+
+      - name: Verify signature and dev mode, write job summary
+        env:
+          SIGNED: ${{ steps.mode.outputs.signed }}
+          DEV_MODE: ${{ steps.mode.outputs.dev_mode }}
         run: |
           set -euo pipefail
           apk=build/app/outputs/flutter-apk/app-release.apk
@@ -180,17 +242,31 @@ jobs:
           certs="$("$apksigner" verify --print-certs "$apk")"
           cert_dn="$(printf '%s\n' "$certs" | sed -n 's/^Signer #1 certificate DN: //p')"
           cert_sha256="$(printf '%s\n' "$certs" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')"
-          # Guard: never label a debug-key APK as release-signed.
-          if [ "$SIGNED" = "true" ] && printf '%s' "$cert_dn" | grep -q 'CN=Android Debug'; then
+          debug_cert=false
+          if printf '%s' "$cert_dn" | grep -q 'CN=Android Debug'; then debug_cert=true; fi
+          # Never label a debug-key APK as release-signed.
+          if [ "$SIGNED" = "true" ] && [ "$debug_cert" = "true" ]; then
             echo "::error title=Release signing failed::Signing secrets were provided but the APK is signed with the debug key."
+            exit 1
+          fi
+          # Third guard: a non-debug (release) certificate on a dev-mode build is never allowed.
+          if [ "$debug_cert" = "false" ] && [ "$DEV_MODE" != "false" ]; then
+            echo "::error title=Release guard::The APK carries a release certificate but was built with DOCEASE_DEV_MODE=$DEV_MODE."
             exit 1
           fi
           {
             echo "## Android build"
             echo ""
+            if [ "$DEV_MODE" = "true" ]; then
+              echo "> **DEV build: login, screen lock and Firebase are OFF** (\`DOCEASE_DEV_MODE=true\`, app shows a \"DEV MODE: test data only\" banner). For testers only, **not for patients**."
+            else
+              echo "> **Production build** (\`DOCEASE_DEV_MODE=false\`): Firebase, login and screen lock enabled."
+            fi
+            echo ""
             echo "| | |"
             echo "|---|---|"
             echo "| Build mode | release, \`--obfuscate --split-debug-info\` |"
+            echo "| DOCEASE_DEV_MODE | \`${DEV_MODE}\` |"
             if [ "$SIGNED" = "true" ]; then
               echo "| Signing | **Release-signed** with the upload key |"
             else
@@ -209,13 +285,13 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: docease-apk-release-${{ steps.signing.outputs.label }}
+          name: docease-apk-${{ steps.mode.outputs.label }}
           path: build/app/outputs/flutter-apk/app-release.apk
           retention-days: 7
           if-no-files-found: error
 
       - name: Upload AAB
-        if: steps.signing.outputs.signed == 'true'
+        if: steps.mode.outputs.signed == 'true' && steps.mode.outputs.dev_mode == 'false'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: docease-aab-release-signed
@@ -230,7 +306,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: docease-debug-symbols-${{ steps.signing.outputs.label }}
+          name: docease-debug-symbols-${{ steps.mode.outputs.label }}
           path: |
             build/debug-info/
             build/app/outputs/mapping/release/mapping.txt
@@ -240,7 +316,6 @@ jobs:
       - name: Remove signing material
         if: always()
         run: rm -f "$RUNNER_TEMP/upload-keystore.jks" android/key.properties
-
 
   firebase-rules:
     name: Firebase rules (emulator tests)
