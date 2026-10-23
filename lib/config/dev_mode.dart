@@ -21,8 +21,12 @@ import 'package:flutter/widgets.dart';
 /// has login, the lock, the security rules and sync.
 ///
 /// Code below main() should not read these constants directly: use
-/// [DevMode.of] (widgets) or the providers' `cloudSync` parameter, so tests
-/// can set the mode explicitly.
+/// [DevMode.of] (widgets) or the providers' `cloudSync` parameter. Every
+/// injectable way to turn dev mode ON (`DevMode`, `DOCEaseApp.devMode`,
+/// `SessionController.localOnly`, `LocalOnlySessionPlatform`,
+/// `buildDevModeApp`) is gated on [kDevMode], so no code path can enable
+/// it in a build without the define. `cloudSync: false` only turns cloud
+/// work off and is not gated.
 const bool kDevModeRequested =
     bool.fromEnvironment('DOCEASE_DEV_MODE', defaultValue: false);
 
@@ -61,16 +65,20 @@ bool isLocalOwner(String? uid) => uid == kLocalOwnerId;
 /// Text of the banner shown on every screen while dev mode is on.
 const String kDevModeBannerText = 'DEV MODE: test data only';
 
-/// Injectable dev-mode flag for widgets. The dev-mode app wraps everything
-/// in `DevMode(enabled: true)`; without a scope the compile-time [kDevMode]
-/// applies. Tests pump an explicit scope instead of relying on the define.
+/// Dev-mode flag for widgets. The dev-mode app wraps everything in
+/// `DevMode(enabled: true)`.
+///
+/// A scope can only turn dev mode OFF: [of] is `enabled && kDevMode`, so
+/// without the define (or in a release build) it is always false, whatever
+/// is injected. Without a scope [kDevMode] applies. Tests that need dev mode
+/// on run with `--dart-define=DOCEASE_DEV_MODE=true` (see docs/DEV_MODE.md).
 class DevMode extends InheritedWidget {
   const DevMode({super.key, required this.enabled, required super.child});
 
   final bool enabled;
 
   static bool of(BuildContext context) =>
-      context.dependOnInheritedWidgetOfExactType<DevMode>()?.enabled ?? kDevMode;
+      kDevMode && (context.dependOnInheritedWidgetOfExactType<DevMode>()?.enabled ?? true);
 
   @override
   bool updateShouldNotify(DevMode oldWidget) => enabled != oldWidget.enabled;
