@@ -434,18 +434,30 @@ void main() {
       expect(fake.authCalls, 0);
     });
 
-    testWidgets('SecurityWrapper without a lock host above it brings its own (fail closed)', (t) async {
-      fake.result = false;
-      await t.pumpWidget(const MaterialApp(home: SecurityWrapper()));
-      await settle(t);
-      expectLocked();
-      expect(protectedSubtreeBuilt(), isFalse);
-      expect(fake.authCalls, 1);
+    testWidgets('F4-R1 SecurityWrapper without a lock host fails hard, no fallback lock', (t) async {
       fake.result = true;
-      await t.tap(find.text(unlockButton));
-      await settle(t);
-      expect(find.text(lockTitle), findsNothing);
-      expect(protectedSubtreeBuilt(), isTrue);
+      final errors = <Object>[];
+      final prev = FlutterError.onError;
+      FlutterError.onError = (d) => errors.add(d.exception);
+      addTearDown(() => FlutterError.onError = prev);
+      final nav = GlobalKey<NavigatorState>();
+      await t.pumpWidget(MaterialApp(navigatorKey: nav, home: const SecurityWrapper()));
+      await t.pump(const Duration(milliseconds: 100));
+      FlutterError.onError = prev;
+      expect(errors.whereType<AssertionError>(), isNotEmpty, reason: 'debug builds assert');
+      expect(find.textContaining('App misconfigured'), findsOneWidget);
+      expect(find.descendant(of: find.byType(MaterialApp), matching: find.byType(AppLockHost)), findsNothing,
+          reason: 'no degraded lock inside the home route');
+      expect(protectedSubtreeBuilt(), isFalse);
+      expect(fake.authCalls, 0, reason: 'nothing to unlock');
+      // A route pushed on top (the old bypass) shows nothing protected either.
+      nav.currentState!.push(MaterialPageRoute<void>(builder: (_) => const Scaffold(body: Text('pushed'))));
+      await t.pumpAndSettle();
+      expect(find.text('pushed'), findsOneWidget);
+      expect(protectedSubtreeBuilt(), isFalse);
+      nav.currentState!.pop();
+      await t.pumpAndSettle();
+      expect(find.textContaining('App misconfigured'), findsOneWidget);
     });
   });
 }

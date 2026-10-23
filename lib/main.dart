@@ -68,9 +68,10 @@ class DOCEaseApp extends StatelessWidget {
 /// and builds nothing behind it until the first successful unlock, so no
 /// session or account data loads before then.
 ///
-/// Built without a host above it (embedded in another app, or in a widget
-/// test), it wraps itself in one. That fallback still fails closed but sits
-/// below the navigator, so DOCEaseApp provides the real host above it.
+/// Built without a host above it, it fails hard: an assertion in debug and,
+/// in every build mode, a full-screen "App misconfigured" view with nothing
+/// protected behind it. It never runs a weaker lock below the navigator,
+/// where pushed routes would draw above it (security re-review F4-R1).
 class SecurityWrapper extends StatefulWidget {
   const SecurityWrapper({super.key});
 
@@ -99,8 +100,15 @@ class _SecurityWrapperState extends State<SecurityWrapper> {
     // no session or account data can load. Later re-locks hide this subtree
     // without rebuilding it (see AppLockHost).
     if (_lock == null) {
-      debugPrint('SecurityWrapper: no AppLockHost above the app; using a fallback lock below the navigator.');
-      return const AppLockHost(child: SecurityWrapper());
+      assert(() {
+        FlutterError.reportError(FlutterErrorDetails(
+          exception: AssertionError(
+              'SecurityWrapper needs an AppLockHost above the MaterialApp (DOCEaseApp provides it).'),
+          library: 'docease app lock',
+        ));
+        return true;
+      }());
+      return const LockMisconfiguredView();
     }
     if (!_hasUnlockedOnce) return _buildLockScreen();
 
@@ -111,6 +119,31 @@ class _SecurityWrapperState extends State<SecurityWrapper> {
         if (snapshot.hasData) return const HomeScreen();
         return const LoginScreen();
       },
+    );
+  }
+}
+
+/// Shown instead of the app when [SecurityWrapper] has no [AppLockHost]
+/// above it. Builds nothing protected, so there is nothing to bypass.
+class LockMisconfiguredView extends StatelessWidget {
+  const LockMisconfiguredView({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const Material(
+      color: Color(0xFF1E293B),
+      child: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: EdgeInsets.all(32),
+            child: Text(
+              'App misconfigured\n\nThe app lock is missing, so no patient data is shown. Please reinstall the app.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white, fontSize: 18),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
