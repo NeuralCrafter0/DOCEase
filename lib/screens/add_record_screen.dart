@@ -8,6 +8,7 @@ import '../models/patient.dart';
 import '../providers/patient_provider.dart';
 import '../providers/medicine_provider.dart';
 import '../utils/prescription_lines.dart';
+import '../utils/visit_order.dart';
 
 class AddRecordScreen extends StatefulWidget {
   final String patientId;
@@ -54,8 +55,9 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
 
   void _repeatLastVisit() {
     final patient = Provider.of<PatientProvider>(context, listen: false).findById(widget.patientId);
-    if (patient.history.isNotEmpty) {
-      final last = patient.history.first;
+    // Latest by visit date, not the most recently inserted note.
+    final last = patient.history.latestVisit;
+    if (last != null) {
       setState(() {
         _symptomsController.text = last.symptoms;
         _diagnosisController.text = last.diagnosis;

@@ -8,6 +8,7 @@ import '../providers/patient_provider.dart';
 import '../providers/doctor_provider.dart';
 import '../models/patient.dart';
 import '../utils/pdf_export.dart';
+import '../utils/visit_order.dart';
 import 'add_patient_screen.dart';
 import 'add_record_screen.dart';
 
@@ -86,7 +87,10 @@ class PatientDetailScreen extends StatelessWidget {
       builder: (ctx, provider, _) {
         final patient = provider.findById(patientId);
         final family = provider.patients.where((p) => p.phone == patient.phone && p.id != patient.id).toList();
-        final lastVisit = patient.history.isNotEmpty ? patient.history.first : null;
+        // Timeline, "Last Visit" and the latest marker follow visit date,
+        // not insertion order (a backdated note is inserted at index 0).
+        final timeline = patient.history.newestFirst();
+        final lastVisit = timeline.isNotEmpty ? timeline.first : null;
 
         return Scaffold(
           backgroundColor: const Color(0xFFF8FAFC),
@@ -116,7 +120,7 @@ class PatientDetailScreen extends StatelessWidget {
               const SizedBox(height: 32),
               const Row(children: [Icon(Icons.history_edu_outlined, size: 20, color: Color(0xFF6366F1)), SizedBox(width: 8), Text('Clinical Timeline', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Color(0xFF1E293B)))]),
               const SizedBox(height: 16),
-              Expanded(child: patient.history.isEmpty ? const Center(child: Text('No Clinical Records Available')) : ListView.builder(padding: const EdgeInsets.only(bottom: 100), itemCount: patient.history.length, itemBuilder: (ctx, i) => _buildClinicalTimeline(context, doctor, patient, patient.history[i], i == 0, provider))),
+              Expanded(child: patient.history.isEmpty ? const Center(child: Text('No Clinical Records Available')) : ListView.builder(padding: const EdgeInsets.only(bottom: 100), itemCount: timeline.length, itemBuilder: (ctx, i) => _buildClinicalTimeline(context, doctor, patient, timeline[i], i == 0, provider))),
             ]),
           ),
           floatingActionButton: FloatingActionButton.extended(backgroundColor: const Color(0xFF6366F1), foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), icon: const Icon(Icons.add_moderator_outlined, size: 20), label: const Text('Add Clinical Note'), onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (ctx) => AddRecordScreen(patientId: patientId)))),

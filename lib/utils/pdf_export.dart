@@ -4,6 +4,7 @@ import 'package:printing/printing.dart';
 import 'package:intl/intl.dart';
 import '../models/patient.dart';
 import '../models/doctor.dart';
+import 'visit_order.dart';
 
 class PdfExport {
   static Future<void> generateAndPrintPatientReport(Patient patient, {Doctor? doctor}) async {
@@ -78,7 +79,7 @@ class PdfExport {
             pw.Text('CLINICAL TIMELINE', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: PdfColors.blue900)),
             pw.SizedBox(height: 16),
             if (patient.history.isEmpty) pw.Center(child: pw.Text('No clinical records available.'))
-            else ...patient.history.map((record) => _buildPdfVisitCard(record)),
+            else ...patient.history.newestFirst().map((record) => _buildPdfVisitCard(record)),
             pw.Spacer(),
             pw.Divider(color: PdfColors.grey300),
             pw.SizedBox(height: 8),
