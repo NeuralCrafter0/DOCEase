@@ -68,5 +68,9 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+<key>NSCameraUsageDescription</key>
+<string>DOCEase uses the camera to add clinical photos to a patient's visit.</string>
+<key>NSPhotoLibraryUsageDescription</key>
+<string>DOCEase uses your photo library to add clinical photos to a patient's visit.</string>
 </dict>
 </plist>

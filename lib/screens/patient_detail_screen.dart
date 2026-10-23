@@ -9,6 +9,7 @@ import '../providers/patient_provider.dart';
 import '../providers/doctor_provider.dart';
 import '../models/patient.dart';
 import '../config/dev_mode.dart';
+import '../utils/attachment_storage.dart';
 import '../utils/pdf_export.dart';
 import '../utils/test_data_marker.dart';
 import '../models/doctor.dart';
@@ -65,12 +66,20 @@ class PatientDetailScreen extends StatelessWidget {
             Row(children: [
               Expanded(child: TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF475569))))),
               const SizedBox(width: 16),
-              Expanded(child: ElevatedButton(onPressed: () { final messenger = ScaffoldMessenger.of(context); provider.deletePatient(patient.id).catchError((Object _) { messenger.showSnackBar(const SnackBar(content: Text('Could not delete this patient. Please try again.'))); }); Navigator.pop(ctx); Navigator.pop(context); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))), child: const Text('Delete All', style: TextStyle(fontWeight: FontWeight.bold)))),
+              Expanded(child: ElevatedButton(onPressed: () { final messenger = ScaffoldMessenger.of(context); deleteWithLocalAttachments([for (final r in patient.history) ...r.attachmentPaths], () => provider.deletePatient(patient.id)).catchError((Object _) { messenger.showSnackBar(const SnackBar(content: Text('Could not delete this patient. Please try again.'))); }); Navigator.pop(ctx); Navigator.pop(context); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))), child: const Text('Delete All', style: TextStyle(fontWeight: FontWeight.bold)))),
             ])
           ],
         ),
       ),
     );
+  }
+
+  static List<String> _visitAttachments(PatientProvider provider, String pId, String rId) {
+    try {
+      return [for (final r in provider.findById(pId).history) if (r.id == rId) ...r.attachmentPaths];
+    } catch (_) {
+      return const [];
+    }
   }
 
   void _showModernDeleteRecordConfirm(BuildContext context, PatientProvider provider, String pId, String rId) {
@@ -91,7 +100,7 @@ class PatientDetailScreen extends StatelessWidget {
             Row(children: [
               Expanded(child: TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel'))),
               const SizedBox(width: 16),
-              Expanded(child: ElevatedButton(onPressed: () { final messenger = ScaffoldMessenger.of(context); provider.deleteRecord(pId, rId).catchError((Object _) { messenger.showSnackBar(const SnackBar(content: Text('Could not delete this visit. Please try again.'))); }); Navigator.pop(ctx); Navigator.pop(context); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white), child: const Text('Delete'))),
+              Expanded(child: ElevatedButton(onPressed: () { final messenger = ScaffoldMessenger.of(context); deleteWithLocalAttachments(_visitAttachments(provider, pId, rId), () => provider.deleteRecord(pId, rId)).catchError((Object _) { messenger.showSnackBar(const SnackBar(content: Text('Could not delete this visit. Please try again.'))); }); Navigator.pop(ctx); Navigator.pop(context); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white), child: const Text('Delete'))),
             ])
           ],
         ),

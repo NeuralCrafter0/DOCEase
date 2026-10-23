@@ -6,6 +6,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'providers/patient_provider.dart';
 import 'providers/doctor_provider.dart';
+import 'utils/picker_hygiene.dart';
 import 'providers/medicine_provider.dart';
 import 'providers/database_helper.dart';
 import 'providers/firestore_settings.dart';
@@ -15,6 +16,8 @@ import 'dev/dev_mode_app.dart';
 import 'services/log_codes.dart';
 import 'services/session_controller.dart';
 import 'services/startup_hooks.dart';
+import 'utils/attachment_storage.dart';
+import 'services/current_owner.dart';
 import 'widgets/session_status_view.dart';
 import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
@@ -25,6 +28,11 @@ void main() async {
   // Features register StartupHooks here (before the switch) so they run in
   // dev and normal mode alike; see services/startup_hooks.dart.
 
+  // #8 merge wiring (QA merge, per frontend): photo storage follows #13's
+  // CurrentOwner (the Google uid, or the local owner in dev mode), and the
+  // picker clean-up runs on both start paths (security re-review F8-R2, F8-R6).
+  AttachmentStorage.currentOwnerId = () => CurrentOwner.id;
+  StartupHooks.register('picker_hygiene', PickerHygiene.atStartup);
   switch (decideStartMode(requested: kDevModeRequested, release: kReleaseMode)) {
     case StartMode.refused:
       // Release build made with the dev define: refuse loudly, never fall
