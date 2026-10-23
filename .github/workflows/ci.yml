@@ -130,12 +130,13 @@ jobs:
       ANDROID_KEY_ALIAS: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && secrets.ANDROID_KEY_ALIAS || '' }}
       ANDROID_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && secrets.ANDROID_KEY_PASSWORD || '' }}
       DEBUG_INFO_DIR: build/debug-info
-      # Android product flavor for DEV builds. Empty today because main has no
-      # flavors (passing --flavor would break the build). When the app's "dev"
-      # flavor (applicationIdSuffix ".dev") lands, set this to "dev": DEV builds
-      # then run `flutter build apk --profile --flavor dev ...` and the APK path
-      # becomes app-dev-profile.apk. Production builds never use this flavor.
-      DEV_FLAVOR: ""
+      # Production application ID. The "dev" flavor (when present) adds ".dev".
+      APP_ID: com.medhistory.app.medhistory
+      # Product flavors are auto-detected from android/app/build.gradle(.kts):
+      # - no productFlavors (main today): no --flavor; APK app-<mode>.apk.
+      # - productFlavors with dev + prod (PR #13): DEV builds use --flavor dev
+      #   (app-dev-profile.apk, "DOCEase DEV", <APP_ID>.dev); production builds
+      #   use --flavor prod (app-prod-release.apk, bundle/prodRelease AAB).
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -158,6 +159,7 @@ jobs:
       - name: Decide build mode (dev vs production, signing)
         id: mode
         run: |
+          set -euo pipefail
           if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ] \
              && [ -n "$ANDROID_KEY_ALIAS" ] && [ -n "$ANDROID_KEY_PASSWORD" ]; then
             signed=true
@@ -181,16 +183,43 @@ jobs:
             label="prod-NOT-release-signed-debug-key"
             echo "::warning title=APK is NOT release-signed::Production build (DOCEASE_DEV_MODE=false) on a release tag, but signing secrets (ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD) are not configured. Signed with the debug key; do not distribute."
           fi
+          # Auto-detect Android product flavors (a `productFlavors {` block, not
+          # comments). If flavors exist, both dev and prod are required.
+          gradle_files=()
+          for f in android/app/build.gradle.kts android/app/build.gradle; do
+            if [ -f "$f" ]; then gradle_files+=("$f"); fi
+          done
+          flavor=""
+          if [ "${#gradle_files[@]}" -gt 0 ] && grep -qE '^[[:space:]]*productFlavors[[:space:]]*\{' "${gradle_files[@]}"; then
+            has_dev=false; has_prod=false
+            if grep -qE 'create\("dev"\)|^[[:space:]]*dev[[:space:]]*\{' "${gradle_files[@]}"; then has_dev=true; fi
+            if grep -qE 'create\("prod"\)|^[[:space:]]*prod[[:space:]]*\{' "${gradle_files[@]}"; then has_prod=true; fi
+            if [ "$has_dev" != "true" ] || [ "$has_prod" != "true" ]; then
+              echo "::error title=Flavor detection::productFlavors found in ${gradle_files[*]} but not both 'dev' and 'prod' (dev=$has_dev prod=$has_prod). Update ci.yml for the new flavors."
+              exit 1
+            fi
+            if [ "$dev_mode" = "true" ]; then flavor=dev; else flavor=prod; fi
+          fi
+          out=build/app/outputs
+          if [ -n "$flavor" ]; then
+            apk="$out/flutter-apk/app-$flavor-$build_mode.apk"
+            aab="$out/bundle/${flavor}Release/app-$flavor-release.aab"
+            mapping="$out/mapping/${flavor}Release/mapping.txt"
+          else
+            apk="$out/flutter-apk/app-$build_mode.apk"
+            aab="$out/bundle/release/app-release.aab"
+            mapping="$out/mapping/release/mapping.txt"
+          fi
+          echo "Flavor: ${flavor:-none (no productFlavors)}; APK: $apk"
           {
             echo "signed=$signed"
             echo "dev_mode=$dev_mode"
             echo "label=$label"
             echo "build_mode=$build_mode"
-            if [ "$dev_mode" = "true" ] && [ -n "$DEV_FLAVOR" ]; then
-              echo "apk=build/app/outputs/flutter-apk/app-$DEV_FLAVOR-$build_mode.apk"
-            else
-              echo "apk=build/app/outputs/flutter-apk/app-$build_mode.apk"
-            fi
+            echo "flavor=$flavor"
+            echo "apk=$apk"
+            echo "aab=$aab"
+            echo "mapping=$mapping"
           } >> "$GITHUB_OUTPUT"
 
       - name: Release guard (no dev mode in signed or tagged builds)
@@ -198,6 +227,7 @@ jobs:
           SIGNED: ${{ steps.mode.outputs.signed }}
           DEV_MODE: ${{ steps.mode.outputs.dev_mode }}
           BUILD_MODE: ${{ steps.mode.outputs.build_mode }}
+          FLAVOR: ${{ steps.mode.outputs.flavor }}
         run: |
           case "$DEV_MODE/$BUILD_MODE" in
             true/profile|false/release) ;;
@@ -211,7 +241,12 @@ jobs:
             echo "::error title=Release guard::Refusing to build a release-signed or v* tag artifact with DOCEASE_DEV_MODE=$DEV_MODE. Release builds must use DOCEASE_DEV_MODE=false."
             exit 1
           fi
-          echo "Release guard OK: signed=$SIGNED tag=$IS_RELEASE_TAG DOCEASE_DEV_MODE=$DEV_MODE build=--$BUILD_MODE"
+          # With flavors: dev mode only with --flavor dev, production only with --flavor prod.
+          case "$FLAVOR/$DEV_MODE" in
+            /true|/false|dev/true|prod/false) ;;
+            *) echo "::error title=Release guard::Invalid combination --flavor $FLAVOR with DOCEASE_DEV_MODE=$DEV_MODE (dev flavor is DEV only, prod flavor is production only)"; exit 1 ;;
+          esac
+          echo "Release guard OK: signed=$SIGNED tag=$IS_RELEASE_TAG DOCEASE_DEV_MODE=$DEV_MODE build=--$BUILD_MODE flavor=${FLAVOR:-none}"
 
       - name: Write upload keystore and android/key.properties
         # Only for production builds: a dev-mode build is never release-signed.
@@ -236,23 +271,23 @@ jobs:
         env:
           DOCEASE_DEV_MODE: ${{ steps.mode.outputs.dev_mode }}
           BUILD_MODE: ${{ steps.mode.outputs.build_mode }}
+          FLAVOR: ${{ steps.mode.outputs.flavor }}
         run: |
           set -euo pipefail
+          flavor_args=()
+          if [ -n "$FLAVOR" ]; then flavor_args=(--flavor "$FLAVOR"); fi
           # Second guard: signing material present means this must be a production release build.
           if [ -f android/key.properties ] && { [ "$DOCEASE_DEV_MODE" != "false" ] || [ "$BUILD_MODE" != "release" ]; }; then
             echo "::error title=Release guard::android/key.properties exists but DOCEASE_DEV_MODE=$DOCEASE_DEV_MODE, --$BUILD_MODE"
             exit 1
           fi
-          if [ "$BUILD_MODE" = "release" ] && [ "$DOCEASE_DEV_MODE" = "false" ]; then
-            flutter build apk --release --obfuscate --split-debug-info="$DEBUG_INFO_DIR" \
+          if [ "$BUILD_MODE" = "release" ] && [ "$DOCEASE_DEV_MODE" = "false" ] && [ "$FLAVOR" != "dev" ]; then
+            flutter build apk --release "${flavor_args[@]}" --obfuscate --split-debug-info="$DEBUG_INFO_DIR" \
               --dart-define=DOCEASE_DEV_MODE=false
-          elif [ "$BUILD_MODE" = "profile" ] && [ "$DOCEASE_DEV_MODE" = "true" ]; then
-            # --flavor dev is added here once DEV_FLAVOR is set (see job env).
-            flavor_args=()
-            if [ -n "$DEV_FLAVOR" ]; then flavor_args=(--flavor "$DEV_FLAVOR"); fi
+          elif [ "$BUILD_MODE" = "profile" ] && [ "$DOCEASE_DEV_MODE" = "true" ] && [ "$FLAVOR" != "prod" ]; then
             flutter build apk --profile "${flavor_args[@]}" --dart-define=DOCEASE_DEV_MODE=true
           else
-            echo "::error title=Release guard::Invalid build: DOCEASE_DEV_MODE=$DOCEASE_DEV_MODE with --$BUILD_MODE"
+            echo "::error title=Release guard::Invalid build: DOCEASE_DEV_MODE=$DOCEASE_DEV_MODE with --$BUILD_MODE, flavor '${FLAVOR:-none}'"
             exit 1
           fi
 
@@ -260,20 +295,26 @@ jobs:
         if: steps.mode.outputs.signed == 'true' && steps.mode.outputs.dev_mode == 'false'
         env:
           DOCEASE_DEV_MODE: ${{ steps.mode.outputs.dev_mode }}
+          FLAVOR: ${{ steps.mode.outputs.flavor }}
+          AAB: ${{ steps.mode.outputs.aab }}
         run: |
           set -euo pipefail
-          if [ "$DOCEASE_DEV_MODE" != "false" ]; then
-            echo "::error title=Release guard::Refusing to build a release AAB with DOCEASE_DEV_MODE=$DOCEASE_DEV_MODE"
+          if [ "$DOCEASE_DEV_MODE" != "false" ] || [ "$FLAVOR" = "dev" ]; then
+            echo "::error title=Release guard::Refusing to build a release AAB with DOCEASE_DEV_MODE=$DOCEASE_DEV_MODE, flavor '${FLAVOR:-none}'"
             exit 1
           fi
-          flutter build appbundle --release --obfuscate --split-debug-info="$DEBUG_INFO_DIR" \
+          flavor_args=()
+          if [ -n "$FLAVOR" ]; then flavor_args=(--flavor "$FLAVOR"); fi
+          flutter build appbundle --release "${flavor_args[@]}" --obfuscate --split-debug-info="$DEBUG_INFO_DIR" \
             --dart-define=DOCEASE_DEV_MODE="$DOCEASE_DEV_MODE"
+          test -f "$AAB"
 
       - name: Verify signature and dev mode, write job summary
         env:
           SIGNED: ${{ steps.mode.outputs.signed }}
           DEV_MODE: ${{ steps.mode.outputs.dev_mode }}
           BUILD_MODE: ${{ steps.mode.outputs.build_mode }}
+          FLAVOR: ${{ steps.mode.outputs.flavor }}
           APK: ${{ steps.mode.outputs.apk }}
         run: |
           set -euo pipefail
@@ -295,6 +336,17 @@ jobs:
           cert_sha256="$shas"
           # Public certificate details only (no secrets).
           echo "APK signer (apksigner $(basename "$bt")): $cert_dn, SHA-256 $cert_sha256"
+          # Package ID: production builds must be exactly APP_ID; dev-flavor builds APP_ID.dev.
+          pkg="$("$bt/aapt2" dump packagename "$apk")"
+          echo "APK package: $pkg (flavor ${FLAVOR:-none})"
+          if [ "$DEV_MODE" = "false" ] && [ "$pkg" != "$APP_ID" ]; then
+            echo "::error title=Release guard::Production build has package '$pkg', expected '$APP_ID'."
+            exit 1
+          fi
+          if [ "$FLAVOR" = "dev" ] && [ "$pkg" != "$APP_ID.dev" ]; then
+            echo "::error title=Release guard::Dev-flavor build has package '$pkg', expected '$APP_ID.dev'."
+            exit 1
+          fi
           debug_cert=false
           if printf '%s' "$cert_dn" | grep -q 'CN=Android Debug'; then debug_cert=true; fi
           # Never label a debug-key APK as release-signed.
@@ -324,6 +376,8 @@ jobs:
               echo "| Build mode | \`--profile\` (DEV, not obfuscated) |"
             fi
             echo "| DOCEASE_DEV_MODE | \`${DEV_MODE}\` |"
+            echo "| Flavor | ${FLAVOR:-none (no productFlavors on this ref)} |"
+            echo "| Package | \`${pkg}\` |"
             if [ "$SIGNED" = "true" ]; then
               echo "| Signing | **Release-signed** with the upload key |"
             else
@@ -352,7 +406,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: docease-aab-release-signed
-          path: build/app/outputs/bundle/release/app-release.aab
+          path: ${{ steps.mode.outputs.aab }}
           retention-days: 14
           if-no-files-found: error
 
@@ -366,7 +420,7 @@ jobs:
           name: docease-debug-symbols-${{ steps.mode.outputs.label }}
           path: |
             build/debug-info/
-            build/app/outputs/mapping/release/mapping.txt
+            ${{ steps.mode.outputs.mapping }}
           retention-days: 14
           if-no-files-found: error
 
