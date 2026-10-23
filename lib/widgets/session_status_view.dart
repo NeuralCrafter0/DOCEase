@@ -1,12 +1,17 @@
 import 'package:flutter/material.dart';
 
-import '../providers/local_database.dart';
 import '../services/session_controller.dart';
 import '../services/session_platform.dart';
+import 'session_db_adapter.dart';
 
 /// What the root shows while the session is not [SessionPhase.ready] (and
 /// not signed out): progress, approval, the legacy-data question, or an
 /// error with retry / reset. Plain styling; the frontend may restyle it.
+///
+/// The database phases (opening, migrating, failed) use the frontend's
+/// DbOpenStateView through [SessionDbAdapter]: one view per failure, the
+/// migration step and progress, and the reset screen with the unsynced
+/// count, offered only on a key mismatch.
 class SessionStatusView extends StatelessWidget {
   const SessionStatusView({super.key, required this.session});
 
@@ -14,15 +19,12 @@ class SessionStatusView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final dbState = SessionDbAdapter.stateOf(session);
+    if (dbState != null) return SessionDbAdapter.view(context, session, dbState);
     final body = switch (session.phase) {
-      SessionPhase.migrating => _progress(
-          _migrationText(session.migrationStep),
-          value: session.migrationProgress > 0 ? session.migrationProgress : null),
       SessionPhase.pendingApproval => _approval(context),
       SessionPhase.legacyDecision => _legacy(context),
-      SessionPhase.failed => _failed(context),
       SessionPhase.checkingApproval => _progress('Checking your account...'),
-      SessionPhase.opening => _progress('Opening your records...'),
       _ => _progress(null),
     };
     return Scaffold(
@@ -44,14 +46,6 @@ class SessionStatusView extends StatelessWidget {
           if (text != null) ...[const SizedBox(height: 16), Text(text, textAlign: TextAlign.center)],
         ],
       );
-
-  static String _migrationText(DbMigrationStep? step) => switch (step) {
-        DbMigrationStep.encryptingPlaintext => 'Encrypting your records on this phone...',
-        DbMigrationStep.rekeyingFromFallback ||
-        DbMigrationStep.rekeyingFromLegacyKey =>
-          'Securing your records with a new key...',
-        null => 'Updating your records...',
-      };
 
   Widget _message(String title, String text, List<Widget> actions) => Column(
         mainAxisSize: MainAxisSize.min,
@@ -113,57 +107,5 @@ class SessionStatusView extends StatelessWidget {
           child: const Text('Keep them separate')),
       _signOut(),
     ]);
-  }
-
-  Widget _failed(BuildContext context) {
-    final text = switch (session.failure) {
-      DbOpenError.keyUnavailable =>
-        'The phone\'s secure storage is not available right now. Try again.',
-      DbOpenError.keyMismatch =>
-        'Your records on this phone can\'t be unlocked with this phone\'s key. You can reset '
-            'them and download your records again from the cloud.',
-      DbOpenError.storageFull => 'Your phone is out of storage. Free some space and try again.',
-      _ => 'Your records could not be opened. Nothing was deleted. Try again.',
-    };
-    return _message('Can\'t open your records', text, [
-      FilledButton(onPressed: session.retry, child: const Text('Try again')),
-      if (session.canReset)
-        OutlinedButton(onPressed: () => _confirmReset(context), child: const Text('Reset this phone\'s copy')),
-      _signOut(),
-    ]);
-  }
-
-  Future<void> _confirmReset(BuildContext context) async {
-    final count = await session.unsyncedCount();
-    if (!context.mounted) return;
-    final warning = switch (count) {
-      UnsyncedKnown(:final count) when count == 0 =>
-        'All your changes are saved in the cloud. Nothing will be lost.',
-      UnsyncedKnown(:final count) =>
-        '$count changes on this phone are not in the cloud yet and will be lost.',
-      _ => 'Some changes on this phone may not be in the cloud yet and would be lost.',
-    };
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Reset this phone\'s copy?'),
-        content: Text(warning),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Reset')),
-        ],
-      ),
-    );
-    if (ok != true) return;
-    try {
-      await session.resetAndResync(acknowledgedUnsynced: count);
-    } on ResetNotConfirmedException {
-      if (context.mounted) await _confirmReset(context); // count got worse: ask again
-    } catch (_) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Reset failed. Nothing was deleted.')));
-      }
-    }
   }
 }
