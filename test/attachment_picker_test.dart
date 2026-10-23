@@ -116,6 +116,11 @@ void main() {
   }
 
   Future<void> save(WidgetTester t) async {
+    // fix/form-validation makes the diagnosis required; fill it so a save
+    // goes through both alone and with that branch merged.
+    final diagnosis = find.byWidgetPredicate((w) =>
+        w is TextField && (w.decoration?.hintText == 'Diagnosis' || w.decoration?.labelText == 'Diagnosis'));
+    await t.enterText(diagnosis, 'URTI');
     await t.tap(find.text('Save Clinical Record'));
     await t.pumpAndSettle();
   }
