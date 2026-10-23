@@ -1,5 +1,6 @@
 // Regression tests: PHI inputs opt out of keyboard learning, autocorrect,
-// suggestions and smart punctuation (security review C12, PR #7 review).
+// suggestions and smart punctuation (security review C12, PR #7 review,
+// QA feature pass F-PRIV-02 for the phone field).
 // ignore_for_file: depend_on_referenced_packages
 import 'package:docease/models/patient.dart';
 import 'package:docease/providers/medicine_provider.dart';
@@ -10,7 +11,6 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_core_platform_interface/test.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:intl_phone_field/intl_phone_field.dart';
 import 'package:provider/provider.dart';
 
 class FakePatientProvider extends PatientProvider {
@@ -37,13 +37,9 @@ Future<void> pump(WidgetTester t, Widget home) async {
   await t.pumpAndSettle();
 }
 
-/// Every EditableText on screen except the ones inside IntlPhoneField
-/// (numeric phone pad; the package exposes no IME option).
-List<EditableText> phiEditables(WidgetTester t) {
-  final phone = find.descendant(of: find.byType(IntlPhoneField), matching: find.byType(EditableText)).evaluate().map((e) => e.widget).toSet();
-  return t.widgetList<EditableText>(find.byType(EditableText)).where((w) => !phone.contains(w)).toList();
-}
-
+/// Every EditableText on screen, including the patient's phone number
+/// (QA feature pass F-PRIV-02: the phone field was the one left out).
+List<EditableText> phiEditables(WidgetTester t) => t.widgetList<EditableText>(find.byType(EditableText)).toList();
 /// What a clinical input must turn off: learned words, autocorrect,
 /// suggestion strip, and smart dashes/quotes (which silently rewrite
 /// dosages such as "1--0--1" and quoted instructions).
@@ -63,7 +59,7 @@ void main() {
   testWidgets('C12 patient form: no IME learning, autocorrect, suggestions or smart punctuation', (t) async {
     await pump(t, const AddPatientScreen());
     final fields = phiEditables(t);
-    expect(fields, hasLength(2), reason: 'name + age');
+    expect(fields, hasLength(3), reason: 'name, age and phone');
     fields.forEach(expectNoKeyboardRewrites);
   });
 
