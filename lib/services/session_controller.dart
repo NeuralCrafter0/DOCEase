@@ -9,6 +9,7 @@ import '../providers/database_helper.dart';
 import '../providers/doctor_provider.dart';
 import '../providers/medicine_provider.dart';
 import '../providers/patient_provider.dart';
+import 'current_owner.dart';
 import 'legacy_db_inspector.dart';
 import 'log_codes.dart';
 import 'session_platform.dart';
@@ -180,6 +181,11 @@ class SessionController with ChangeNotifier {
 
   /// The uid this session belongs to (null when signed out).
   String? get uid => _uid;
+
+  /// Owner of the open, ready session (uid, or `local` in dev mode); null in
+  /// every other phase. Also published as [CurrentOwner.id] for code
+  /// without a BuildContext.
+  String? get ownerId => _phase == SessionPhase.ready ? _readyUid : null;
   ApprovalStatus? get approvalStatus => _approval;
   DbMigrationStep? get migrationStep => _migrationStep;
   double get migrationProgress => _migrationProgress;
@@ -270,6 +276,9 @@ class SessionController with ChangeNotifier {
   }
 
   Future<void> _endSession({required bool fullSignOut}) async {
+    // No owner from the first moment of teardown: nothing new is written
+    // into the old owner's photo folder while its DB closes.
+    CurrentOwner.update(null, by: this);
     _token?.cancel();
     _token = null;
     _clearProviders();
@@ -558,6 +567,7 @@ class SessionController with ChangeNotifier {
   void _setPhase(SessionPhase p, {bool force = false}) {
     if (_disposed || (_phase == p && !force)) return;
     _phase = p;
+    CurrentOwner.update(ownerId, by: this);
     notifyListeners();
   }
 
@@ -584,6 +594,7 @@ class SessionController with ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    CurrentOwner.clearIfSetBy(this);
     _token?.cancel();
     _dbSub?.cancel();
     _authSub?.cancel();
