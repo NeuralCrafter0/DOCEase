@@ -141,6 +141,7 @@ class _HomeScreenState extends State<HomeScreen> {
           child: TextField(
             // Patient names: no keyboard learning (security review C12).
             enableIMEPersonalizedLearning: false, autocorrect: false, enableSuggestions: false,
+            smartDashesType: SmartDashesType.disabled, smartQuotesType: SmartQuotesType.disabled,
             decoration: const InputDecoration(hintText: 'Search patients...', prefixIcon: Icon(Icons.search_rounded, color: Color(0xFF6366F1)), border: InputBorder.none, contentPadding: EdgeInsets.symmetric(vertical: 18)),
             onChanged: (v) => Provider.of<PatientProvider>(context, listen: false).setSearchQuery(v),
           ),

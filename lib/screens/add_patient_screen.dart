@@ -116,7 +116,7 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
   Widget _buildModernInput(TextEditingController controller, String hint, IconData icon, {TextInputType? keyboardType}) {
     // Patient data: keep it out of the keyboard's learned words and
     // suggestion history (security review C12).
-    return TextFormField(controller: controller, keyboardType: keyboardType, enableIMEPersonalizedLearning: false, autocorrect: false, enableSuggestions: false, style: const TextStyle(fontWeight: FontWeight.w700), decoration: InputDecoration(hintText: hint, prefixIcon: Icon(icon, color: const Color(0xFF6366F1), size: 20), filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: Colors.grey.shade200))));
+    return TextFormField(controller: controller, keyboardType: keyboardType, enableIMEPersonalizedLearning: false, autocorrect: false, enableSuggestions: false, smartDashesType: SmartDashesType.disabled, smartQuotesType: SmartQuotesType.disabled, style: const TextStyle(fontWeight: FontWeight.w700), decoration: InputDecoration(hintText: hint, prefixIcon: Icon(icon, color: const Color(0xFF6366F1), size: 20), filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: Colors.grey.shade200))));
   }
 
   Widget _buildHighPerfSelector(List<String> options, String selectedValue, Function(String) onSelected) {

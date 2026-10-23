@@ -1,4 +1,5 @@
-// Regression tests: PHI inputs opt out of keyboard learning (security review C12).
+// Regression tests: PHI inputs opt out of keyboard learning, autocorrect,
+// suggestions and smart punctuation (security review C12, PR #7 review).
 // ignore_for_file: depend_on_referenced_packages
 import 'package:docease/models/patient.dart';
 import 'package:docease/providers/medicine_provider.dart';
@@ -43,28 +44,33 @@ List<EditableText> phiEditables(WidgetTester t) {
   return t.widgetList<EditableText>(find.byType(EditableText)).where((w) => !phone.contains(w)).toList();
 }
 
+/// What a clinical input must turn off: learned words, autocorrect,
+/// suggestion strip, and smart dashes/quotes (which silently rewrite
+/// dosages such as "1--0--1" and quoted instructions).
+void expectNoKeyboardRewrites(EditableText f) {
+  expect(f.enableIMEPersonalizedLearning, isFalse);
+  expect(f.autocorrect, isFalse);
+  expect(f.enableSuggestions, isFalse);
+  expect(f.smartDashesType, SmartDashesType.disabled);
+  expect(f.smartQuotesType, SmartQuotesType.disabled);
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setupFirebaseCoreMocks();
   setUpAll(() async => Firebase.initializeApp());
 
-  testWidgets('C12 patient form: no IME learning, no autocorrect/suggestions on name', (t) async {
+  testWidgets('C12 patient form: no IME learning, autocorrect, suggestions or smart punctuation', (t) async {
     await pump(t, const AddPatientScreen());
     final fields = phiEditables(t);
     expect(fields, hasLength(2), reason: 'name + age');
-    for (final f in fields) {
-      expect(f.enableIMEPersonalizedLearning, isFalse);
-      expect(f.autocorrect, isFalse);
-      expect(f.enableSuggestions, isFalse);
-    }
+    fields.forEach(expectNoKeyboardRewrites);
   });
 
-  testWidgets('C12 clinical note: every text input opts out of IME learning', (t) async {
+  testWidgets('C12 clinical note: every text input opts out of learning, autocorrect, suggestions and smart punctuation', (t) async {
     await pump(t, const AddRecordScreen(patientId: 'p1'));
     final fields = phiEditables(t);
     expect(fields.length, greaterThanOrEqualTo(7), reason: 'symptoms, diagnosis, 4 vitals, prescription');
-    for (final f in fields) {
-      expect(f.enableIMEPersonalizedLearning, isFalse);
-    }
+    fields.forEach(expectNoKeyboardRewrites);
   });
 }
