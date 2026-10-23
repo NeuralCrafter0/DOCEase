@@ -6,6 +6,7 @@ import 'dart:io';
 
 import 'package:docease/utils/pdf_export.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:docease/config/dev_mode.dart';
 
 import 'harness.dart';
 
@@ -42,7 +43,7 @@ void main() {
             : RegExp(r'^report_[A-Za-z0-9]{1,8}_\d{8}\.pdf$');
         expect(file, matches(re), reason: '$mode: $file');
       }
-    });
+    }, skip: testData && !kDevMode); // devMode is ignored without the define (#13 0d720a7)
   }
 
   // Hardening note (low): reportFileName embeds the first 8 id characters. App

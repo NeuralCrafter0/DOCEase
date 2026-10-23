@@ -128,7 +128,9 @@ void _main() {
       final m = File('lib/main.dart').readAsStringSync();
       final w = m.indexOf('AttachmentStorage.currentOwnerId = () => CurrentOwner.id;');
       expect(w, greaterThan(0), reason: 'main() does not wire AttachmentStorage.currentOwnerId to CurrentOwner.id');
-      expect(w, lessThan(m.indexOf('switch (decideStartMode(')), reason: 'owner wiring is not before the start-mode switch');
+      final first = m.indexOf('if (kDevBuildRefused)'); // #13 0d720a7: const branches replace the switch
+      expect(first, greaterThan(0), reason: 'no start-mode branch in main()');
+      expect(w, lessThan(first), reason: 'owner wiring is not before the start-mode branches');
       // (b) at runtime, after a dev boot, the owner is the local owner.
       await t.runAsync(() => buildDevModeApp(const SizedBox()));
       await boot(t, db: QaDb(), support: support);

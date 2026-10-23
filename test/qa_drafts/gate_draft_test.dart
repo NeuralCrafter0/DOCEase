@@ -33,6 +33,7 @@ library;
 
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:docease/config/dev_mode.dart';
 import 'package:docease/main.dart';
 import 'package:docease/screens/home_screen.dart';
@@ -162,16 +163,22 @@ void _main() {
     test('GATE-05c [P] release + flag -> refusal, checked before any dev or Firebase code in main()', () {
       final main = File('lib/main.dart').readAsStringSync();
       final body = main.substring(main.indexOf('main('));
-      // v9.1: #13 8429324 uses a switch on decideStartMode, not an if.
-      final sw = body.indexOf('decideStartMode(requested: kDevModeRequested, release: kReleaseMode)');
-      expect(sw, isNot(-1), reason: 'no start-mode decision in main()');
-      final refused = body.indexOf('case StartMode.refused:', sw);
-      expect(refused, isNot(-1));
+      // v9.2: #13 0d720a7 branches on compile-time consts so the AOT compiler
+      // drops the branch a build can't take (no dev code without the define).
+      final refused = body.indexOf('if (kDevBuildRefused)');
+      expect(refused, isNot(-1), reason: 'no const refusal branch in main()');
+      expect(body.indexOf('decideStartMode('), -1,
+          reason: 'a runtime decision keeps dev code in every binary');
+      expect(refused, lessThan(body.indexOf('if (kDevMode)')));
       expect(refused, lessThan(body.indexOf('buildDevModeApp')));
       expect(refused, lessThan(body.indexOf('Firebase.initializeApp')));
-      final branch = body.substring(refused, body.indexOf('case StartMode.', refused + 5));
+      final branch = body.substring(refused, body.indexOf('if (kDevMode)'));
       expect(branch, contains('DevBuildRefusedApp'));
       expect(branch, contains('return;'), reason: 'refusal must not fall through to the normal app');
+      // the consts make the same decision as decideStartMode
+      final m = decideStartMode(requested: kDevModeRequested, release: kReleaseMode);
+      expect(kDevBuildRefused, m == StartMode.refused);
+      expect(kDevMode, m == StartMode.dev);
       // truth table of the pure decision
       expect(decideStartMode(requested: false, release: false), StartMode.normal);
       expect(decideStartMode(requested: false, release: true), StartMode.normal);

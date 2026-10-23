@@ -136,10 +136,14 @@ void main() {
     test('DEV-14 [P] main(): refusal checked first, before the dev app and Firebase', () {
       final main = File('lib/main.dart').readAsStringSync();
       final body = main.substring(main.indexOf('main('));
-      final refuse = body.indexOf('kReleaseMode');
+      // v9.2: #13 0d720a7 branches on the consts (kDevBuildRefused, then kDevMode).
+      final refuse = body.indexOf('if (kDevBuildRefused)');
+      final dev = body.indexOf('if (kDevMode)');
       expect(refuse, greaterThan(0), reason: 'no release refusal in main()');
-      expect(refuse, lessThan(body.indexOf('buildDevModeApp')));
+      expect(dev, greaterThan(refuse), reason: 'refusal must be checked before dev mode');
+      expect(dev, lessThan(body.indexOf('buildDevModeApp')));
       expect(refuse, lessThan(body.indexOf('Firebase.initializeApp')));
+      expect(dev, lessThan(body.indexOf('Firebase.initializeApp')));
     });
 
     test('DEV-15 [P] docs build tester APKs with --profile, never --release', () {
