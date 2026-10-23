@@ -412,6 +412,27 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Scan release build for dev-mode markers (QA REL-07)
+        # Production (DOCEASE_DEV_MODE=false) builds only: the dev banner text must
+        # not be compiled into libapp.so of the release APK, or of the AAB when one
+        # is built. DEV profile builds contain it on purpose and skip this step.
+        if: steps.mode.outputs.dev_mode == 'false'
+        env:
+          SIGNED: ${{ steps.mode.outputs.signed }}
+          APK: ${{ steps.mode.outputs.apk }}
+          AAB: ${{ steps.mode.outputs.aab }}
+        run: |
+          set -euo pipefail
+          files=("$APK")
+          if [ "$SIGNED" = "true" ]; then files+=("$AAB"); fi
+          status=0
+          bash tool/ci/check_release_markers.sh "${files[@]}" || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "- Dev-marker scan (REL-07): clean, \"DEV MODE: test data only\" not in libapp.so (${#files[@]} file(s))" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Dev-marker scan (REL-07): **FAILED** (exit $status). Release build contains dev-mode code; nothing was uploaded" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
       - name: Upload APK
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
