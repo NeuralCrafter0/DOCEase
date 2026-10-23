@@ -7,6 +7,8 @@ import 'package:share_plus/share_plus.dart';
 import '../providers/patient_provider.dart';
 import '../providers/doctor_provider.dart';
 import '../models/patient.dart';
+import '../models/doctor.dart';
+import '../utils/doctor_name.dart';
 import '../utils/pdf_export.dart';
 import '../utils/visit_order.dart';
 import 'add_patient_screen.dart';
@@ -22,8 +24,8 @@ class PatientDetailScreen extends StatelessWidget {
   }
 
   void _shareVisitSummary(BuildContext context, dynamic doctor, Patient patient, VisitRecord record) {
-    final String docName = doctor != null ? "${doctor.title} ${doctor.name}" : "Doctor";
-    final String message = "*Visit Summary - DOCEase*\n*Patient:* ${patient.name}\n*Date:* ${DateFormat('dd MMM yyyy').format(record.date)}\n*Type:* ${record.visitType}\n\n*Vitals:* BP: ${record.bp ?? 'N/A'}, Temp: ${record.temp ?? 'N/A'}\n*Diagnosis:* ${record.diagnosis}\n*Prescription:* ${record.prescription}\n\n*Dr. $docName*";
+    final String? docName = doctorDisplayName(doctor as Doctor?);
+    final String message = "*Visit Summary - DOCEase*\n*Patient:* ${patient.name}\n*Date:* ${DateFormat('dd MMM yyyy').format(record.date)}\n*Type:* ${record.visitType}\n\n*Vitals:* BP: ${record.bp ?? 'N/A'}, Temp: ${record.temp ?? 'N/A'}\n*Diagnosis:* ${record.diagnosis}\n*Prescription:* ${record.prescription}${docName != null ? '\n\n*$docName*' : ''}";
     Share.share(message);
   }
 
