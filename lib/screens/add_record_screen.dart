@@ -76,11 +76,10 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
     if (_formKey.currentState!.validate()) {
       setState(() => _isSaving = true);
       
-      // Save frequent medicine to list
+      // Medicines to remember: every line, without its dosage. Learned only
+      // once the visit is saved, so a refused save teaches nothing.
       final medProvider = Provider.of<MedicineProvider>(context, listen: false);
-      if (_prescriptionController.text.isNotEmpty) {
-        medProvider.addMedicineIfNew(_prescriptionController.text.split('\n').first);
-      }
+      final medicines = PrescriptionLines.medicineNames(_prescriptionController.text, dosages: medProvider.dosageTemplates);
 
       final record = VisitRecord(
         id: widget.existingRecord?.id, date: _selectedDate, visitType: _selectedVisitType,
@@ -92,7 +91,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
       final provider = Provider.of<PatientProvider>(context, listen: false);
       if (widget.existingRecord == null) await provider.addRecord(widget.patientId, record);
       else await provider.updateRecord(widget.patientId, record);
-      
+      for (final m in medicines) { medProvider.addMedicineIfNew(m); }
       if (mounted) Navigator.pop(context);
     }
   }

@@ -43,4 +43,25 @@ class PrescriptionLines {
       selection: TextSelection.collapsed(offset: start + suggestion.length),
     );
   }
+
+  /// Separator the dosage chips put between a medicine and its dosage.
+  static const String dosageSeparator = ' - ';
+
+  /// The medicine names to remember from a saved prescription: one per line,
+  /// with any dosage after [dosageSeparator] removed. Blank lines, lines that
+  /// are only a dosage (one of [dosages], or starting with "-"), and repeats
+  /// are skipped.
+  static List<String> medicineNames(String prescription, {Iterable<String> dosages = const []}) {
+    final skip = {for (final d in dosages) d.trim().toLowerCase()};
+    final names = <String>[];
+    for (final raw in prescription.split('\n')) {
+      var line = raw.trim();
+      if (line.isEmpty || line.startsWith('-')) continue;
+      final cut = line.indexOf(dosageSeparator);
+      if (cut != -1) line = line.substring(0, cut).trim();
+      if (line.isEmpty || skip.contains(line.toLowerCase())) continue;
+      if (!names.contains(line)) names.add(line);
+    }
+    return names;
+  }
 }
