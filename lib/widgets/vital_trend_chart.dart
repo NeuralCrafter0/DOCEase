@@ -44,17 +44,17 @@ class VitalTrendChart extends StatelessWidget {
     maxY = (maxY + pad).ceilToDouble();
 
     LineChartBarData line(List<FlSpot> spots, Color color) => LineChartBarData(
-          spots: spots,
-          color: color,
-          barWidth: 3,
-          isCurved: spots.length > 2,
-          preventCurveOverShooting: true,
-          isStrokeCapRound: true,
-          dotData: FlDotData(
-            getDotPainter: (spot, _, _, _) => FlDotCirclePainter(radius: 3.5, color: Colors.white, strokeWidth: 2.5, strokeColor: color),
-          ),
-          belowBarData: BarAreaData(show: !isBp, color: color.withValues(alpha: 0.08)),
-        );
+      spots: spots,
+      color: color,
+      barWidth: 3,
+      isCurved: spots.length > 2,
+      preventCurveOverShooting: true,
+      isStrokeCapRound: true,
+      dotData: FlDotData(
+        getDotPainter: (spot, _, _, _) => FlDotCirclePainter(radius: 3.5, color: Colors.white, strokeWidth: 2.5, strokeColor: color),
+      ),
+      belowBarData: BarAreaData(show: !isBp, color: color.withValues(alpha: 0.08)),
+    );
 
     final bars = <LineChartBarData>[
       line([for (var i = 0; i < pts.length; i++) FlSpot(xs[i], pts[i].value)], _primary),
@@ -66,64 +66,72 @@ class VitalTrendChart extends StatelessWidget {
     Widget bottomTitle(double value, TitleMeta meta) {
       if (value != meta.min && value != meta.max) return const SizedBox.shrink();
       final d = first.add(Duration(minutes: (value * 24 * 60).round()));
-      return SideTitleWidget(meta: meta, child: Text(dateFmt.format(d), style: const TextStyle(fontSize: 10, color: _muted, fontWeight: FontWeight.w600)));
+      return SideTitleWidget(
+        meta: meta,
+        child: Text(
+          dateFmt.format(d),
+          style: const TextStyle(fontSize: 10, color: _muted, fontWeight: FontWeight.w600),
+        ),
+      );
     }
 
     final range = series.kind.typicalRange;
     return Semantics(
       container: true,
       label: _semanticsLabel(),
-      child: SizedBox(
-        height: height,
-        child: LineChart(
-          LineChartData(
-            minX: minX,
-            maxX: maxX,
-            minY: minY,
-            maxY: maxY,
-            lineBarsData: bars,
-            gridData: FlGridData(
-              drawVerticalLine: false,
-              getDrawingHorizontalLine: (_) => const FlLine(color: _grid, strokeWidth: 1),
-            ),
-            borderData: FlBorderData(show: false),
-            rangeAnnotations: RangeAnnotations(horizontalRangeAnnotations: [
-              if (range != null) HorizontalRangeAnnotation(y1: range.$1, y2: range.$2, color: _secondary.withValues(alpha: 0.08)),
-            ]),
-            extraLinesData: ExtraLinesData(horizontalLines: [
-              if (isBp) ...[
-                HorizontalLine(y: bpTypical.systolic, color: _primary.withValues(alpha: 0.35), strokeWidth: 1, dashArray: [4, 4]),
-                HorizontalLine(y: bpTypical.diastolic, color: _secondary.withValues(alpha: 0.35), strokeWidth: 1, dashArray: [4, 4]),
-              ],
-            ]),
-            titlesData: FlTitlesData(
-              topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-              rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-              leftTitles: AxisTitles(
-                sideTitles: SideTitles(
-                  showTitles: true,
-                  reservedSize: 36,
-                  getTitlesWidget: (v, meta) => (v == meta.min || v == meta.max)
-                      ? const SizedBox.shrink()
-                      : SideTitleWidget(meta: meta, child: Text(formatVital(v), style: const TextStyle(fontSize: 10, color: _muted))),
+      child: ExcludeSemantics(
+        child: SizedBox(
+          height: height,
+          child: LineChart(
+            LineChartData(
+              minX: minX,
+              maxX: maxX,
+              minY: minY,
+              maxY: maxY,
+              lineBarsData: bars,
+              gridData: FlGridData(drawVerticalLine: false, getDrawingHorizontalLine: (_) => const FlLine(color: _grid, strokeWidth: 1)),
+              borderData: FlBorderData(show: false),
+              rangeAnnotations: RangeAnnotations(
+                horizontalRangeAnnotations: [if (range != null) HorizontalRangeAnnotation(y1: range.$1, y2: range.$2, color: _secondary.withValues(alpha: 0.08))],
+              ),
+              extraLinesData: ExtraLinesData(
+                horizontalLines: [
+                  if (isBp) ...[
+                    HorizontalLine(y: bpTypical.systolic, color: _primary.withValues(alpha: 0.35), strokeWidth: 1, dashArray: [4, 4]),
+                    HorizontalLine(y: bpTypical.diastolic, color: _secondary.withValues(alpha: 0.35), strokeWidth: 1, dashArray: [4, 4]),
+                  ],
+                ],
+              ),
+              titlesData: FlTitlesData(
+                topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                leftTitles: AxisTitles(
+                  sideTitles: SideTitles(
+                    showTitles: true,
+                    reservedSize: 36,
+                    getTitlesWidget: (v, meta) => (v == meta.min || v == meta.max)
+                        ? const SizedBox.shrink()
+                        : SideTitleWidget(
+                            meta: meta,
+                            child: Text(formatVital(v), style: const TextStyle(fontSize: 10, color: _muted)),
+                          ),
+                  ),
+                ),
+                bottomTitles: AxisTitles(
+                  sideTitles: SideTitles(showTitles: true, reservedSize: 26, interval: maxX - minX, getTitlesWidget: bottomTitle),
                 ),
               ),
-              bottomTitles: AxisTitles(
-                sideTitles: SideTitles(showTitles: true, reservedSize: 26, interval: maxX - minX, getTitlesWidget: bottomTitle),
-              ),
-            ),
-            lineTouchData: LineTouchData(
-              touchTooltipData: LineTouchTooltipData(
-                getTooltipColor: (_) => const Color(0xFF1E293B),
-                getTooltipItems: (spots) => [
-                  for (final s in spots)
-                    LineTooltipItem(
-                      s.barIndex == 0
-                          ? '${dateFmt.format(pts[s.spotIndex].date)}\n${_valueText(pts[s.spotIndex])}'
-                          : '',
-                      const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
-                    ),
-                ],
+              lineTouchData: LineTouchData(
+                touchTooltipData: LineTouchTooltipData(
+                  getTooltipColor: (_) => const Color(0xFF1E293B),
+                  getTooltipItems: (spots) => [
+                    for (final s in spots)
+                      LineTooltipItem(
+                        s.barIndex == 0 ? '${dateFmt.format(pts[s.spotIndex].date)}\n${_valueText(pts[s.spotIndex])}' : '',
+                        const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
+                      ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -132,8 +140,7 @@ class VitalTrendChart extends StatelessWidget {
     );
   }
 
-  String _valueText(VitalPoint p) =>
-      p.value2 != null ? '${formatVital(p.value)}/${formatVital(p.value2!)} ${series.kind.unit}' : '${formatVital(p.value)} ${series.kind.unit}';
+  String _valueText(VitalPoint p) => p.value2 != null ? '${formatVital(p.value)}/${formatVital(p.value2!)} ${series.kind.unit}' : '${formatVital(p.value)} ${series.kind.unit}';
 
   String _semanticsLabel() {
     final last = series.latest!;

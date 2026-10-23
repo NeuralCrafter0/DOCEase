@@ -105,7 +105,7 @@ void main() {
   testWidgets('the chart describes itself for screen readers', (t) async {
     final handle = t.ensureSemantics();
     await pump(t, Scaffold(body: VitalsTrendsView(patient: diabetic())));
-    expect(find.bySemanticsLabel(RegExp(r'^Blood Sugar trend, 3 readings, latest 150 mg/dL on 01 Mar 2026')), findsOneWidget);
+    expect(find.bySemanticsLabel('Blood Sugar trend, 3 readings, latest 150 mg/dL on 01 Mar 2026'), findsOneWidget);
     handle.dispose();
   });
 
