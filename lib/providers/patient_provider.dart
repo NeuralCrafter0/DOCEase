@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:uuid/uuid.dart';
+import '../config/dev_mode.dart';
 import '../models/patient.dart';
 import '../services/attachments.dart';
 import '../services/local_photo_store.dart';
@@ -40,7 +41,7 @@ class PatientProvider with ChangeNotifier {
     bool cloudSync = true,
     LocalPhotoStore? photos,
   })  : _db = db ?? DatabaseHelper.instance,
-        _cloud = cloudSync,
+        _cloudSync = cloudSync,
         _photosOverride = photos,
         _firestoreOverride = firestore,
         _authOverride = auth,
@@ -54,12 +55,18 @@ class PatientProvider with ChangeNotifier {
   /// False in dev mode (kDevMode): Firestore, Auth and Storage are never
   /// touched; push, pull, retry and upload are skipped (rows stay dirty)
   /// and picked photos are kept on the phone in [LocalPhotoStore].
-  final bool _cloud;
+  final bool _cloudSync;
+
+  /// Cloud work is allowed only when [cloudSync] is on AND neither the
+  /// session nor the open DB belongs to the dev owner [kLocalOwnerId]:
+  /// dev data never reaches Firestore or Storage, whatever the flag says.
+  bool get _cloud =>
+      _cloudSync && !isLocalOwner(_uid) && !isLocalOwner(_openDbUid);
   final LocalPhotoStore? _photosOverride;
   LocalPhotoStore get _photos => _photosOverride ?? LocalPhotoStore.instance;
 
   /// Whether this provider syncs with Firebase (false in dev mode).
-  bool get cloudSync => _cloud;
+  bool get cloudSync => _cloudSync;
   final FirestoreHelper? _firestoreOverride;
   final FirebaseAuth? _authOverride;
   final FirebaseStorage? _storageOverride;
@@ -176,16 +183,18 @@ class PatientProvider with ChangeNotifier {
     return s is DbReady ? s.uid : null;
   }
 
-  /// Whether [uid] is the signed-in user. Fails closed when signed out. Only
-  /// when Firebase itself is unavailable and no auth was injected (plain
-  /// unit tests; the app never gets here without Firebase) is the check
-  /// left to the open-DB uid.
+  /// Whether [uid] is the signed-in user. Fails closed when signed out, and
+  /// when Firebase is unavailable. The one exception is a unit test that
+  /// injected a FirestoreHelper but no auth: that injected helper is the
+  /// only thing that can be reached, so the open-DB uid check decides. The
+  /// app never injects a helper (PatientProvider()), so it always fails
+  /// closed. The dev owner is refused separately by [_cloud].
   bool _isSignedIn(String uid) {
     if (!_cloud) return true; // dev mode: the open-DB uid check decides
     try {
       return _auth.currentUser?.uid == uid;
     } catch (_) {
-      return _authOverride == null;
+      return _firestoreOverride != null && _authOverride == null;
     }
   }
 
@@ -403,6 +412,8 @@ class PatientProvider with ChangeNotifier {
   Future<bool> _syncOne(String? uid, SyncCancelToken token, String patientId, String? version,
       {Patient? fallback}) async {
     if (!_live(uid, token)) return false;
+    // Hard guard: the dev owner's data is never pushed.
+    if (!_cloud || isLocalOwner(uid ?? _openDbUid)) return false;
     if (uid != null && !_dbReadyFor(uid)) return false; // other doctor's DB or user
     var current = _byId(patientId) ?? fallback;
     if (current == null) return true; // deleted meanwhile
@@ -463,7 +474,8 @@ class PatientProvider with ChangeNotifier {
     final out = <String, String>{};
     if (_pendingUploads.isEmpty) return out;
     final uid = sessionUid ?? _signedInUid;
-    if (uid == null) return out;
+    // Hard guard: nothing of the dev owner is uploaded to Storage.
+    if (uid == null || !_cloud || isLocalOwner(uid)) return out;
     for (final r in p.history) {
       for (final path in r.attachmentPaths) {
         if (!_pendingUploads.contains(path) || out.containsKey(path)) continue;
@@ -574,7 +586,11 @@ class PatientProvider with ChangeNotifier {
   /// files the UI should render).
   /// In dev mode also every photo kept in the app's photo folders.
   bool isPickedThisSession(String path) =>
-      _pendingUploads.contains(path) || (!_cloud && _photos.isAppPhoto(path));
+      _pendingUploads.contains(path) ||
+      (!_cloud && _photoOwner != null && _photos.isAppPhoto(path, owner: _photoOwner));
+
+  /// Owner of the photo folders in use: the session (or open DB) owner.
+  String? get _photoOwner => _uid ?? _openDbUid;
 
   /// Downloads a `clinical_attachments/{uid}/...` object through the
   /// Storage SDK (so the rules apply). Null for other paths or on error.
@@ -800,10 +816,12 @@ class PatientProvider with ChangeNotifier {
   Future<Map<String, String>> _keepLocally(List<String> picks, List<String> copies) async {
     final out = <String, String>{};
     if (_cloud) return out;
+    final owner = _photoOwner;
+    if (owner == null) throw StateError('No open database for these photos');
     for (final path in picks) {
       final type = UploadImageType.forPath(path);
       if (type == null) continue; // validated already; defensive
-      final kept = await _photos.keepVisitPhoto(path, type);
+      final kept = await _photos.keepVisitPhoto(owner, path, type);
       if (kept != path) {
         out[path] = kept;
         copies.add(kept);
@@ -823,8 +841,10 @@ class PatientProvider with ChangeNotifier {
       for (final p in _patients)
         for (final r in p.history) ...r.attachmentPaths,
     };
+    final owner = _photoOwner;
+    if (owner == null) return; // session gone: keep (fail closed)
     for (final c in copies) {
-      if (!referenced.contains(c)) await _photos.deleteAppPhoto(c);
+      if (!referenced.contains(c)) await _photos.deleteAppPhoto(c, owner: owner);
     }
   }
 
@@ -842,7 +862,7 @@ class PatientProvider with ChangeNotifier {
   @visibleForTesting
   Future<void> syncNowForTesting() async {
     final uid = _uid ?? _openDbUid;
-    if (uid == null || !_dbReadyFor(uid)) return;
+    if (!_cloud || uid == null || !_dbReadyFor(uid)) return;
     _uid ??= uid;
     await _pushDirty(uid, _token);
     await _pullFromCloud(uid, _token);

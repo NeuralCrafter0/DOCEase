@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/widgets.dart';
 
 import '../config/dev_mode.dart';
@@ -121,6 +122,8 @@ class SessionController with ChangeNotifier {
         _db = db ?? DatabaseHelper.instance,
         _platform = LocalOnlySessionPlatform(),
         _localOnly = true {
+    // Defence in depth: main() refuses dev mode in release builds.
+    if (kReleaseMode) throw StateError('Dev mode is refused in release builds');
     _dbSub = _db.states.listen(_onDbState);
     if (observeAppLifecycle) _observeLifecycle();
     _schedule();
@@ -181,6 +184,11 @@ class SessionController with ChangeNotifier {
   DbMigrationStep? get migrationStep => _migrationStep;
   double get migrationProgress => _migrationProgress;
   DbOpenError? get failure => _failure;
+
+  /// True when the signed-in account's uid is reserved for dev mode
+  /// ([kLocalOwnerId]); the session is [SessionPhase.failed] and nothing opens.
+  bool get refusedReservedAccount => _reservedAccount;
+  bool _reservedAccount = false;
   bool get canReset => _phase == SessionPhase.failed && _failure == DbOpenError.keyMismatch;
   LegacyMergePrompt? get legacyPrompt => _legacyPrompt;
 
@@ -315,7 +323,15 @@ class SessionController with ChangeNotifier {
     _uid = uid;
     _readyUid = null;
     _failure = null;
+    _reservedAccount = false;
     _legacyPrompt = null;
+    if (isLocalOwner(uid)) {
+      // A Firebase account whose uid is the dev owner id must never open
+      // (or sync) the dev database: no approval check, no DB, no providers.
+      _reservedAccount = true;
+      _setPhase(SessionPhase.failed);
+      return;
+    }
     _setPhase(SessionPhase.checkingApproval);
 
     var status = ApprovalStatus.unknown;
