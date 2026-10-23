@@ -1,13 +1,22 @@
 // Logs must carry error codes/types and ids only: never an exception's
 // message (`$e`), a stack trace, or patient data. Raw DB errors can contain
 // SQL and bound arguments; Firebase messages can echo document contents.
+import 'dart:async';
 import 'dart:io';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:docease/config/dev_mode.dart';
+import 'package:docease/models/doctor.dart';
 import 'package:docease/models/patient.dart';
+import 'package:docease/providers/doctor_provider.dart';
+import 'package:docease/providers/firestore_helper.dart';
+import 'package:docease/providers/medicine_provider.dart';
 import 'package:docease/providers/local_database.dart';
 import 'package:docease/providers/patient_provider.dart';
+import 'package:docease/services/local_photo_store.dart';
 import 'package:docease/services/log_codes.dart';
-import 'package:firebase_core/firebase_core.dart';
+import 'package:docease/services/session_controller.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -31,15 +40,30 @@ class _ThrowingCloud extends CloudFirestoreHelper {
       plugin: 'cloud_firestore', code: 'unavailable', message: secret);
 }
 
-/// The files whose catch blocks must log codes only.
-const auditedFiles = [
-  'lib/main.dart',
-  'lib/providers/patient_provider.dart',
-  'lib/providers/firestore_helper.dart',
-  'lib/providers/doctor_provider.dart',
-  'lib/providers/medicine_provider.dart',
-  'lib/services/session_controller.dart',
-];
+/// Every Dart file in lib/ must log codes only.
+List<String> auditedFiles() => Directory('lib')
+    .listSync(recursive: true)
+    .whereType<File>()
+    .map((f) => f.path)
+    .where((f) => f.endsWith('.dart'))
+    .toList()
+  ..sort();
+
+/// Settings writes fail with a message full of patient data.
+class _ThrowingSettingsDb extends MergeDb {
+  _ThrowingSettingsDb() {
+    state = const DbReady(kLocalOwnerId);
+  }
+  @override
+  Future<void> putSetting(String key, String value) async => throw StateError(secret);
+}
+
+/// Every Firestore call throws a FirebaseException carrying patient data.
+class _LeakyFirestore implements FirebaseFirestore {
+  @override
+  dynamic noSuchMethod(Invocation i) =>
+      throw FirebaseException(plugin: 'cloud_firestore', code: 'unavailable', message: secret);
+}
 
 void main() {
   late List<String> logs;
@@ -114,18 +138,96 @@ void main() {
     // `$e`, `${e}`, `$err`, `$error`, `$ex`, `$s`, `$stack`, `${e.message}`,
     // `$patient`, `.name` / `.phone` / clinical fields, or `.toString()`.
     final forbidden = RegExp(
-        r'\$\{?(e|err|error|ex|s|st|stack|stackTrace|exception|patient|p|cp|doctor)\b(?!\.(id|code)\b)'
+        r'\$\{?(e|err|error|ex|s|st|stack|stackTrace|exception|patient|p|cp|doctor)\b(?!\.(id|code|runtimeType|basename)\b)'
         r'|\.(name|phone|diagnosis|symptoms|prescription|notes|email|mobileNumber)\b'
         r'|\.toString\(\)|\.message\b');
     final call = RegExp(r'debugPrint\((.*?)\);', dotAll: true);
     final offenders = <String>[];
-    for (final path in auditedFiles) {
-      final src = File(path).readAsStringSync();
+    final files = auditedFiles();
+    expect(files.length, greaterThan(20), reason: 'the walk found lib/');
+    var calls = 0;
+    for (final f in files) {
+      // Some screens are not UTF-8: read bytes so every file is scanned.
+      final src = String.fromCharCodes(File(f).readAsBytesSync());
       for (final m in call.allMatches(src)) {
+        calls++;
         final arg = m.group(1)!;
-        if (forbidden.hasMatch(arg)) offenders.add('$path: debugPrint($arg)');
+        if (forbidden.hasMatch(arg)) offenders.add('$f: debugPrint($arg)');
       }
+      // Bare print() is never used for logging in the app.
+      for (final m in RegExp(r'(^|[^\w.])print\(').allMatches(src)) {
+        offenders.add('$f: print( at offset ${m.start}');
+      }
+      if (src.contains("import 'dart:developer'")) offenders.add('$f: dart:developer log');
     }
+    expect(calls, greaterThan(50), reason: 'the scan saw the debugPrint calls');
     expect(offenders, isEmpty);
+  });
+
+  group('more providers log codes only', () {
+    late Directory root;
+    late LocalPhotoStore photos;
+    setUp(() async {
+      root = Directory.systemTemp.createTempSync('docease_logs');
+      photos = LocalPhotoStore(supportDir: () async => root);
+      await photos.init();
+    });
+    tearDown(() => root.deleteSync(recursive: true));
+
+    Doctor doctor() => Doctor(
+        id: 'x', title: 'DR', name: secret, email: 'jane@example.com', age: '40',
+        mobileNumber: '+919999', specialty: 'GP', clinicName: secret, practiceMode: 'Solo Practice');
+
+    test('a failing doctor profile save logs only the error type', () async {
+      final d = DoctorProvider(
+          cloudSync: false, localDb: _ThrowingSettingsDb(), photos: photos,
+          auth: FakeAuth(), firestore: FakeFirestore(), storage: FakeStorage());
+      await d.load(kLocalOwnerId);
+      expect(await d.saveDoctorProfile(doctor()), isFalse);
+      expect(logs, contains('Profile save failed: StateError'));
+      expectClean();
+    });
+
+    test('a failing cloud doctor fetch logs only the Firebase code', () async {
+      final d = DoctorProvider(auth: FakeAuth('doctorA'), firestore: _LeakyFirestore(), storage: FakeStorage());
+      await d.load('doctorA');
+      expect(logs.where((l) => l.startsWith('Error fetching doctor:')), isNotEmpty);
+      expectClean();
+    });
+
+    test('a failing medicines save logs only the error type', () async {
+      final m = MedicineProvider(
+          cloudSync: false, localDb: _ThrowingSettingsDb(), auth: FakeAuth(), firestore: FakeFirestore());
+      await m.load(kLocalOwnerId);
+      await m.addMedicineIfNew('Jane Doe HIV pill');
+      expect(logs, contains('Medicines save failed: StateError'));
+      expectClean();
+    });
+
+    test('FirestoreHelper errors log the patient id and Firebase code only', () async {
+      final h = FirestoreHelper(firestore: _LeakyFirestore(), auth: FakeAuth('doctorA'));
+      await h.syncPatient(patient('p1'));
+      await h.deletePatient('p1');
+      await h.fetchAllPatients();
+      expect(logs, contains('FIREBASE: Sync Error for p1: firebase:unavailable'));
+      expect(logs, contains('FIREBASE: Delete error for p1: firebase:unavailable'));
+      expect(logs, contains('FIREBASE: Fetch error: firebase:unavailable'));
+      expectClean();
+    });
+
+    test('the session controller logs auth stream errors as codes', () async {
+      final log = <String>[];
+      final auth = StreamController<User?>.broadcast();
+      final c = SessionController(
+          authStateChanges: auth.stream, db: SessionDb(), patients: SpyPatients(log),
+          doctor: SpyDoctor(log), medicines: SpyMedicines(log),
+          platform: FakeSessionPlatform(log), observeAppLifecycle: false);
+      auth.addError(FirebaseException(plugin: 'firebase_auth', code: 'network-request-failed', message: secret));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(logs, contains('Auth stream error: firebase_auth/network-request-failed'));
+      expectClean();
+      c.dispose();
+      await auth.close();
+    });
   });
 }

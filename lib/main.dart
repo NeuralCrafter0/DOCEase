@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -10,6 +11,7 @@ import 'providers/medicine_provider.dart';
 import 'providers/database_helper.dart';
 import 'providers/firestore_settings.dart';
 import 'config/dev_mode.dart';
+import 'dev/dev_build_refused.dart';
 import 'dev/dev_mode_app.dart';
 import 'services/log_codes.dart';
 import 'services/session_controller.dart';
@@ -20,10 +22,18 @@ import 'screens/login_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Dev mode: no Firebase, Google Sign-In, login or lock (see dev_mode.dart).
-  if (kDevMode) {
-    runApp(await buildDevModeApp(const DOCEaseApp(ready: true, devMode: true)));
-    return;
+  switch (decideStartMode(requested: kDevModeRequested, release: kReleaseMode)) {
+    case StartMode.refused:
+      // Release build made with the dev define: refuse loudly, never fall
+      // through to dev mode or silently to the normal app.
+      runApp(const DevBuildRefusedApp());
+      return;
+    case StartMode.dev:
+      // Dev mode: no Firebase, Google Sign-In, login or lock (dev_mode.dart).
+      runApp(await buildDevModeApp(const DOCEaseApp(ready: true, devMode: true)));
+      return;
+    case StartMode.normal:
+      break;
   }
 
   bool firebaseReady = false;
