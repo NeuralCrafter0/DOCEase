@@ -144,7 +144,7 @@ class SessionController with ChangeNotifier {
   final bool _localOnly;
 
   /// True in dev mode: on-phone only, no sign-in.
-  bool get isLocalOnly => _localOnly;
+  bool get isLocalOnly => kDevMode && _localOnly;
 
   static const _cacheWipeFlag = 'docease.firestoreCacheWiped.v1';
   static String _approvedFlag(String uid) => 'docease.approved.$uid';
@@ -226,7 +226,7 @@ class SessionController with ChangeNotifier {
 
   void _schedule({bool restart = false}) {
     final e = ++_epoch;
-    unawaited(_enqueue(() => _localOnly ? _reconcileLocal(e) : _reconcile(e, restart: restart))
+    unawaited(_enqueue(() => kDevMode && _localOnly ? _reconcileLocal(e) : _reconcile(e, restart: restart))
         .catchError((Object err) {
       debugPrint('Session error: ${errorCode(err)}');
     }));
@@ -550,7 +550,7 @@ class SessionController with ChangeNotifier {
   /// of Google and Firebase; the auth event then closes the DB and drops
   /// the Firestore and image caches.
   Future<void> signOut() async {
-    if (_localOnly) return; // dev mode: there is no account to leave
+    if (kDevMode && _localOnly) return; // dev mode: there is no account to leave
     _token?.cancel();
     _clearProviders();
     await _platform.signOutGoogle();

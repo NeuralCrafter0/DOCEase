@@ -535,12 +535,13 @@ void main() {
   group('wiring (source checks)', () {
     test('main() returns into dev mode before any Firebase or Google Sign-In call', () {
       final main = File('lib/main.dart').readAsStringSync();
-      final dev = main.indexOf('case StartMode.dev:');
+      final dev = main.indexOf('if (kDevMode) {');
       expect(dev, greaterThan(0));
       expect(dev, lessThan(main.indexOf('Firebase.initializeApp')));
       expect(dev, lessThan(main.indexOf('GoogleSignIn.instance')));
-      expect(main, contains('isDevMode\n          ? const DevModeHome()'));
-      expect(main, contains('bool get isDevMode => devMode && kDevMode;'));
+      expect(main, contains('if (kDevMode) {\n      if (devMode) {\n        devHome = const DevModeHome();'));
+      expect(main, contains('home: devHome ??'));
+      expect(main, contains('bool get isDevMode => kDevMode && devMode;'));
       expect(main, contains('DOCEaseApp(ready: true, devMode: true)'));
       expect(main, contains('const SecurityWrapper()'), reason: 'the lock is kept, only bypassed');
     });
