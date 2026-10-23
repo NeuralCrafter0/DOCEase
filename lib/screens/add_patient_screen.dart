@@ -90,7 +90,12 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
     _selectedGender = widget.existingPatient?.gender ?? 'Male';
   }
 
-  void _saveForm() {
+  /// True while the local save is running, so a second tap can't register
+  /// the patient twice.
+  bool _saving = false;
+
+  Future<void> _saveForm() async {
+    if (_saving) return;
     if (!_submitted) setState(() => _submitted = true);
     if (_formKey.currentState!.validate()) {
       final patient = Patient(
@@ -105,11 +110,30 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
         history: widget.existingPatient?.history,
       );
       final provider = Provider.of<PatientProvider>(context, listen: false);
-      if (widget.existingPatient == null) {
-        provider.addPatient(patient);
-      } else {
-        provider.updatePatient(patient);
+      final isNew = widget.existingPatient == null;
+      setState(() => _saving = true);
+      try {
+        if (isNew) {
+          await provider.addPatient(patient);
+        } else {
+          await provider.updatePatient(patient);
+        }
+      } catch (_) {
+        // The local database refused the save; the provider has already
+        // dropped the new patient or restored the previous details. Stay on
+        // the form so nothing typed is lost, and say so without any patient
+        // data in the message. TODO(after #13 merges): narrow this to
+        // `on SaveRefusedException`.
+        if (!mounted) return;
+        setState(() => _saving = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(isNew
+              ? "Couldn't register this patient. Nothing was saved. Please try again."
+              : "Couldn't save these changes. The previous details were kept. Please try again."),
+        ));
+        return;
       }
+      if (!mounted) return;
       Navigator.of(context).pop();
     }
   }
@@ -166,7 +190,7 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
                 ),
               ),
               const SizedBox(height: 48),
-              ElevatedButton(onPressed: _saveForm, style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF1E293B), minimumSize: const Size(double.infinity, 64), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24))), child: Text(widget.existingPatient == null ? 'Register Profile' : 'Save Changes', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
+              ElevatedButton(onPressed: _saving ? null : _saveForm, style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF1E293B), minimumSize: const Size(double.infinity, 64), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24))), child: Text(widget.existingPatient == null ? 'Register Profile' : 'Save Changes', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
             ],
           ),
         ),
