@@ -18,6 +18,14 @@ class PatientDetailScreen extends StatelessWidget {
   final String patientId;
   const PatientDetailScreen({super.key, required this.patientId});
 
+  Patient? _findPatient(PatientProvider provider) {
+    try {
+      return provider.findById(patientId);
+    } on StateError {
+      return null;
+    }
+  }
+
   Future<void> _makePhoneCall(String phoneNumber) async {
     final Uri launchUri = Uri(scheme: 'tel', path: phoneNumber);
     if (await canLaunchUrl(launchUri)) await launchUrl(launchUri);
@@ -48,7 +56,7 @@ class PatientDetailScreen extends StatelessWidget {
             Row(children: [
               Expanded(child: TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF475569))))),
               const SizedBox(width: 16),
-              Expanded(child: ElevatedButton(onPressed: () { provider.deletePatient(patient.id); Navigator.pop(ctx); Navigator.pop(context); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))), child: const Text('Delete All', style: TextStyle(fontWeight: FontWeight.bold)))),
+              Expanded(child: ElevatedButton(onPressed: () { Navigator.pop(ctx); Navigator.pop(context); provider.deletePatient(patient.id); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))), child: const Text('Delete All', style: TextStyle(fontWeight: FontWeight.bold)))),
             ])
           ],
         ),
@@ -87,7 +95,10 @@ class PatientDetailScreen extends StatelessWidget {
     final doctor = Provider.of<DoctorProvider>(context).currentDoctor;
     return Consumer<PatientProvider>(
       builder: (ctx, provider, _) {
-        final patient = provider.findById(patientId);
+        final patient = _findPatient(provider);
+        // The patient was just deleted: this route is on its way out, so
+        // render nothing instead of throwing from findById.
+        if (patient == null) return const Scaffold(backgroundColor: Color(0xFFF8FAFC));
         final family = provider.patients.where((p) => p.phone == patient.phone && p.id != patient.id).toList();
         // Timeline, "Last Visit" and the latest marker follow visit date,
         // not insertion order (a backdated note is inserted at index 0).
