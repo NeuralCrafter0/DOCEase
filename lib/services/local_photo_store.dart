@@ -2,11 +2,14 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
+import '../providers/database_helper.dart' show BackupExcluder, PlatformBackupExcluder;
 import 'attachments.dart';
+import 'log_codes.dart';
 
 /// Photos kept on the phone (dev mode: no Storage upload).
 ///
@@ -20,9 +23,17 @@ import 'attachments.dart';
 ///
 /// Files are only kept, shown or deleted inside those folders; deleting is
 /// further limited to the given owner's own folders.
+///
+/// iOS: each owner folder is excluded from iCloud and computer backups when
+/// it is first used in a run, through #10's [PlatformBackupExcluder] (the
+/// `docease/backup_exclusion` channel in ios/Runner/AppDelegate.swift, which
+/// also covers the encrypted DB). It does nothing on Android, where backups
+/// are off in the manifest. A failure is logged as a code and retried on the
+/// next photo; the photo is still kept.
 class LocalPhotoStore {
-  LocalPhotoStore({Future<Directory> Function()? supportDir})
-      : _supportDir = supportDir ?? getApplicationSupportDirectory;
+  LocalPhotoStore({Future<Directory> Function()? supportDir, BackupExcluder? backupExcluder})
+      : _supportDir = supportDir ?? getApplicationSupportDirectory,
+        _backupExcluder = backupExcluder ?? const PlatformBackupExcluder();
 
   /// The app-wide store (dev mode calls [init] before runApp).
   static LocalPhotoStore instance = LocalPhotoStore();
@@ -37,7 +48,22 @@ class LocalPhotoStore {
   static final _ownerHash = RegExp(r'^[0-9a-f]{32}$');
 
   final Future<Directory> Function() _supportDir;
+  final BackupExcluder _backupExcluder;
   String? _support;
+
+  /// Owner folders already excluded from backup in this run (the attribute
+  /// stays on the folder, so once per run is enough).
+  final Set<String> _excluded = {};
+
+  Future<void> _excludeFromBackup(String dir) async {
+    if (_excluded.contains(dir)) return;
+    try {
+      await _backupExcluder.exclude(dir);
+      _excluded.add(dir);
+    } catch (e) {
+      debugPrint('Photos: backup exclusion failed (${errorCode(e)})');
+    }
+  }
 
   /// Resolves the support directory (canonical path). Safe to call again.
   Future<void> init() async {
@@ -94,8 +120,9 @@ class LocalPhotoStore {
     await init();
     final dir = _ownerDir(root, owner);
     if (dir == null) throw ArgumentError('owner must not be empty');
-    if (p.isWithin(dir, p.normalize(source)) && await _realPathWithin(source, dir)) return source;
     await Directory(dir).create(recursive: true);
+    await _excludeFromBackup(dir);
+    if (p.isWithin(dir, p.normalize(source)) && await _realPathWithin(source, dir)) return source;
     final target = p.join(dir, name);
     await File(source).copy(target);
     return target;

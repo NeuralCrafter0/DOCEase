@@ -4,20 +4,39 @@ import 'package:printing/printing.dart';
 import 'package:intl/intl.dart';
 import '../models/patient.dart';
 import '../models/doctor.dart';
+import 'test_data_marker.dart';
 
 class PdfExport {
   /// Marker printed at the top and bottom of every page in dev mode.
-  static const testDataMarker = 'TEST DATA - NOT A MEDICAL RECORD';
+  static const testDataMarker = kTestDataMarker;
 
   /// [testData] (dev mode) puts [testDataMarker] on every page and in the
   /// file name, so a dev-build letter can never pass as a real record.
   static Future<void> generateAndPrintPatientReport(Patient patient,
       {Doctor? doctor, bool testData = false}) async {
     final pdf = buildPatientReport(patient, doctor: doctor, testData: testData);
-    final name = 'ClinicalReport_${patient.name.replaceAll(' ', '_')}.pdf';
+    // Dev mode only adds the TEST_DATA_ prefix; the rest is #7's neutral
+    // reportFileName scheme, which wins on merge.
     await Printing.layoutPdf(
         onLayout: (PdfPageFormat format) async => pdf.save(),
-        name: testData ? 'TEST_DATA_$name' : name);
+        name: printFileName(patient, DateTime.now(), testData: testData));
+  }
+
+  /// The name offered by the print dialog: [reportFileName], with
+  /// `TEST_DATA_` in front in dev mode.
+  static String printFileName(Patient patient, DateTime now, {required bool testData}) {
+    final name = reportFileName(patient, now);
+    return testData ? '$kTestDataFilePrefix$name' : name;
+  }
+
+  /// Non-identifying file name for the print / "Save as PDF" dialog
+  /// (security review C6): `report_<first 8 id chars>_<yyyymmdd>.pdf`.
+  /// Never contains the patient's name.
+  // Same code as #7 (PdfExport.reportFileName); #7's version wins on merge.
+  static String reportFileName(Patient patient, DateTime now) {
+    final cleanId = patient.id.replaceAll(RegExp(r'[^A-Za-z0-9]'), '');
+    final shortId = cleanId.isEmpty ? 'patient' : cleanId.substring(0, cleanId.length < 8 ? cleanId.length : 8);
+    return 'report_${shortId}_${DateFormat('yyyyMMdd').format(now)}.pdf';
   }
 
   static pw.Widget _testDataBand() => pw.Container(
