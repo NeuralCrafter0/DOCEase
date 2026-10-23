@@ -213,6 +213,12 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
           const SizedBox(width: 16),
           Expanded(child: _buildVitalInput(_weightController, 'Weight', 'kg')),
         ]),
+        const SizedBox(height: 16),
+        Row(children: [
+          Expanded(child: _buildVitalInput(_sugarController, 'Blood Sugar', 'mg/dL')),
+          const SizedBox(width: 16),
+          const Expanded(child: SizedBox.shrink()),
+        ]),
       ]),
     );
   }
