@@ -1,0 +1,247 @@
+name: CI
+
+# Pipeline: gitleaks secret scan, flutter analyze, flutter test, Android build
+# (release-mode, obfuscated APK; release-signed only when signing secrets exist).
+# Android only for now. Flutter is pinned to the version in .metadata.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ["v*"] # release tags: the only runs that upload debug symbols
+  workflow_dispatch:
+
+# Least privilege: every job can only read the repository contents.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  FLUTTER_VERSION: "3.41.2" # keep in sync with .metadata (revision 90673a4eef)
+  JAVA_VERSION: "17"
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+
+jobs:
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks (checksum-verified)
+        run: |
+          set -euo pipefail
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" version
+
+      - name: Scan git history
+        # --redact keeps any detected secret values out of the job log.
+        # Known, reviewed findings are listed by fingerprint in .gitleaksignore.
+        run: |
+          "$RUNNER_TEMP/gitleaks" git . --redact --no-banner --verbose --exit-code 1
+
+  analyze:
+    name: flutter analyze
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Flutter ${{ env.FLUTTER_VERSION }}
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: flutter pub get (lockfile enforced)
+        run: flutter pub get --enforce-lockfile
+
+      - name: flutter analyze
+        # Errors fail the job. Infos/warnings are reported but not fatal yet;
+        # drop --no-fatal-warnings once the existing warnings are cleaned up.
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+  test:
+    name: flutter test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Flutter ${{ env.FLUTTER_VERSION }}
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: flutter pub get (lockfile enforced)
+        run: flutter pub get --enforce-lockfile
+
+      - name: flutter test
+        run: flutter test --no-pub
+
+  android-build:
+    name: Android build (release-mode APK, obfuscated)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Signing secrets are only exposed on push/manual runs, never on pull requests.
+      ANDROID_KEYSTORE_BASE64: ${{ github.event_name != 'pull_request' && secrets.ANDROID_KEYSTORE_BASE64 || '' }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.ANDROID_KEYSTORE_PASSWORD || '' }}
+      ANDROID_KEY_ALIAS: ${{ github.event_name != 'pull_request' && secrets.ANDROID_KEY_ALIAS || '' }}
+      ANDROID_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.ANDROID_KEY_PASSWORD || '' }}
+      DEBUG_INFO_DIR: build/debug-info
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Java ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+
+      - name: Set up Flutter ${{ env.FLUTTER_VERSION }}
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Decide signing mode
+        id: signing
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ] \
+             && [ -n "$ANDROID_KEY_ALIAS" ] && [ -n "$ANDROID_KEY_PASSWORD" ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "label=signed" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "label=NOT-release-signed-debug-key" >> "$GITHUB_OUTPUT"
+            echo "::warning title=APK is NOT release-signed::Signing secrets are unavailable (pull request, or ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD not configured). The release-mode APK is signed with the debug key and must not be distributed."
+          fi
+
+      - name: Write upload keystore and android/key.properties
+        if: steps.signing.outputs.signed == 'true'
+        # Values come from secrets via env and are never echoed.
+        run: |
+          set -euo pipefail
+          umask 077
+          keystore="$RUNNER_TEMP/upload-keystore.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          {
+            printf 'storeFile=%s\n' "$keystore"
+            printf 'storePassword=%s\n' "$ANDROID_KEYSTORE_PASSWORD"
+            printf 'keyAlias=%s\n' "$ANDROID_KEY_ALIAS"
+            printf 'keyPassword=%s\n' "$ANDROID_KEY_PASSWORD"
+          } > android/key.properties
+
+      - name: flutter pub get (lockfile enforced)
+        run: flutter pub get --enforce-lockfile
+
+      - name: Build release-mode APK (obfuscated, split debug info)
+        run: flutter build apk --release --obfuscate --split-debug-info="$DEBUG_INFO_DIR"
+
+      - name: Build release AAB (signed runs only)
+        if: steps.signing.outputs.signed == 'true'
+        run: flutter build appbundle --release --obfuscate --split-debug-info="$DEBUG_INFO_DIR"
+
+      - name: Verify signature and write job summary
+        env:
+          SIGNED: ${{ steps.signing.outputs.signed }}
+          IS_RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          set -euo pipefail
+          apk=build/app/outputs/flutter-apk/app-release.apk
+          apksigner="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)/apksigner"
+          certs="$("$apksigner" verify --print-certs "$apk")"
+          cert_dn="$(printf '%s\n' "$certs" | sed -n 's/^Signer #1 certificate DN: //p')"
+          cert_sha256="$(printf '%s\n' "$certs" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')"
+          # Guard: never label a debug-key APK as release-signed.
+          if [ "$SIGNED" = "true" ] && printf '%s' "$cert_dn" | grep -q 'CN=Android Debug'; then
+            echo "::error title=Release signing failed::Signing secrets were provided but the APK is signed with the debug key."
+            exit 1
+          fi
+          {
+            echo "## Android build"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Build mode | release, \`--obfuscate --split-debug-info\` |"
+            if [ "$SIGNED" = "true" ]; then
+              echo "| Signing | **Release-signed** with the upload key |"
+            else
+              echo "| Signing | **NOT release-signed** (debug key). Do not distribute. |"
+            fi
+            echo "| Signer cert | ${cert_dn} |"
+            echo "| Signer cert SHA-256 | \`${cert_sha256}\` |"
+            echo "| APK size | $(du -h "$apk" | cut -f1) |"
+            if [ "$IS_RELEASE_TAG" = "true" ]; then
+              echo "| Debug symbols | Uploaded as a separate artifact (release tag) |"
+            else
+              echo "| Debug symbols | Not uploaded (only on v* release tags) |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docease-apk-release-${{ steps.signing.outputs.label }}
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload AAB
+        if: steps.signing.outputs.signed == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docease-aab-release-signed
+          path: build/app/outputs/bundle/release/app-release.aab
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload debug symbols (release tags only)
+        # Dart split debug info + R8 mapping, needed to de-obfuscate crash traces.
+        # The repo is public, so symbols are only uploaded on v* release-tag runs;
+        # on PR, branch and manual runs they are discarded with the runner.
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docease-debug-symbols-${{ steps.signing.outputs.label }}
+          path: |
+            build/debug-info/
+            build/app/outputs/mapping/release/mapping.txt
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Remove signing material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/upload-keystore.jks" android/key.properties
+
+  # Reserved: Firebase security rules tests (backend engineer).
+  # Planned shape: a `firebase-rules` job that installs the Firebase CLI,
+  # starts the Firestore/Storage emulators, and runs the tests for
+  # firestore.rules and storage.rules. It needs no secrets (emulators only)
+  # and should keep `permissions: contents: read`.
