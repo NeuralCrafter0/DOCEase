@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -25,19 +24,20 @@ void main() async {
   // Features register StartupHooks here (before the switch) so they run in
   // dev and normal mode alike; see services/startup_hooks.dart.
 
-  switch (decideStartMode(requested: kDevModeRequested, release: kReleaseMode)) {
-    case StartMode.refused:
-      // Release build made with the dev define: refuse loudly, never fall
-      // through to dev mode or silently to the normal app.
-      runApp(const DevBuildRefusedApp());
-      return;
-    case StartMode.dev:
-      // Dev mode: no Firebase, Google Sign-In, login or lock (dev_mode.dart).
-      runApp(await buildDevModeApp(const DOCEaseApp(ready: true, devMode: true)));
-      StartupHooks.runAll();
-      return;
-    case StartMode.normal:
-      break;
+  // Both checks are compile-time constants (same decision as
+  // decideStartMode), so the AOT compiler removes the branch a build can't
+  // take: without the define there is no dev-mode code in the binary.
+  if (kDevBuildRefused) {
+    // Release build made with the dev define: refuse loudly, never fall
+    // through to dev mode or silently to the normal app.
+    runApp(const DevBuildRefusedApp());
+    return;
+  }
+  if (kDevMode) {
+    // Dev mode: no Firebase, Google Sign-In, login or lock (dev_mode.dart).
+    runApp(await buildDevModeApp(const DOCEaseApp(ready: true, devMode: true)));
+    StartupHooks.runAll();
+    return;
   }
 
   bool firebaseReady = false;
@@ -80,12 +80,22 @@ class DOCEaseApp extends StatelessWidget {
   /// true: in a build without the define it is ignored (see [isDevMode]).
   final bool devMode;
 
-  /// The effective value: `devMode && kDevMode`.
-  bool get isDevMode => devMode && kDevMode;
+  /// The effective value: `kDevMode && devMode` (const first, so it folds).
+  bool get isDevMode => kDevMode && devMode;
   const DOCEaseApp({super.key, required this.ready, this.devMode = false});
 
   @override
   Widget build(BuildContext context) {
+    // Directly under the const kDevMode, so builds without the define
+    // contain neither DevModeHome nor the banner.
+    Widget? devHome;
+    TransitionBuilder? devBanner;
+    if (kDevMode) {
+      if (devMode) {
+        devHome = const DevModeHome(); // bypasses SecurityWrapper (lock) and login
+        devBanner = devModeBannerBuilder;
+      }
+    }
     return MaterialApp(
       title: 'DOCEase',
       debugShowCheckedModeBanner: false,
@@ -93,12 +103,11 @@ class DOCEaseApp extends StatelessWidget {
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF6366F1), surface: const Color(0xFFF8FAFC)),
       ),
-      builder: isDevMode ? devModeBannerBuilder : null,
-      home: isDevMode
-          ? const DevModeHome() // bypasses SecurityWrapper (lock) and login
-          : !ready 
+      builder: devBanner,
+      home: devHome ??
+          (!ready 
           ? const Scaffold(body: Center(child: Text('Clinical Cloud Connection Error')))
-          : const SecurityWrapper(),
+          : const SecurityWrapper()),
     );
   }
 }

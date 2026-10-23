@@ -4,6 +4,7 @@ import 'package:printing/printing.dart';
 import 'package:intl/intl.dart';
 import '../models/patient.dart';
 import '../models/doctor.dart';
+import '../config/dev_mode.dart';
 import 'test_data_marker.dart';
 
 class PdfExport {
@@ -12,6 +13,8 @@ class PdfExport {
 
   /// [testData] (dev mode) puts [testDataMarker] on every page and in the
   /// file name, so a dev-build letter can never pass as a real record.
+  /// Only in dev builds: without the define [testData] is ignored and the
+  /// marker code is compiled out (`kDevMode && testData`).
   static Future<void> generateAndPrintPatientReport(Patient patient,
       {Doctor? doctor, bool testData = false}) async {
     final pdf = buildPatientReport(patient, doctor: doctor, testData: testData);
@@ -26,7 +29,7 @@ class PdfExport {
   /// `TEST_DATA_` in front in dev mode.
   static String printFileName(Patient patient, DateTime now, {required bool testData}) {
     final name = reportFileName(patient, now);
-    return testData ? '$kTestDataFilePrefix$name' : name;
+    return kDevMode && testData ? '$kTestDataFilePrefix$name' : name;
   }
 
   /// Non-identifying file name for the print / "Save as PDF" dialog
@@ -64,8 +67,8 @@ class PdfExport {
       pw.MultiPage(
         pageFormat: PdfPageFormat.a4,
         margin: const pw.EdgeInsets.all(32),
-        header: testData ? (pw.Context context) => _testDataBand() : null,
-        footer: testData ? (pw.Context context) => _testDataBand() : null,
+        header: kDevMode && testData ? (pw.Context context) => _testDataBand() : null,
+        footer: kDevMode && testData ? (pw.Context context) => _testDataBand() : null,
         build: (pw.Context context) {
           return [
             pw.Row(
