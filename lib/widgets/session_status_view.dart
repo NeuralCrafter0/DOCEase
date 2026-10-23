@@ -119,6 +119,10 @@ class SessionStatusView extends StatelessWidget {
   }
 
   Widget _failed(BuildContext context) {
+    if (session.refusedReservedAccount) {
+      return _message('This account can\'t be used',
+          'This sign-in can\'t be used with DOCEase. Sign in with another account.', [_signOut()]);
+    }
     final text = switch (session.failure) {
       DbOpenError.keyUnavailable =>
         'The phone\'s secure storage is not available right now. Try again.',

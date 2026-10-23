@@ -1,7 +1,9 @@
+import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../config/dev_mode.dart';
+import 'dev_build_refused.dart';
 import '../providers/doctor_provider.dart';
 import '../providers/medicine_provider.dart';
 import '../providers/patient_provider.dart';
@@ -16,6 +18,8 @@ import '../widgets/session_status_view.dart';
 /// [kLocalOwnerId], and widgets see `DevMode.of(context) == true`.
 /// Nothing here touches Firebase or Google Sign-In.
 Future<Widget> buildDevModeApp(Widget app) async {
+  // Defence in depth: main() already refuses this in release builds.
+  if (kReleaseMode) return const DevBuildRefusedApp();
   try {
     await LocalPhotoStore.instance.init();
   } catch (e) {
