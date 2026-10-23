@@ -26,9 +26,10 @@ typedef BackupExcluder = Future<void> Function(String directoryPath);
 /// excluded from iCloud and computer backups through the
 /// `docease/backup_exclusion` channel (registered by PR #10's AppDelegate).
 ///
-/// Files are only deleted when their visit or patient is deleted (and an
-/// unsaved photo when the doctor removes it or leaves without saving).
-/// Saving or uploading never deletes them. [deleteOwned] only touches files
+/// Files are only deleted when their visit or patient is deleted, when the
+/// doctor removes a saved photo while editing and then saves the visit, and
+/// (for an unsaved photo) when the doctor removes it or leaves without
+/// saving. Uploading never deletes them. [deleteOwned] only touches files
 /// inside this owner's folder.
 class AttachmentStorage {
   AttachmentStorage({

@@ -16,7 +16,10 @@ class AddRecordScreen extends StatefulWidget {
   final VisitRecord? existingRecord;
   /// Converts picked photos to JPEG files. Injectable for tests.
   final AttachmentProcessor? attachmentProcessor;
-  const AddRecordScreen({super.key, required this.patientId, this.existingRecord, this.attachmentProcessor});
+  /// Owner folder used to delete saved photos the doctor removed. Defaults
+  /// to the current owner's. Injectable for tests.
+  final AttachmentStorage? attachmentStorage;
+  const AddRecordScreen({super.key, required this.patientId, this.existingRecord, this.attachmentProcessor, this.attachmentStorage});
 
   @override
   State<AddRecordScreen> createState() => _AddRecordScreenState();
@@ -50,6 +53,9 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   /// JPEGs created on this screen that are not saved yet; deleted if the
   /// doctor removes them or leaves without saving.
   final Set<String> _newAttachmentPaths = {};
+  /// Photos saved with the visit that the doctor removed while editing.
+  /// Their files are deleted only once the edited visit is saved.
+  final Set<String> _removedSavedPaths = {};
   int _processingPhotos = 0;
   bool _picking = false;
   bool _saved = false;
@@ -164,7 +170,11 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
 
   void _removeAttachment(String path) {
     setState(() => _attachmentPaths.remove(path));
-    if (_newAttachmentPaths.remove(path)) _deleteQuietly(path);
+    if (_newAttachmentPaths.remove(path)) {
+      _deleteQuietly(path);
+    } else if (widget.existingRecord?.attachmentPaths.contains(path) ?? false) {
+      _removedSavedPaths.add(path);
+    }
   }
 
   void _repeatLastVisit() {
@@ -208,6 +218,13 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
       else await provider.updateRecord(widget.patientId, record);
       
       _saved = true;
+      // The saved visit no longer points at these, so delete their files
+      // (security re-review F8-R4). Only files in this owner's folder; cloud
+      // paths and URLs are left to sync. Not reached if the save threw.
+      final removed = localAttachmentPaths(_removedSavedPaths).toList();
+      if (removed.isNotEmpty) {
+        await (widget.attachmentStorage ?? AttachmentStorage.forCurrentOwner())?.deleteOwned(removed);
+      }
       if (mounted) Navigator.pop(context);
     }
   }
