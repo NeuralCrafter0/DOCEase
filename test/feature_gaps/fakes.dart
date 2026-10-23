@@ -16,8 +16,14 @@ class LocalPatientProvider with ChangeNotifier implements PatientProvider {
   final added = <(String, VisitRecord)>[];
   final updated = <(String, VisitRecord)>[];
 
+  /// What the home search would show; tests set [searchQuery] to filter it.
+  String searchQuery = '';
+
   @override
-  List<Patient> get patients => [...list];
+  List<Patient> get patients => [...list.where((p) => p.name.toLowerCase().contains(searchQuery.toLowerCase()))];
+
+  @override
+  List<Patient> get allPatients => [...list];
 
   @override
   Patient findById(String id) => list.firstWhere((p) => p.id == id);

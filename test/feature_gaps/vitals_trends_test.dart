@@ -124,6 +124,14 @@ void main() {
     expect(chartIn(t, 'sugar').data.lineBarsData.single.spots.map((s) => s.y), [210, 180, 150, 130]);
   });
 
+  testWidgets('a home-screen search does not hide the patient', (t) async {
+    final pp = LocalPatientProvider([diabetic()])..searchQuery = 'somebody else';
+    expect(pp.patients, isEmpty);
+    await pump(t, const VitalsTrendsScreen(patientId: 'p1'), pp: pp);
+    expect(find.text('Asha · Vitals'), findsOneWidget);
+    expect(card('sugar'), findsOneWidget);
+  });
+
   testWidgets('a patient that is gone shows a message instead of crashing', (t) async {
     await pump(t, const VitalsTrendsScreen(patientId: 'missing'), pp: LocalPatientProvider([diabetic()]));
     expect(find.text('This patient is no longer on this phone.'), findsOneWidget);

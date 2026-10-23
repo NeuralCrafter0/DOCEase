@@ -27,6 +27,9 @@ class PatientProvider with ChangeNotifier {
   }
 
   bool get isSyncing => _isSyncing;
+  /// Every patient on this phone, ignoring the home-screen search. Use this
+  /// for whole-practice views (Insights) and lookups by id.
+  List<Patient> get allPatients => [..._patients];
 
   bool isPhoneRegistered(String phone) => _patients.any((p) => p.phone.trim() == phone.trim());
 

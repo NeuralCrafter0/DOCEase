@@ -15,7 +15,7 @@ class VitalsTrendsScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Consumer<PatientProvider>(builder: (ctx, provider, _) {
-      final matches = provider.patients.where((p) => p.id == patientId);
+      final matches = provider.allPatients.where((p) => p.id == patientId);
       final patient = matches.isEmpty ? null : matches.first;
       return Scaffold(
         backgroundColor: const Color(0xFFF8FAFC),
