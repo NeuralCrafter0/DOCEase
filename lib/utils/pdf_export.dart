@@ -5,6 +5,8 @@ import 'package:intl/intl.dart';
 import '../models/patient.dart';
 import '../models/doctor.dart';
 import 'test_data_marker.dart';
+import 'doctor_name.dart';
+import 'visit_order.dart';
 
 class PdfExport {
   /// Marker printed at the top and bottom of every page in dev mode.
@@ -54,7 +56,7 @@ class PdfExport {
       {Doctor? doctor, bool testData = false, bool compress = true}) {
     final pdf = pw.Document(compress: compress);
 
-    final String docName = doctor != null ? "${doctor.title} ${doctor.name}" : "Clinical Practitioner";
+    final String docName = doctorDisplayName(doctor) ?? "Clinical Practitioner";
     final String clinicName = doctor?.clinicName ?? "DOCEase Medical Center";
     final String docSpecialty = doctor?.specialty ?? "General Medicine";
     final String docContact = doctor?.mobileNumber ?? "";
@@ -77,7 +79,7 @@ class PdfExport {
                   children: [
                     pw.Text(clinicName, style: pw.TextStyle(fontSize: 24, fontWeight: pw.FontWeight.bold, color: PdfColors.blue900)),
                     pw.SizedBox(height: 4),
-                    pw.Text('Dr. $docName', style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
+                    pw.Text(docName, style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
                     pw.Text(docSpecialty, style: const pw.TextStyle(fontSize: 12, color: PdfColors.grey700)),
                     if (docContact.isNotEmpty) pw.Text('Mob: $docContact', style: const pw.TextStyle(fontSize: 11, color: PdfColors.grey700)),
                     if (docEmail.isNotEmpty) pw.Text('Email: $docEmail', style: const pw.TextStyle(fontSize: 11, color: PdfColors.grey700)),
@@ -125,7 +127,7 @@ class PdfExport {
             pw.Text('CLINICAL TIMELINE', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: PdfColors.blue900)),
             pw.SizedBox(height: 16),
             if (patient.history.isEmpty) pw.Center(child: pw.Text('No clinical records available.'))
-            else ...patient.history.map((record) => _buildPdfVisitCard(record)),
+            else ...patient.history.newestFirst().map((record) => _buildPdfVisitCard(record)),
             pw.Spacer(),
             pw.Divider(color: PdfColors.grey300),
             pw.SizedBox(height: 8),

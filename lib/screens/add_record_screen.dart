@@ -8,6 +8,8 @@ import 'package:flutter_typeahead/flutter_typeahead.dart';
 import '../models/patient.dart';
 import '../providers/patient_provider.dart';
 import '../providers/medicine_provider.dart';
+import '../utils/prescription_lines.dart';
+import '../utils/visit_order.dart';
 
 class AddRecordScreen extends StatefulWidget {
   final String patientId;
@@ -59,8 +61,9 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
 
   void _repeatLastVisit() {
     final patient = Provider.of<PatientProvider>(context, listen: false).findById(widget.patientId);
-    if (patient.history.isNotEmpty) {
-      final last = patient.history.first;
+    // Latest by visit date, not the most recently inserted note.
+    final last = patient.history.latestVisit;
+    if (last != null) {
       setState(() {
         _symptomsController.text = last.symptoms;
         _diagnosisController.text = last.diagnosis;
@@ -81,11 +84,10 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
     if (_formKey.currentState!.validate()) {
       setState(() => _isSaving = true);
       
-      // Save frequent medicine to list
+      // Medicines to remember: every line, without its dosage. Learned only
+      // once the visit is saved, so a refused save teaches nothing.
       final medProvider = Provider.of<MedicineProvider>(context, listen: false);
-      if (_prescriptionController.text.isNotEmpty) {
-        medProvider.addMedicineIfNew(_prescriptionController.text.split('\n').first);
-      }
+      final medicines = PrescriptionLines.medicineNames(_prescriptionController.text, dosages: medProvider.dosageTemplates);
 
       final record = VisitRecord(
         id: widget.existingRecord?.id, date: _selectedDate, visitType: _selectedVisitType,
@@ -111,6 +113,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
         return;
       }
       
+      for (final m in medicines) { medProvider.addMedicineIfNew(m); }
       if (mounted) Navigator.pop(context);
     }
   }
@@ -188,16 +191,13 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
           border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: Colors.grey.shade200)),
         ),
       ),
-      suggestionsCallback: (pattern) {
-        if (pattern.isEmpty) return [];
-        return medProvider.frequentMedicines.where((m) => m.toLowerCase().contains(pattern.toLowerCase())).toList();
-      },
+      // Match and complete only the line being typed, so every medicine line
+      // gets suggestions and picking one keeps the other lines.
+      suggestionsCallback: (_) => PrescriptionLines.suggestionsFor(_prescriptionController.value, medProvider.frequentMedicines),
       itemBuilder: (context, suggestion) => ListTile(title: Text(suggestion), leading: const Icon(Icons.history, size: 16)),
       onSelected: (suggestion) {
         setState(() {
-          final currentText = _prescriptionController.text;
-          // Replace partial typing with full medicine name
-          _prescriptionController.text = suggestion;
+          _prescriptionController.value = PrescriptionLines.applySuggestion(_prescriptionController.value, suggestion);
         });
       },
     );
@@ -212,7 +212,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
         side: BorderSide.none,
         onPressed: () {
           setState(() {
-            _prescriptionController.text = '${_prescriptionController.text} - $t\n';
+            _prescriptionController.value = PrescriptionLines.applyDosage(_prescriptionController.text, t);
           });
         },
       )).toList(),
