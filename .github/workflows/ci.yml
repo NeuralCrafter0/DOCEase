@@ -103,17 +103,20 @@ jobs:
         run: flutter test --no-pub
 
   android-build:
-    name: Android build (release-mode APK, obfuscated)
+    name: Android build (DEV profile APK / production release APK)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
       # DOCEASE_DEV_MODE (--dart-define, bool.fromEnvironment, defaults to false
       # in the app). When true it skips Firebase, login and the screen lock and
       # shows a "DEV MODE: test data only" banner. CI always passes it explicitly:
-      # - PR / branch / manual builds: DEV build (DOCEASE_DEV_MODE=true), never
-      #   release-signed, artifact labelled DEV, not for patients.
-      # - Release-signed builds and every v* tag build: DOCEASE_DEV_MODE=false.
-      #   The job fails rather than release-sign or tag a dev-mode build.
+      # - PR / branch / manual builds: DEV build, `--profile` with
+      #   DOCEASE_DEV_MODE=true (the app only honours dev mode outside release
+      #   mode and shows a "refused" screen in a release build with it on).
+      #   Debug-key signed, never release-signed, artifact labelled DEV.
+      # - Release-signed builds and every v* tag build: `--release`, obfuscated,
+      #   with DOCEASE_DEV_MODE=false. The job fails rather than release-sign or
+      #   tag a dev-mode build.
       IS_RELEASE_TAG: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/v') }}
       # Signing secrets are only exposed on main and v* tag runs, never on pull
       # requests or other branches.
@@ -122,6 +125,12 @@ jobs:
       ANDROID_KEY_ALIAS: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && secrets.ANDROID_KEY_ALIAS || '' }}
       ANDROID_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && secrets.ANDROID_KEY_PASSWORD || '' }}
       DEBUG_INFO_DIR: build/debug-info
+      # Android product flavor for DEV builds. Empty today because main has no
+      # flavors (passing --flavor would break the build). When the app's "dev"
+      # flavor (applicationIdSuffix ".dev") lands, set this to "dev": DEV builds
+      # then run `flutter build apk --profile --flavor dev ...` and the APK path
+      # becomes app-dev-profile.apk. Production builds never use this flavor.
+      DEV_FLAVOR: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -156,9 +165,11 @@ jobs:
           else
             dev_mode=true
           fi
+          # Dev builds are profile builds; production builds are release builds.
+          if [ "$dev_mode" = "true" ]; then build_mode=profile; else build_mode=release; fi
           if [ "$dev_mode" = "true" ]; then
-            label="DEV-login-lock-OFF-not-for-patients"
-            echo "::warning title=DEV build (login and lock OFF)::Built with --dart-define=DOCEASE_DEV_MODE=true: Firebase, login and the screen lock are skipped and the app shows a DEV MODE banner. For testers only, not for patients. Debug-key signed."
+            label="DEV-profile-login-lock-OFF-not-for-patients"
+            echo "::warning title=DEV build (login and lock OFF)::Profile build with --dart-define=DOCEASE_DEV_MODE=true: Firebase, login and the screen lock are skipped and the app shows a DEV MODE banner. For testers only, not for patients. Debug-key signed."
           elif [ "$signed" = "true" ]; then
             label="release-signed"
           else
@@ -169,13 +180,24 @@ jobs:
             echo "signed=$signed"
             echo "dev_mode=$dev_mode"
             echo "label=$label"
+            echo "build_mode=$build_mode"
+            if [ "$dev_mode" = "true" ] && [ -n "$DEV_FLAVOR" ]; then
+              echo "apk=build/app/outputs/flutter-apk/app-$DEV_FLAVOR-$build_mode.apk"
+            else
+              echo "apk=build/app/outputs/flutter-apk/app-$build_mode.apk"
+            fi
           } >> "$GITHUB_OUTPUT"
 
       - name: Release guard (no dev mode in signed or tagged builds)
         env:
           SIGNED: ${{ steps.mode.outputs.signed }}
           DEV_MODE: ${{ steps.mode.outputs.dev_mode }}
+          BUILD_MODE: ${{ steps.mode.outputs.build_mode }}
         run: |
+          case "$DEV_MODE/$BUILD_MODE" in
+            true/profile|false/release) ;;
+            *) echo "::error title=Release guard::Invalid combination DOCEASE_DEV_MODE=$DEV_MODE with --$BUILD_MODE (dev builds must be --profile, production builds --release)"; exit 1 ;;
+          esac
           case "$DEV_MODE" in
             true|false) ;;
             *) echo "::error title=Release guard::DOCEASE_DEV_MODE must be true or false, got '$DEV_MODE'"; exit 1 ;;
@@ -184,7 +206,7 @@ jobs:
             echo "::error title=Release guard::Refusing to build a release-signed or v* tag artifact with DOCEASE_DEV_MODE=$DEV_MODE. Release builds must use DOCEASE_DEV_MODE=false."
             exit 1
           fi
-          echo "Release guard OK: signed=$SIGNED tag=$IS_RELEASE_TAG DOCEASE_DEV_MODE=$DEV_MODE"
+          echo "Release guard OK: signed=$SIGNED tag=$IS_RELEASE_TAG DOCEASE_DEV_MODE=$DEV_MODE build=--$BUILD_MODE"
 
       - name: Write upload keystore and android/key.properties
         # Only for production builds: a dev-mode build is never release-signed.
@@ -205,18 +227,29 @@ jobs:
       - name: flutter pub get (lockfile enforced)
         run: flutter pub get --enforce-lockfile
 
-      - name: Build release-mode APK (obfuscated, split debug info)
+      - name: Build APK (DEV --profile, or production --release obfuscated)
         env:
           DOCEASE_DEV_MODE: ${{ steps.mode.outputs.dev_mode }}
+          BUILD_MODE: ${{ steps.mode.outputs.build_mode }}
         run: |
           set -euo pipefail
-          # Second guard: signing material present means this must be a production build.
-          if [ -f android/key.properties ] && [ "$DOCEASE_DEV_MODE" != "false" ]; then
-            echo "::error title=Release guard::android/key.properties exists but DOCEASE_DEV_MODE=$DOCEASE_DEV_MODE"
+          # Second guard: signing material present means this must be a production release build.
+          if [ -f android/key.properties ] && { [ "$DOCEASE_DEV_MODE" != "false" ] || [ "$BUILD_MODE" != "release" ]; }; then
+            echo "::error title=Release guard::android/key.properties exists but DOCEASE_DEV_MODE=$DOCEASE_DEV_MODE, --$BUILD_MODE"
             exit 1
           fi
-          flutter build apk --release --obfuscate --split-debug-info="$DEBUG_INFO_DIR" \
-            --dart-define=DOCEASE_DEV_MODE="$DOCEASE_DEV_MODE"
+          if [ "$BUILD_MODE" = "release" ] && [ "$DOCEASE_DEV_MODE" = "false" ]; then
+            flutter build apk --release --obfuscate --split-debug-info="$DEBUG_INFO_DIR" \
+              --dart-define=DOCEASE_DEV_MODE=false
+          elif [ "$BUILD_MODE" = "profile" ] && [ "$DOCEASE_DEV_MODE" = "true" ]; then
+            # --flavor dev is added here once DEV_FLAVOR is set (see job env).
+            flavor_args=()
+            if [ -n "$DEV_FLAVOR" ]; then flavor_args=(--flavor "$DEV_FLAVOR"); fi
+            flutter build apk --profile "${flavor_args[@]}" --dart-define=DOCEASE_DEV_MODE=true
+          else
+            echo "::error title=Release guard::Invalid build: DOCEASE_DEV_MODE=$DOCEASE_DEV_MODE with --$BUILD_MODE"
+            exit 1
+          fi
 
       - name: Build release AAB (release-signed production runs only)
         if: steps.mode.outputs.signed == 'true' && steps.mode.outputs.dev_mode == 'false'
@@ -235,9 +268,12 @@ jobs:
         env:
           SIGNED: ${{ steps.mode.outputs.signed }}
           DEV_MODE: ${{ steps.mode.outputs.dev_mode }}
+          BUILD_MODE: ${{ steps.mode.outputs.build_mode }}
+          APK: ${{ steps.mode.outputs.apk }}
         run: |
           set -euo pipefail
-          apk=build/app/outputs/flutter-apk/app-release.apk
+          apk="$APK"
+          test -f "$apk"
           apksigner="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)/apksigner"
           certs="$("$apksigner" verify --print-certs "$apk")"
           cert_dn="$(printf '%s\n' "$certs" | sed -n 's/^Signer #1 certificate DN: //p')"
@@ -265,7 +301,11 @@ jobs:
             echo ""
             echo "| | |"
             echo "|---|---|"
-            echo "| Build mode | release, \`--obfuscate --split-debug-info\` |"
+            if [ "$BUILD_MODE" = "release" ]; then
+              echo "| Build mode | \`--release --obfuscate --split-debug-info\` |"
+            else
+              echo "| Build mode | \`--profile\` (DEV, not obfuscated) |"
+            fi
             echo "| DOCEASE_DEV_MODE | \`${DEV_MODE}\` |"
             if [ "$SIGNED" = "true" ]; then
               echo "| Signing | **Release-signed** with the upload key |"
@@ -286,7 +326,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: docease-apk-${{ steps.mode.outputs.label }}
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: ${{ steps.mode.outputs.apk }}
           retention-days: 7
           if-no-files-found: error
 
