@@ -1,4 +1,5 @@
 import 'dart:io';
+import '../widgets/attachment_image.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
@@ -45,7 +46,7 @@ class PatientDetailScreen extends StatelessWidget {
             Row(children: [
               Expanded(child: TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF475569))))),
               const SizedBox(width: 16),
-              Expanded(child: ElevatedButton(onPressed: () { provider.deletePatient(patient.id); Navigator.pop(ctx); Navigator.pop(context); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))), child: const Text('Delete All', style: TextStyle(fontWeight: FontWeight.bold)))),
+              Expanded(child: ElevatedButton(onPressed: () { final messenger = ScaffoldMessenger.of(context); provider.deletePatient(patient.id).catchError((Object _) { messenger.showSnackBar(const SnackBar(content: Text('Could not delete this patient. Please try again.'))); }); Navigator.pop(ctx); Navigator.pop(context); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))), child: const Text('Delete All', style: TextStyle(fontWeight: FontWeight.bold)))),
             ])
           ],
         ),
@@ -71,7 +72,7 @@ class PatientDetailScreen extends StatelessWidget {
             Row(children: [
               Expanded(child: TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel'))),
               const SizedBox(width: 16),
-              Expanded(child: ElevatedButton(onPressed: () { provider.deleteRecord(pId, rId); Navigator.pop(ctx); Navigator.pop(context); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white), child: const Text('Delete'))),
+              Expanded(child: ElevatedButton(onPressed: () { final messenger = ScaffoldMessenger.of(context); provider.deleteRecord(pId, rId).catchError((Object _) { messenger.showSnackBar(const SnackBar(content: Text('Could not delete this visit. Please try again.'))); }); Navigator.pop(ctx); Navigator.pop(context); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white), child: const Text('Delete'))),
             ])
           ],
         ),
@@ -203,14 +204,13 @@ class PatientDetailScreen extends StatelessWidget {
                 itemCount: record.attachmentPaths.length,
                 itemBuilder: (ctx, idx) {
                   final path = record.attachmentPaths[idx];
-                  final isNetwork = path.startsWith('http');
                   return Padding(
                     padding: const EdgeInsets.only(right: 12.0),
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(20),
-                      child: isNetwork
-                          ? Image.network(path, width: 150, height: 200, fit: BoxFit.cover)
-                          : Image.file(File(path), width: 150, height: 200, fit: BoxFit.cover),
+                      // Storage path, legacy URL or local file; anything else
+                      // shows a placeholder.
+                      child: AttachmentImage(entry: path, patientId: patient.id, width: 150, height: 200),
                     ),
                   );
                 },

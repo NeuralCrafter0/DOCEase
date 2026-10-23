@@ -1,4 +1,5 @@
 import 'dart:io';
+import '../services/attachments.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -78,7 +79,18 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
       final user = FirebaseAuth.instance.currentUser;
       if (user != null) {
         String? finalImageUrl = _profileImageUrl;
-        if (_localImage != null) finalImageUrl = await Provider.of<DoctorProvider>(context, listen: false).uploadProfileImage(_localImage!);
+        if (_localImage != null) {
+          try {
+            finalImageUrl = await Provider.of<DoctorProvider>(context, listen: false).uploadProfileImage(_localImage!);
+          } on UnsupportedAttachmentException catch (e) {
+            // Not a JPEG/PNG/WebP image or over 5 MB: nothing uploaded or saved.
+            if (mounted) {
+              setState(() => _isLoading = false);
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+            }
+            return;
+          }
+        }
         
         final doctor = Doctor(
           id: user.uid, title: _selectedTitle, name: _nameController.text, email: _emailController.text, 

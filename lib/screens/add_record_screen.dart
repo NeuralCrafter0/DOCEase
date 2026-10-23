@@ -1,4 +1,5 @@
 import 'dart:io';
+import '../services/attachments.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:image_picker/image_picker.dart';
@@ -87,8 +88,21 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
       );
       
       final provider = Provider.of<PatientProvider>(context, listen: false);
-      if (widget.existingRecord == null) await provider.addRecord(widget.patientId, record);
-      else await provider.updateRecord(widget.patientId, record);
+      try {
+        if (widget.existingRecord == null) {
+          await provider.addRecord(widget.patientId, record);
+        } else {
+          await provider.updateRecord(widget.patientId, record);
+        }
+      } catch (e) {
+        // Nothing was uploaded or saved: say why and stay on the form.
+        if (mounted) {
+          setState(() => _isSaving = false);
+          final text = e is UnsupportedAttachmentException ? e.message : 'Could not save this visit. Please try again.';
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+        }
+        return;
+      }
       
       if (mounted) Navigator.pop(context);
     }
