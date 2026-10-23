@@ -87,7 +87,7 @@ class PatientDetailScreen extends StatelessWidget {
     return Consumer<PatientProvider>(
       builder: (ctx, provider, _) {
         final patient = provider.findById(patientId);
-        final family = provider.patients.where((p) => p.phone == patient.phone && p.id != patient.id).toList();
+        final family = provider.allPatients.where((p) => p.phone == patient.phone && p.id != patient.id).toList();
         final lastVisit = patient.history.isNotEmpty ? patient.history.first : null;
 
         return Scaffold(
