@@ -15,12 +15,15 @@ import 'dev/dev_build_refused.dart';
 import 'dev/dev_mode_app.dart';
 import 'services/log_codes.dart';
 import 'services/session_controller.dart';
+import 'services/startup_hooks.dart';
 import 'widgets/session_status_view.dart';
 import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Features register StartupHooks here (before the switch) so they run in
+  // dev and normal mode alike; see services/startup_hooks.dart.
 
   switch (decideStartMode(requested: kDevModeRequested, release: kReleaseMode)) {
     case StartMode.refused:
@@ -31,6 +34,7 @@ void main() async {
     case StartMode.dev:
       // Dev mode: no Firebase, Google Sign-In, login or lock (dev_mode.dart).
       runApp(await buildDevModeApp(const DOCEaseApp(ready: true, devMode: true)));
+      StartupHooks.runAll();
       return;
     case StartMode.normal:
       break;
@@ -67,6 +71,7 @@ void main() async {
       child: DOCEaseApp(ready: firebaseReady),
     ),
   );
+  StartupHooks.runAll();
 }
 
 class DOCEaseApp extends StatelessWidget {
