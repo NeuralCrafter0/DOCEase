@@ -92,7 +92,7 @@ class PdfExport {
   }
 
   /// Non-identifying file name for the print / "Save as PDF" dialog
-  /// (security review C6): report_<first 8 id chars>_<yyyymmdd>.pdf.
+  /// (security review C6): `report_<first 8 id chars>_<yyyymmdd>.pdf`.
   /// Never contains the patient's name.
   static String reportFileName(Patient patient, DateTime now) {
     final cleanId = patient.id.replaceAll(RegExp(r'[^A-Za-z0-9]'), '');
