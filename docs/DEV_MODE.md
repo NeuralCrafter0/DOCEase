@@ -31,8 +31,8 @@ Additional run args `--dart-define=DOCEASE_DEV_MODE=true`.
 | Define defaults off | `lib/config/dev_mode.dart`: `bool.fromEnvironment('DOCEASE_DEV_MODE', defaultValue: false)` | a forgotten flag gives the real app |
 | Release gate | `kDevMode = kDevModeRequested && !kReleaseMode` | dev mode is compiled out of release builds |
 | Refusal screen | `main()` > `decideStartMode()`: define + release = `StartMode.refused` | the app shows a blocking "Dev build refused" screen and does nothing else: no Firebase, no data, no back button |
-| Gradle: no dev release | `android/app/build.gradle.kts` | any `DevRelease` task fails: "Refused: the dev flavor never builds in release mode" |
-| Gradle: define only on dev | same | `DOCEASE_DEV_MODE=true` with the prod flavor fails, and the dev flavor without the define fails |
+| Gradle: no dev release | `android/app/build.gradle.kts` | the `devRelease` variant does not exist (`androidComponents.beforeVariants`), so `--flavor dev --release` fails; a guard also refuses it: "Refused: the dev flavor never builds in release mode" |
+| Gradle: define only on dev | same, checked on the task graph (`gradle.taskGraph.whenReady`), so it covers `flutter`, `./gradlew assembleDebug`/`build` and IDE runs alike | `DOCEASE_DEV_MODE=true` in any prod app fails, a dev app without the define fails, and a build producing both flavors at once (e.g. `./gradlew assembleDebug`) fails |
 | Own app | flavor `dev`: `applicationIdSuffix ".dev"`, label "DOCEase DEV" (`android/app/src/dev/AndroidManifest.xml`) | never installs over, or shares storage with, the real app |
 
 The `prod` flavor is the app as before: same application id `com.medhistory.app.medhistory`, label
@@ -50,7 +50,8 @@ name the flavor (`--flavor prod` or `--flavor dev`).
 | Startup | No `Firebase.initializeApp`, no `GoogleSignIn` | as before |
 | Login screen, biometric lock (`SecurityWrapper`, PR #4) | skipped, straight to home | shown |
 | Patients, visits, records, search, insights, PDF letterhead | encrypted DB opened with `openFor('local')` | `openFor(<firebase uid>)` |
-| PDF | red "TEST DATA - NOT A MEDICAL RECORD" band at the top and bottom of every page; file name `TEST_DATA_...` | no marker |
+| PDF | red "TEST DATA - NOT A MEDICAL RECORD" band at the top and bottom of every page; file name `TEST_DATA_report_<id8>_<yyyymmdd>.pdf` | `report_<id8>_<yyyymmdd>.pdf` (#7's scheme, never the patient's name) |
+| Shared visit text | first line `*TEST DATA - NOT A MEDICAL RECORD*` (`markShareText`, `lib/utils/test_data_marker.dart`) | unchanged |
 | Firestore sync, Storage uploads, cloud fetches | skipped (code kept); rows stay "unsynced" | on |
 | Doctor profile | DB setting `doctor_profile` (JSON) | `doctors/{uid}` |
 | Doctor photo | `profile/<owner folder>/` in app support | Storage `doctors/{uid}/avatar.jpg` |
@@ -68,6 +69,12 @@ name the flavor (`--flavor prod` or `--flavor dev`).
   disk. Photo files are only ever deleted inside the folders of the owner that is asking
   (symlinks are refused): an unsaved copy when its save fails, and the previous doctor photo when
   a new one is saved. Deleting a visit or patient does not delete its photos (PR #8 owns that).
+- iOS: each owner photo folder is excluded from iCloud and computer backups when it is first used
+  in a run, through #10's `PlatformBackupExcluder` (the existing `docease/backup_exclusion`
+  channel in `ios/Runner/AppDelegate.swift`, which also covers the encrypted DB; no new native
+  code). A failure is logged as a code and retried on the next photo. Android backups are off in
+  the main manifest (`allowBackup="false"`), which the dev flavor inherits. Not compiled or run
+  on iOS here (no Mac); covered by Dart tests with a fake excluder.
 - `local` is a reserved owner. Every cloud path refuses it explicitly, even if cloud sync were
   switched on by mistake: `PatientProvider` (sync, uploads, fetches, retries), `FirestoreHelper`,
   `DoctorProvider`, `MedicineProvider`, `FirebaseSessionPlatform` (approval, cloud ids) and
@@ -86,10 +93,29 @@ name the flavor (`--flavor prod` or `--flavor dev`).
   `flutter test` and `flutter test --dart-define=DOCEASE_DEV_MODE=true`.
 - The profile and medicines use the DB engineer's key-value settings table
   (`LocalDatabase.getSetting`/`putSetting`, PR #10), inside the encrypted DB.
+- `CurrentOwner.id` (`lib/services/current_owner.dart`): the owner of the open session, or null.
+  `SessionController` sets it when a session is ready (`local` in dev mode, the Firebase uid
+  otherwise) and clears it before anything closes on sign-out, account switch, failure or
+  dispose. For code without a `BuildContext`, e.g. PR #8:
+  `AttachmentStorage.currentOwnerId = () => CurrentOwner.id;`.
+- `StartupHooks` (`lib/services/startup_hooks.dart`): work that must run after start in both
+  modes. Register before the start switch in `main()`, e.g. PR #8:
+  `StartupHooks.register('picker_hygiene', PickerHygiene.atStartup);` (replacing its
+  `PickerHygiene.atStartup().ignore();` after the normal `runApp`, which dev mode never reaches).
+  `main()` runs them after `runApp` on both paths, never on the refusal screen; failures log a
+  code only.
+- `PatientProvider.addPatient`/`updatePatient` throw `SaveRefusedException` when a save is
+  refused, after rolling back the list (a refused add is gone, a refused update shows the old
+  version). `.error` is the original error, `.causeCode` is safe to log. A refusal caused by
+  `UnsyncedCounterException` or `UnreadablePatientException` is also an instance of that type,
+  so existing catches keep working. Screens should `await` the call and catch
+  `SaveRefusedException`.
 
 ## For DevOps (CI)
 
 - Release jobs: `flutter build apk --release --flavor prod` / `flutter build appbundle --release --flavor prod`.
+  Always name one flavor: a plain `./gradlew assembleDebug` or `build` would produce both flavors
+  in one build, and the guard refuses that.
   Passing `--dart-define=DOCEASE_DEV_MODE=false` is harmless and still recommended; Gradle already
   fails a release with the define on, and the app would only show the refusal screen.
 - Dev/tester jobs: `flutter build apk --profile --flavor dev --dart-define=DOCEASE_DEV_MODE=true`
@@ -98,6 +124,6 @@ name the flavor (`--flavor prod` or `--flavor dev`).
 
 ## Later
 
-- iOS: dev photos are kept in Application Support, which iOS backs up to iCloud by default. Before
-  dev builds go to iOS testers, mark the photo folders excluded from backup (or keep them in
-  Caches). Android excludes nothing yet either; the dev app id keeps it separate from the real app.
+- iOS: the photo-folder backup exclusion has not been run on a device (no Mac here). Check it
+  on the first iOS dev build, e.g. that `attachments/<owner folder>` shows
+  `NSURLIsExcludedFromBackupKey` = true.
