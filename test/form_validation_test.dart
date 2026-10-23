@@ -1,10 +1,11 @@
 // Regression tests for patient-form and clinical-note validation
-// (QA cases UI-01, UI-02).
+// (QA cases UI-01, UI-02, UI-03).
 // ignore_for_file: depend_on_referenced_packages
 import 'package:docease/models/patient.dart';
 import 'package:docease/providers/medicine_provider.dart';
 import 'package:docease/providers/patient_provider.dart';
 import 'package:docease/screens/add_patient_screen.dart';
+import 'package:docease/screens/add_record_screen.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_core_platform_interface/test.dart';
 import 'package:flutter/material.dart';
@@ -195,6 +196,42 @@ void main() {
       expect(find.text('Enter the mobile number'), findsNothing);
       await register(t);
       expect(p.added, hasLength(1));
+    });
+  });
+
+  group('AddRecordScreen', () {
+    FakePatientProvider provider() => FakePatientProvider()
+      ..fixture = Patient(id: 'p1', name: 'A', age: '1', gender: 'Male', phone: '+919876543210');
+
+    Finder diagnosisField() => find.widgetWithText(TextFormField, 'Diagnosis');
+
+    testWidgets('UI-03 blank diagnosis is rejected inline and nothing is saved', (t) async {
+      final p = provider();
+      await open(t, const AddRecordScreen(patientId: 'p1'), p);
+      await t.tap(find.text('Save Clinical Record'));
+      await t.pumpAndSettle();
+      expect(find.text('Enter a diagnosis'), findsOneWidget);
+      expect(p.records, isEmpty);
+    });
+
+    testWidgets('UI-03 whitespace-only diagnosis is rejected', (t) async {
+      final p = provider();
+      await open(t, const AddRecordScreen(patientId: 'p1'), p);
+      await t.enterText(diagnosisField(), '   \n ');
+      await t.tap(find.text('Save Clinical Record'));
+      await t.pumpAndSettle();
+      expect(find.text('Enter a diagnosis'), findsOneWidget);
+      expect(p.records, isEmpty);
+    });
+
+    testWidgets('a note with a diagnosis saves (trimmed)', (t) async {
+      final p = provider();
+      await open(t, const AddRecordScreen(patientId: 'p1'), p);
+      await t.enterText(diagnosisField(), '  Viral fever ');
+      await t.tap(find.text('Save Clinical Record'));
+      await t.pumpAndSettle();
+      expect(p.records, hasLength(1));
+      expect(p.records.single.diagnosis, 'Viral fever');
     });
   });
 }

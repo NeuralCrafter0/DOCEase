@@ -33,6 +33,11 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   late List<String> _attachmentPaths;
   final ImagePicker _picker = ImagePicker();
   bool _isSaving = false;
+  bool _submitted = false;
+
+  /// A clinical note must at least record a diagnosis.
+  static String? validateDiagnosis(String? value) =>
+      (value ?? '').trim().isEmpty ? 'Enter a diagnosis' : null;
 
   @override
   void initState() {
@@ -70,6 +75,8 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   }
 
   Future<void> _saveRecord() async {
+    if (_isSaving) return;
+    if (!_submitted) setState(() => _submitted = true);
     if (_formKey.currentState!.validate()) {
       setState(() => _isSaving = true);
       
@@ -81,7 +88,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
 
       final record = VisitRecord(
         id: widget.existingRecord?.id, date: _selectedDate, visitType: _selectedVisitType,
-        symptoms: _symptomsController.text, diagnosis: _diagnosisController.text, prescription: _prescriptionController.text,
+        symptoms: _symptomsController.text, diagnosis: _diagnosisController.text.trim(), prescription: _prescriptionController.text,
         bp: _bpController.text, temp: _tempController.text, pulse: _pulseController.text, weight: _weightController.text, sugar: _sugarController.text,
         attachmentPaths: _attachmentPaths,
       );
@@ -113,6 +120,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
         padding: const EdgeInsets.all(24.0),
         child: Form(
           key: _formKey,
+          autovalidateMode: _submitted ? AutovalidateMode.onUserInteraction : AutovalidateMode.disabled,
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             _buildLabel('Visit Date'),
             _buildDatePicker(),
@@ -126,7 +134,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
             _buildLabel('Clinical Details'),
             _buildModernInput(_symptomsController, 'Chief Symptoms', Icons.sick_outlined, maxLines: 2),
             const SizedBox(height: 20),
-            _buildModernInput(_diagnosisController, 'Diagnosis', Icons.biotech_outlined, maxLines: 2),
+            _buildModernInput(_diagnosisController, 'Diagnosis', Icons.biotech_outlined, maxLines: 2, validator: validateDiagnosis),
             const SizedBox(height: 32),
             _buildLabel('Prescription Builder'),
             _buildSmartPrescriptionField(medProvider),
@@ -227,8 +235,8 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
 
   Widget _buildLabel(String text) => Padding(padding: const EdgeInsets.only(bottom: 10, left: 4), child: Text(text, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Color(0xFF475569))));
 
-  Widget _buildModernInput(TextEditingController controller, String hint, IconData icon, {int maxLines = 1}) {
-    return TextFormField(controller: controller, maxLines: maxLines, style: const TextStyle(fontWeight: FontWeight.w700), decoration: InputDecoration(hintText: hint, prefixIcon: Icon(icon, color: const Color(0xFF6366F1), size: 20), filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: Colors.grey.shade200))));
+  Widget _buildModernInput(TextEditingController controller, String hint, IconData icon, {int maxLines = 1, FormFieldValidator<String>? validator}) {
+    return TextFormField(controller: controller, maxLines: maxLines, validator: validator, style: const TextStyle(fontWeight: FontWeight.w700), decoration: InputDecoration(hintText: hint, prefixIcon: Icon(icon, color: const Color(0xFF6366F1), size: 20), filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: Colors.grey.shade200))));
   }
 
   Widget _buildHighPerfSelector(List<String> options, String selectedValue, Function(String) onSelected) {
