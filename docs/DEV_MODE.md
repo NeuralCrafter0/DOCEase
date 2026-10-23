@@ -31,7 +31,7 @@ Additional run args `--dart-define=DOCEASE_DEV_MODE=true`.
 | Define defaults off | `lib/config/dev_mode.dart`: `bool.fromEnvironment('DOCEASE_DEV_MODE', defaultValue: false)` | a forgotten flag gives the real app |
 | Release gate | `kDevMode = kDevModeRequested && !kReleaseMode` | dev mode is compiled out of release builds |
 | Refusal screen | `main()` > `decideStartMode()`: define + release = `StartMode.refused` | the app shows a blocking "Dev build refused" screen and does nothing else: no Firebase, no data, no back button |
-| Gradle: no dev release | `android/app/build.gradle.kts` | the `devRelease` variant does not exist (`androidComponents.beforeVariants`), so `--flavor dev --release` fails; a guard also refuses it: "Refused: the dev flavor never builds in release mode" |
+| Gradle: no dev release | `android/app/build.gradle.kts` | the `devRelease` variant does not exist (`androidComponents.beforeVariants`), so `--flavor dev --release` fails, and a plain `flutter build apk --release` (no flavor) builds only the prod app. A guard also refuses any `DevRelease` task in the graph, with or without the define, so a dev APK is never release-signed: "Refused: the dev flavor never builds in release mode" |
 | Gradle: define only on dev | same, checked on the task graph (`gradle.taskGraph.whenReady`), so it covers `flutter`, `./gradlew assembleDebug`/`build` and IDE runs alike | `DOCEASE_DEV_MODE=true` in any prod app fails, a dev app without the define fails, and a build producing both flavors at once (e.g. `./gradlew assembleDebug`) fails |
 | Own app | flavor `dev`: `applicationIdSuffix ".dev"`, label "DOCEase DEV" (`android/app/src/dev/AndroidManifest.xml`) | never installs over, or shares storage with, the real app |
 
