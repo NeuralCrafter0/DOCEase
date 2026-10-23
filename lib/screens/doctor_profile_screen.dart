@@ -1,7 +1,7 @@
 import 'dart:io';
+import '../services/attachments.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl_phone_field/intl_phone_field.dart';
 import 'package:intl_phone_field/country_picker_dialog.dart';
@@ -9,6 +9,7 @@ import 'package:intl_phone_field/countries.dart';
 import 'package:flutter/services.dart';
 import '../models/doctor.dart';
 import '../providers/doctor_provider.dart';
+import '../widgets/avatar_image.dart';
 
 class DoctorProfileScreen extends StatefulWidget {
   const DoctorProfileScreen({super.key});
@@ -41,7 +42,7 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
     super.initState();
     final doc = Provider.of<DoctorProvider>(context, listen: false).currentDoctor;
     _nameController = TextEditingController(text: doc?.name ?? '');
-    _emailController = TextEditingController(text: doc?.email ?? FirebaseAuth.instance.currentUser?.email ?? '');
+    _emailController = TextEditingController(text: doc?.email ?? Provider.of<DoctorProvider>(context, listen: false).accountEmail ?? '');
     _ageController = TextEditingController(text: doc?.age ?? '');
     _specialtyController = TextEditingController(text: doc?.specialty ?? '');
     _clinicController = TextEditingController(text: doc?.clinicName ?? '');
@@ -75,18 +76,31 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
   Future<void> _saveProfile() async {
     if (_formKey.currentState!.validate()) {
       setState(() => _isLoading = true);
-      final user = FirebaseAuth.instance.currentUser;
-      if (user != null) {
+      final uid = Provider.of<DoctorProvider>(context, listen: false).ownerUid;
+      if (uid != null) {
         String? finalImageUrl = _profileImageUrl;
-        if (_localImage != null) finalImageUrl = await Provider.of<DoctorProvider>(context, listen: false).uploadProfileImage(_localImage!);
+        if (_localImage != null) {
+          try {
+            finalImageUrl = await Provider.of<DoctorProvider>(context, listen: false).uploadProfileImage(_localImage!);
+          } on UnsupportedAttachmentException catch (e) {
+            // Not a JPEG/PNG/WebP image or over 5 MB: nothing uploaded or saved.
+            if (mounted) {
+              setState(() => _isLoading = false);
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+            }
+            return;
+          }
+        }
         
         final doctor = Doctor(
-          id: user.uid, title: _selectedTitle, name: _nameController.text, email: _emailController.text, 
+          id: uid, title: _selectedTitle, name: _nameController.text, email: _emailController.text, 
           age: _ageController.text, mobileNumber: _completePhoneNumber, specialty: _specialtyController.text, 
           clinicName: _clinicController.text, practiceMode: _selectedPracticeMode, profileImageUrl: finalImageUrl
         );
-        await Provider.of<DoctorProvider>(context, listen: false).saveDoctorProfile(doctor);
-        if (mounted) {
+        final saved = await Provider.of<DoctorProvider>(context, listen: false).saveDoctorProfile(doctor);
+        if (mounted && !saved) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not save profile')));
+        } else if (mounted) {
           setState(() => _isEditing = false);
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Profile Locked & Saved')));
         }
@@ -119,7 +133,7 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Center(
               child: Stack(children: [
-                CircleAvatar(radius: 60, backgroundColor: const Color(0xFFEEF2FF), backgroundImage: _localImage != null ? FileImage(_localImage!) : (_profileImageUrl != null ? NetworkImage(_profileImageUrl!) : null) as ImageProvider?),
+                CircleAvatar(radius: 60, backgroundColor: const Color(0xFFEEF2FF), backgroundImage: _localImage != null ? FileImage(_localImage!) : avatarImageFor(_profileImageUrl)),
                 if (_isEditing) Positioned(bottom: 0, right: 0, child: GestureDetector(onTap: () => _pickImage(ImageSource.camera), child: Container(padding: const EdgeInsets.all(8), decoration: const BoxDecoration(color: Color(0xFF1E293B), shape: BoxShape.circle), child: const Icon(Icons.camera_alt, color: Colors.white, size: 20)))),
               ]),
             ),

@@ -1,29 +1,55 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:local_auth/local_auth.dart';
 import 'providers/patient_provider.dart';
 import 'providers/doctor_provider.dart';
 import 'providers/medicine_provider.dart';
 import 'providers/database_helper.dart';
+import 'providers/firestore_settings.dart';
+import 'config/dev_mode.dart';
+import 'dev/dev_build_refused.dart';
+import 'dev/dev_mode_app.dart';
+import 'services/log_codes.dart';
+import 'services/session_controller.dart';
+import 'services/startup_hooks.dart';
+import 'widgets/session_status_view.dart';
 import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
+  // Features register StartupHooks here (before the switch) so they run in
+  // dev and normal mode alike; see services/startup_hooks.dart.
+
+  switch (decideStartMode(requested: kDevModeRequested, release: kReleaseMode)) {
+    case StartMode.refused:
+      // Release build made with the dev define: refuse loudly, never fall
+      // through to dev mode or silently to the normal app.
+      runApp(const DevBuildRefusedApp());
+      return;
+    case StartMode.dev:
+      // Dev mode: no Firebase, Google Sign-In, login or lock (dev_mode.dart).
+      runApp(await buildDevModeApp(const DOCEaseApp(ready: true, devMode: true)));
+      StartupHooks.runAll();
+      return;
+    case StartMode.normal:
+      break;
+  }
+
   bool firebaseReady = false;
   try {
     await Firebase.initializeApp();
+    configureFirestoreForEncryptedLocalStore();
     await GoogleSignIn.instance.initialize(
       serverClientId: '1014476645992-6s886d3l0h84lb277ghfq571gkg6bfi9.apps.googleusercontent.com',
     );
     firebaseReady = true;
   } catch (e) {
-    debugPrint('Init Error: $e');
+    debugPrint('Init Error: ${errorCode(e)}');
   }
 
   runApp(
@@ -32,15 +58,27 @@ void main() async {
         ChangeNotifierProvider(create: (ctx) => PatientProvider()),
         ChangeNotifierProvider(create: (ctx) => DoctorProvider()),
         ChangeNotifierProvider(create: (ctx) => MedicineProvider()),
+        // Created on first read (after unlock), so no session work starts
+        // before the lock screen is passed.
+        ChangeNotifierProvider(
+          create: (ctx) => SessionController(
+            patients: ctx.read<PatientProvider>(),
+            doctor: ctx.read<DoctorProvider>(),
+            medicines: ctx.read<MedicineProvider>(),
+          ),
+        ),
       ],
       child: DOCEaseApp(ready: firebaseReady),
     ),
   );
+  StartupHooks.runAll();
 }
 
 class DOCEaseApp extends StatelessWidget {
   final bool ready;
-  const DOCEaseApp({super.key, required this.ready});
+  /// Dev mode (injectable for tests; main passes it explicitly).
+  final bool devMode;
+  const DOCEaseApp({super.key, required this.ready, this.devMode = false});
 
   @override
   Widget build(BuildContext context) {
@@ -51,7 +89,10 @@ class DOCEaseApp extends StatelessWidget {
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF6366F1), surface: const Color(0xFFF8FAFC)),
       ),
-      home: !ready 
+      builder: devMode ? devModeBannerBuilder : null,
+      home: devMode
+          ? const DevModeHome() // bypasses SecurityWrapper (lock) and login
+          : !ready 
           ? const Scaffold(body: Center(child: Text('Clinical Cloud Connection Error')))
           : const SecurityWrapper(),
     );
@@ -145,12 +186,12 @@ class _SecurityWrapperState extends State<SecurityWrapper> with WidgetsBindingOb
       );
     }
 
-    return StreamBuilder<User?>(
-      stream: FirebaseAuth.instance.authStateChanges(),
-      builder: (ctx, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) return const Scaffold(body: Center(child: CircularProgressIndicator()));
-        if (snapshot.hasData) return const HomeScreen();
-        return const LoginScreen();
+    // The session (auth, approval, local DB) sits below the unlock screen.
+    return Consumer<SessionController>(
+      builder: (ctx, session, _) => switch (session.phase) {
+        SessionPhase.ready => const HomeScreen(),
+        SessionPhase.signedOut => const LoginScreen(),
+        _ => SessionStatusView(session: session),
       },
     );
   }

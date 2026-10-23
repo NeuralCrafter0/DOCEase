@@ -4,10 +4,55 @@ import 'package:printing/printing.dart';
 import 'package:intl/intl.dart';
 import '../models/patient.dart';
 import '../models/doctor.dart';
+import 'test_data_marker.dart';
 
 class PdfExport {
-  static Future<void> generateAndPrintPatientReport(Patient patient, {Doctor? doctor}) async {
-    final pdf = pw.Document();
+  /// Marker printed at the top and bottom of every page in dev mode.
+  static const testDataMarker = kTestDataMarker;
+
+  /// [testData] (dev mode) puts [testDataMarker] on every page and in the
+  /// file name, so a dev-build letter can never pass as a real record.
+  static Future<void> generateAndPrintPatientReport(Patient patient,
+      {Doctor? doctor, bool testData = false}) async {
+    final pdf = buildPatientReport(patient, doctor: doctor, testData: testData);
+    // Dev mode only adds the TEST_DATA_ prefix; the rest is #7's neutral
+    // reportFileName scheme, which wins on merge.
+    await Printing.layoutPdf(
+        onLayout: (PdfPageFormat format) async => pdf.save(),
+        name: printFileName(patient, DateTime.now(), testData: testData));
+  }
+
+  /// The name offered by the print dialog: [reportFileName], with
+  /// `TEST_DATA_` in front in dev mode.
+  static String printFileName(Patient patient, DateTime now, {required bool testData}) {
+    final name = reportFileName(patient, now);
+    return testData ? '$kTestDataFilePrefix$name' : name;
+  }
+
+  /// Non-identifying file name for the print / "Save as PDF" dialog
+  /// (security review C6): `report_<first 8 id chars>_<yyyymmdd>.pdf`.
+  /// Never contains the patient's name.
+  // Same code as #7 (PdfExport.reportFileName); #7's version wins on merge.
+  static String reportFileName(Patient patient, DateTime now) {
+    final cleanId = patient.id.replaceAll(RegExp(r'[^A-Za-z0-9]'), '');
+    final shortId = cleanId.isEmpty ? 'patient' : cleanId.substring(0, cleanId.length < 8 ? cleanId.length : 8);
+    return 'report_${shortId}_${DateFormat('yyyyMMdd').format(now)}.pdf';
+  }
+
+  static pw.Widget _testDataBand() => pw.Container(
+        width: double.infinity,
+        margin: const pw.EdgeInsets.symmetric(vertical: 4),
+        padding: const pw.EdgeInsets.symmetric(vertical: 4),
+        color: PdfColors.red700,
+        child: pw.Center(
+            child: pw.Text(testDataMarker,
+                style: pw.TextStyle(color: PdfColors.white, fontSize: 12, fontWeight: pw.FontWeight.bold))),
+      );
+
+  /// The report document ([compress] false only for tests that read it).
+  static pw.Document buildPatientReport(Patient patient,
+      {Doctor? doctor, bool testData = false, bool compress = true}) {
+    final pdf = pw.Document(compress: compress);
 
     final String docName = doctor != null ? "${doctor.title} ${doctor.name}" : "Clinical Practitioner";
     final String clinicName = doctor?.clinicName ?? "DOCEase Medical Center";
@@ -19,6 +64,8 @@ class PdfExport {
       pw.MultiPage(
         pageFormat: PdfPageFormat.a4,
         margin: const pw.EdgeInsets.all(32),
+        header: testData ? (pw.Context context) => _testDataBand() : null,
+        footer: testData ? (pw.Context context) => _testDataBand() : null,
         build: (pw.Context context) {
           return [
             pw.Row(
@@ -88,7 +135,7 @@ class PdfExport {
       ),
     );
 
-    await Printing.layoutPdf(onLayout: (PdfPageFormat format) async => pdf.save(), name: 'ClinicalReport_${patient.name.replaceAll(' ', '_')}.pdf');
+    return pdf;
   }
 
   static pw.Widget _buildPdfVisitCard(VisitRecord record) {
