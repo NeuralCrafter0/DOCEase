@@ -189,7 +189,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
         side: BorderSide.none,
         onPressed: () {
           setState(() {
-            _prescriptionController.text = '${_prescriptionController.text} - $t\n';
+            _prescriptionController.value = PrescriptionLines.applyDosage(_prescriptionController.text, t);
           });
         },
       )).toList(),

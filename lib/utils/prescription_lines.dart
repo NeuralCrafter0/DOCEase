@@ -64,4 +64,24 @@ class PrescriptionLines {
     }
     return names;
   }
+
+  /// Applies a dosage chip to the last medicine in [text]:
+  /// - "Azithromycin 500mg" -> "Azithromycin 500mg - OD (1-0-0)\n"
+  /// - a line that already has a dosage gets it replaced, not a second one
+  /// - an empty prescription gets the dosage on its own line, never " - OD".
+  /// The caret goes to the end, ready for the next medicine.
+  static TextEditingValue applyDosage(String text, String dosage) {
+    final body = text.replaceFirst(RegExp(r'\s+$'), '');
+    final lineStart = body.lastIndexOf('\n') + 1;
+    final before = body.substring(0, lineStart);
+    var line = body.substring(lineStart).trim();
+    final cut = line.indexOf(dosageSeparator);
+    if (cut != -1) line = line.substring(0, cut).trim();
+    final newLine = line.isEmpty ? dosage : '$line$dosageSeparator$dosage';
+    final newText = '$before$newLine\n';
+    return TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(offset: newText.length),
+    );
+  }
 }

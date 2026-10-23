@@ -1,5 +1,5 @@
 // Regression tests for prescription learning and dosage chips
-// (QA feature pass F-MED-02, F-MED-03, F-MED-05).
+// (QA feature pass F-MED-02..05).
 // ignore_for_file: depend_on_referenced_packages
 import 'dart:async';
 
@@ -112,6 +112,26 @@ void main() {
     });
   });
 
+  group('PrescriptionLines.applyDosage', () {
+    test('adds the dosage to the last medicine and starts a new line', () {
+      final r = PrescriptionLines.applyDosage('Azithromycin 500mg', od);
+      expect(r.text, 'Azithromycin 500mg - $od\n');
+      expect(r.selection.extentOffset, r.text.length);
+    });
+    test('an empty prescription never starts with " - "', () {
+      expect(PrescriptionLines.applyDosage('', od).text, '$od\n');
+      expect(PrescriptionLines.applyDosage('  \n', od).text, '$od\n');
+    });
+    test('a second chip replaces the dosage instead of adding an empty line', () {
+      final once = PrescriptionLines.applyDosage('Azithromycin 500mg', od).text;
+      expect(PrescriptionLines.applyDosage(once, 'BD (1-0-1)').text, 'Azithromycin 500mg - BD (1-0-1)\n');
+    });
+    test('earlier lines are kept', () {
+      expect(PrescriptionLines.applyDosage('Cetirizine 10mg - HS (Bedtime)\nPantoprazole 40mg', 'AC (Before Food)').text,
+          'Cetirizine 10mg - HS (Bedtime)\nPantoprazole 40mg - AC (Before Food)\n');
+    });
+  });
+
   group('visit form', () {
     testWidgets('every prescription line is learned, not only the first', (t) async {
       final (patients, meds) = await openNote(t);
@@ -132,6 +152,12 @@ void main() {
       patients.pending!.complete();
       await t.pumpAndSettle();
       expect(meds.learned, ['Azithromycin 500mg']);
+    });
+
+    testWidgets('a dosage chip on an empty prescription does not start with " - "', (t) async {
+      await openNote(t);
+      await tapChip(t, od);
+      expect(rxText(t), '$od\n');
     });
 
     testWidgets('nothing is learned until the save has succeeded', (t) async {
