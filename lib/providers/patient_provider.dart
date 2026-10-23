@@ -11,7 +11,13 @@ class PatientProvider with ChangeNotifier {
   List<Patient> _patients = [];
   String _searchQuery = '';
   bool _isSyncing = false;
-  final FirestoreHelper _firestore = FirestoreHelper();
+  final LocalDatabase _db;
+  final FirestoreHelper _firestore;
+
+  /// Defaults to the real SQLCipher database and Firestore; tests inject fakes.
+  PatientProvider({LocalDatabase? db, FirestoreHelper? firestore})
+      : _db = db ?? DatabaseHelper.instance,
+        _firestore = firestore ?? FirestoreHelper();
 
   List<Patient> get patients {
     // --- SMART SEARCH FIX ---
@@ -34,7 +40,7 @@ class PatientProvider with ChangeNotifier {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
 
-    final localData = await DatabaseHelper.instance.fetchPatients();
+    final localData = await _db.fetchPatients();
     _patients = localData;
     notifyListeners();
 
@@ -42,6 +48,8 @@ class PatientProvider with ChangeNotifier {
   }
 
   Future<void> _performBackgroundSync() async {
+    // Never read or merge cloud data unless the local DB is open and ready.
+    if (_db.state is! DbReady) return;
     try {
       _isSyncing = true;
       notifyListeners();
@@ -50,9 +58,15 @@ class PatientProvider with ChangeNotifier {
         Map<String, Patient> mergedMap = {for (var p in _patients) p.id: p};
         bool hasChanges = false;
         for (var cp in cloudPatients) {
+          // A doc that failed to parse is skipped: never stored or re-synced.
+          // Likewise never overwrite a local row that failed to parse.
+          if (cp.hasParseErrors || (mergedMap[cp.id]?.hasParseErrors ?? false)) {
+            debugPrint('Sync: skipping unparsed patient ${cp.id}');
+            continue;
+          }
           if (!mergedMap.containsKey(cp.id) || cp.history.length > mergedMap[cp.id]!.history.length) {
             mergedMap[cp.id] = cp;
-            await DatabaseHelper.instance.insertPatient(cp);
+            await _db.insertPatient(cp, fromCloud: true);
             hasChanges = true;
           }
         }
@@ -67,35 +81,69 @@ class PatientProvider with ChangeNotifier {
   void setSearchQuery(String query) { _searchQuery = query; notifyListeners(); }
 
   Future<void> addPatient(Patient patient) async {
+    _ensureWritable(patient);
     _patients.add(patient);
     notifyListeners();
-    await DatabaseHelper.instance.insertPatient(patient);
-    _firestore.syncPatient(patient);
+    final String? version;
+    try {
+      version = await _db.insertPatient(patient);
+    } on UnsyncedCounterException {
+      // Save refused (secure storage failing): don't show it as saved.
+      _patients.removeWhere((p) => identical(p, patient));
+      notifyListeners();
+      rethrow;
+    }
+    _pushToCloud(patient, version);
+  }
+
+  /// Uploads [patient]; marks the local row clean only after Firestore
+  /// confirmed the write and only if no newer local write happened since.
+  Future<bool> _pushToCloud(Patient patient, String? version) async {
+    final ok = await _firestore.syncPatient(patient);
+    if (ok && version != null) await _db.markSynced(patient.id, version);
+    return ok;
+  }
+
+  /// Patients with unreadable records are read-only: saving them would
+  /// overwrite the stored data with placeholders.
+  void _ensureWritable(Patient patient) {
+    if (patient.hasParseErrors) throw UnreadablePatientException(patient.id);
   }
 
   Future<void> updatePatient(Patient patient) async {
     final index = _patients.indexWhere((p) => p.id == patient.id);
     if (index != -1) {
+      _ensureWritable(_patients[index]);
+      _ensureWritable(patient);
+      final previous = _patients[index];
       _patients[index] = patient;
       notifyListeners();
-      await DatabaseHelper.instance.insertPatient(patient);
-      _firestore.syncPatient(patient);
+      final String? version;
+      try {
+        version = await _db.insertPatient(patient);
+      } on UnsyncedCounterException {
+        _patients[index] = previous;
+        notifyListeners();
+        rethrow;
+      }
+      _pushToCloud(patient, version);
     }
   }
 
   Future<void> deletePatient(String id) async {
     _patients.removeWhere((p) => p.id == id);
     notifyListeners();
-    await DatabaseHelper.instance.deletePatient(id);
+    await _db.deletePatient(id);
     await _firestore.deletePatient(id);
   }
 
   Future<void> addRecord(String patientId, VisitRecord record) async {
     final index = _patients.indexWhere((p) => p.id == patientId);
     if (index != -1) {
+      _ensureWritable(_patients[index]);
       _patients[index].history.insert(0, record);
       notifyListeners();
-      await DatabaseHelper.instance.updatePatient(_patients[index]);
+      await _db.updatePatient(_patients[index]);
       _syncRecordToCloud(patientId, index, record);
     }
   }
@@ -109,8 +157,8 @@ class PatientProvider with ChangeNotifier {
       attachmentPaths: urls,
     );
     _patients[index].history[0] = processedRecord;
-    await DatabaseHelper.instance.updatePatient(_patients[index]);
-    await _firestore.syncPatient(_patients[index]);
+    final version = await _db.updatePatient(_patients[index]);
+    await _pushToCloud(_patients[index], version);
     notifyListeners();
   }
 
@@ -135,9 +183,10 @@ class PatientProvider with ChangeNotifier {
     if (pIndex != -1) {
       final rIndex = _patients[pIndex].history.indexWhere((r) => r.id == record.id);
       if (rIndex != -1) {
+        _ensureWritable(_patients[pIndex]);
         _patients[pIndex].history[rIndex] = record;
         notifyListeners();
-        await DatabaseHelper.instance.updatePatient(_patients[pIndex]);
+        await _db.updatePatient(_patients[pIndex]);
         _syncUpdateRecordToCloud(patientId, pIndex, rIndex, record);
       }
     }
@@ -152,18 +201,19 @@ class PatientProvider with ChangeNotifier {
       attachmentPaths: urls,
     );
     _patients[pIndex].history[rIndex] = processedRecord;
-    await DatabaseHelper.instance.updatePatient(_patients[pIndex]);
-    await _firestore.syncPatient(_patients[pIndex]);
+    final version = await _db.updatePatient(_patients[pIndex]);
+    await _pushToCloud(_patients[pIndex], version);
     notifyListeners();
   }
 
   Future<void> deleteRecord(String patientId, String recordId) async {
     final index = _patients.indexWhere((p) => p.id == patientId);
     if (index != -1) {
+      _ensureWritable(_patients[index]);
       _patients[index].history.removeWhere((r) => r.id == recordId);
       notifyListeners();
-      await DatabaseHelper.instance.updatePatient(_patients[index]);
-      await _firestore.syncPatient(_patients[index]);
+      final version = await _db.updatePatient(_patients[index]);
+      await _pushToCloud(_patients[index], version);
     }
   }
 
