@@ -10,6 +10,7 @@ import '../providers/doctor_provider.dart';
 import '../models/patient.dart';
 import '../config/dev_mode.dart';
 import '../utils/pdf_export.dart';
+import '../utils/test_data_marker.dart';
 import 'add_patient_screen.dart';
 import 'add_record_screen.dart';
 
@@ -25,7 +26,7 @@ class PatientDetailScreen extends StatelessWidget {
   void _shareVisitSummary(BuildContext context, dynamic doctor, Patient patient, VisitRecord record) {
     final String docName = doctor != null ? "${doctor.title} ${doctor.name}" : "Doctor";
     final String message = "*Visit Summary - DOCEase*\n*Patient:* ${patient.name}\n*Date:* ${DateFormat('dd MMM yyyy').format(record.date)}\n*Type:* ${record.visitType}\n\n*Vitals:* BP: ${record.bp ?? 'N/A'}, Temp: ${record.temp ?? 'N/A'}\n*Diagnosis:* ${record.diagnosis}\n*Prescription:* ${record.prescription}\n\n*Dr. $docName*";
-    Share.share(message);
+    Share.share(markShareText(message, testData: DevMode.of(context)));
   }
 
   void _showModernDeletePatientConfirm(BuildContext context, PatientProvider provider, Patient patient) {
