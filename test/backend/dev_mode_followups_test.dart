@@ -3,6 +3,7 @@
 // markers and the Android build guard. Fakes only, no Firebase.
 import 'dart:io';
 
+import 'package:docease/config/dev_mode.dart';
 import 'package:docease/models/patient.dart';
 import 'package:docease/providers/database_helper.dart';
 import 'package:docease/providers/patient_provider.dart';
@@ -82,11 +83,11 @@ void main() {
     test('main.dart runs the hooks after runApp on both start paths, never on the refused screen', () {
       final src = File('lib/main.dart').readAsStringSync();
       expect('StartupHooks.runAll();'.allMatches(src), hasLength(2));
-      final refused = src.substring(src.indexOf('case StartMode.refused:'), src.indexOf('case StartMode.dev:'));
+      final refused = src.substring(src.indexOf('if (kDevBuildRefused) {'), src.indexOf('if (kDevMode) {'));
       expect(refused, isNot(contains('StartupHooks')));
-      final dev = src.substring(src.indexOf('case StartMode.dev:'), src.indexOf('case StartMode.normal:'));
+      final dev = src.substring(src.indexOf('if (kDevMode) {'), src.indexOf('bool firebaseReady'));
       expect(dev.indexOf('StartupHooks.runAll()'), greaterThan(dev.indexOf('runApp(')));
-      final normal = src.substring(src.indexOf('case StartMode.normal:'), src.indexOf('class DOCEaseApp'));
+      final normal = src.substring(src.indexOf('bool firebaseReady'), src.indexOf('class DOCEaseApp'));
       expect(normal.lastIndexOf('StartupHooks.runAll()'), greaterThan(normal.lastIndexOf('runApp(')));
     });
   });
@@ -212,10 +213,12 @@ void main() {
     final day = DateTime(2026, 10, 23, 21, 5);
     final asha = Patient(id: '3f2a9c1e-77b0-4d1e-9a52-0c1d2e3f4a5b', name: 'Asha Rao', age: '34', gender: 'Female', phone: '1');
 
-    test('file name follows #7 (no patient name), TEST_DATA_ prefix in dev mode', () {
+    test('file name follows #7 (no patient name), TEST_DATA_ prefix in dev builds only', () {
       expect(PdfExport.reportFileName(asha, day), 'report_3f2a9c1e_20261023.pdf');
       expect(PdfExport.printFileName(asha, day, testData: false), 'report_3f2a9c1e_20261023.pdf');
-      expect(PdfExport.printFileName(asha, day, testData: true), 'TEST_DATA_report_3f2a9c1e_20261023.pdf');
+      // Without the define testData is ignored (the marker is compiled out).
+      expect(PdfExport.printFileName(asha, day, testData: true),
+          kDevMode ? 'TEST_DATA_report_3f2a9c1e_20261023.pdf' : 'report_3f2a9c1e_20261023.pdf');
       for (final testData in [true, false]) {
         final n = PdfExport.printFileName(asha, day, testData: testData).toLowerCase();
         expect(n, isNot(contains('asha')));
@@ -225,9 +228,9 @@ void main() {
       expect(src, isNot(contains('patient.name.replaceAll')));
     });
 
-    test('share text starts with the marker in dev mode only', () {
+    test('share text starts with the marker in dev mode only (dev builds only)', () {
       expect(markShareText('*Visit Summary - DOCEase*', testData: true),
-          '*TEST DATA - NOT A MEDICAL RECORD*\n*Visit Summary - DOCEase*');
+          kDevMode ? '*TEST DATA - NOT A MEDICAL RECORD*\n*Visit Summary - DOCEase*' : '*Visit Summary - DOCEase*');
       expect(markShareText('*Visit Summary - DOCEase*', testData: false), '*Visit Summary - DOCEase*');
       final src = String.fromCharCodes(File('lib/screens/patient_detail_screen.dart').readAsBytesSync());
       expect(src, contains('Share.share(markShareText(message, testData: DevMode.of(context)))'));
