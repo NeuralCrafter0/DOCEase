@@ -2,6 +2,7 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'package:intl/intl.dart';
+import 'pdf_fonts.dart';
 import '../models/patient.dart';
 import '../models/doctor.dart';
 import 'test_data_marker.dart';
@@ -17,6 +18,7 @@ class PdfExport {
   /// file name, so a dev-build letter can never pass as a real record.
   static Future<void> generateAndPrintPatientReport(Patient patient,
       {Doctor? doctor, bool testData = false}) async {
+    await PdfFonts.ensureLoaded();
     final pdf = buildPatientReport(patient, doctor: doctor, testData: testData);
     // Dev mode only adds the TEST_DATA_ prefix; the rest is #7's neutral
     // reportFileName scheme, which wins on merge.
@@ -65,6 +67,7 @@ class PdfExport {
 
     pdf.addPage(
       pw.MultiPage(
+        theme: PdfFonts.theme,
         pageFormat: PdfPageFormat.a4,
         margin: const pw.EdgeInsets.all(32),
         header: testData ? (pw.Context context) => _testDataBand() : null,
