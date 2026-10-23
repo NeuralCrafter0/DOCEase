@@ -87,23 +87,40 @@ void main() {
       expect(shared(), isNull);
     });
 
-    testWidgets('Share with defaults sends every field', (t) async {
+    testWidgets('every field starts unticked and Share is disabled until one is ticked', (t) async {
       final shared = await openAndTapShare(t);
+      for (final f in ShareField.values) {
+        expect(t.widget<CheckboxListTile>(find.byKey(ValueKey('share-field-${f.name}'))).value, isFalse, reason: f.name);
+      }
+      final share = find.widgetWithText(ElevatedButton, 'Share');
+      expect(t.widget<ElevatedButton>(share).onPressed, isNull);
+      await t.tap(share);
+      await t.pumpAndSettle();
+      expect(shared(), isNull);
+      expect(find.text('Share outside DOCEase?'), findsOneWidget);
+    });
+
+    testWidgets('ticking every field sends every field', (t) async {
+      final shared = await openAndTapShare(t);
+      for (final f in ShareField.values) {
+        await t.tap(find.byKey(ValueKey('share-field-${f.name}')));
+      }
+      await t.pump();
       await t.tap(find.widgetWithText(ElevatedButton, 'Share'));
       await t.pumpAndSettle();
       expect(shared(), allOf(contains('Asha Rao'), contains('URTI-DX'), contains('Azithro-RX'), contains('BP: 120/80')));
     });
 
-    testWidgets('unticked fields are left out', (t) async {
+    testWidgets('only ticked fields are sent', (t) async {
       final shared = await openAndTapShare(t);
-      await t.tap(find.byKey(const ValueKey('share-field-patientName')));
-      await t.tap(find.byKey(const ValueKey('share-field-prescription')));
+      await t.tap(find.byKey(const ValueKey('share-field-diagnosis')));
       await t.pump();
       await t.tap(find.widgetWithText(ElevatedButton, 'Share'));
       await t.pumpAndSettle();
       final text = shared()!;
       expect(text, isNot(contains('Asha')));
       expect(text, isNot(contains('Azithro-RX')));
+      expect(text, isNot(contains('BP: 120/80')));
       expect(text, contains('URTI-DX'));
       expect(text, contains('*Date:* 01 Oct 2026'));
     });

@@ -3,8 +3,10 @@ import 'package:flutter/material.dart';
 import '../utils/visit_share_text.dart';
 
 /// Confirmation shown before visit details leave the app (security review
-/// C6). Lets the doctor choose what to include. Pops with the chosen fields,
-/// or null when cancelled.
+/// C6). Lets the doctor choose what to include. Every field starts unticked
+/// (PR #7 review), so nothing identifying leaves the app without a deliberate
+/// choice, and Share stays disabled until something is ticked. Pops with the
+/// chosen fields, or null when cancelled.
 class ShareConfirmSheet extends StatefulWidget {
   final String patientName;
   const ShareConfirmSheet({super.key, required this.patientName});
@@ -25,7 +27,7 @@ class ShareConfirmSheet extends StatefulWidget {
 }
 
 class _ShareConfirmSheetState extends State<ShareConfirmSheet> {
-  final Set<ShareField> _fields = {...ShareField.values};
+  final Set<ShareField> _fields = {};
 
   @override
   Widget build(BuildContext context) {
@@ -64,7 +66,7 @@ class _ShareConfirmSheetState extends State<ShareConfirmSheet> {
               const SizedBox(width: 16),
               Expanded(
                 child: ElevatedButton.icon(
-                  onPressed: () => Navigator.pop(context, {..._fields}),
+                  onPressed: _fields.isEmpty ? null : () => Navigator.pop(context, {..._fields}),
                   icon: const Icon(Icons.share_outlined, size: 18),
                   label: const Text('Share', style: TextStyle(fontWeight: FontWeight.bold)),
                   style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF6366F1), foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
