@@ -57,6 +57,24 @@ Future<String?> shareText(WidgetTester t, Doctor? d) async {
   await t.pumpAndSettle();
   await t.tap(find.byIcon(Icons.share_outlined));
   await t.pumpAndSettle();
+  // With the share confirmation from fix/frontend-privacy merged, a sheet
+  // asks what to include and starts with nothing ticked: tick everything
+  // and confirm. Without it (this branch alone) the text is shared directly.
+  final boxes = find.byType(CheckboxListTile);
+  if (shared == null && boxes.evaluate().isNotEmpty) {
+    for (var i = 0; i < boxes.evaluate().length; i++) {
+      final box = boxes.at(i);
+      if (t.widget<CheckboxListTile>(box).value != true) {
+        await t.ensureVisible(box);
+        await t.tap(box);
+        await t.pumpAndSettle();
+      }
+    }
+    final confirm = find.ancestor(of: find.text('Share'), matching: find.byWidgetPredicate((w) => w is ButtonStyleButton));
+    await t.ensureVisible(confirm.last);
+    await t.tap(confirm.last);
+    await t.pumpAndSettle();
+  }
   return shared;
 }
 
