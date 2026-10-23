@@ -25,6 +25,7 @@ import 'package:docease/utils/pdf_export.dart';
 import 'package:docease/widgets/avatar_image.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -159,15 +160,60 @@ void main() {
       expect(src, contains('const bool kDevMode = kDevModeRequested && !kReleaseMode;'));
     });
 
-    test('main() decides before any Firebase or Google Sign-In call and refuses in release', () {
+    test('the start constants make the same decision as decideStartMode', () {
+      final mode = decideStartMode(requested: kDevModeRequested, release: kReleaseMode);
+      expect(kDevMode, mode == StartMode.dev);
+      expect(kDevBuildRefused, mode == StartMode.refused);
+      final src = File('lib/config/dev_mode.dart').readAsStringSync();
+      expect(src, contains('const bool kDevBuildRefused = kDevModeRequested && kReleaseMode;'));
+    });
+
+    test('main() decides with the constants, before any Firebase or Google Sign-In call, and refuses in release', () {
       final main = File('lib/main.dart').readAsStringSync();
-      final decide = main.indexOf('decideStartMode(requested: kDevModeRequested, release: kReleaseMode)');
-      expect(decide, greaterThan(0));
-      expect(decide, lessThan(main.indexOf('Firebase.initializeApp')));
-      expect(decide, lessThan(main.indexOf('GoogleSignIn.instance')));
-      final refused = main.indexOf('case StartMode.refused:');
-      expect(main.indexOf('runApp(const DevBuildRefusedApp());', refused), greaterThan(refused));
-      expect(main, isNot(contains('if (kDevMode)')), reason: 'one decision point only');
+      final refused = main.indexOf('if (kDevBuildRefused) {');
+      final dev = main.indexOf('if (kDevMode) {');
+      expect(refused, greaterThan(0));
+      expect(dev, greaterThan(refused));
+      expect(dev, lessThan(main.indexOf('Firebase.initializeApp')));
+      expect(dev, lessThan(main.indexOf('GoogleSignIn.instance')));
+      expect(main.substring(refused, dev), contains('runApp(const DevBuildRefusedApp());\n    return;'));
+      expect(main, isNot(contains('switch (decideStartMode')),
+          reason: 'a runtime switch keeps the dev branch in release builds');
+    });
+
+    test('dev-only code is only reached directly under a const kDevMode check (tree-shaken without the define)', () {
+      // Outside lib/dev/dev_mode_app.dart, each use of a dev-only symbol must
+      // sit inside an open `if (kDevMode) {` block (or after `kDevMode &&`).
+      final symbols = RegExp(r'buildDevModeApp\(|DevModeHome\(|devModeBannerBuilder|SessionController\.localOnly\(|LocalOnlySessionPlatform\(\)|_testDataBand\(\)|_reconcileLocal\(|kTestDataMarker\*|kTestDataFilePrefix\$');
+      final allowedDefs = {
+        'lib/dev/dev_mode_app.dart', // the dev wiring itself
+        'lib/services/session_platform.dart', // class definition (constructor gated)
+      };
+      final uses = <String>[];
+      for (final f in Directory('lib').listSync(recursive: true).whereType<File>().where((f) => f.path.endsWith('.dart'))) {
+        final path = f.path.replaceAll(r'\', '/');
+        if (allowedDefs.contains(path)) continue;
+        final src = String.fromCharCodes(f.readAsBytesSync());
+        for (final m in symbols.allMatches(src)) {
+          final lineStart = src.lastIndexOf('\n', m.start) + 1;
+          final line = src.substring(lineStart, src.indexOf('\n', m.start));
+          if (line.trimLeft().startsWith('//')) continue;
+          if (path == 'lib/services/session_controller.dart' && line.contains('SessionController.localOnly({')) continue;
+          if (path == 'lib/services/session_controller.dart' && line.contains('Future<void> _reconcileLocal(')) continue;
+          // Inside SessionController.localOnly, itself only called from the dev wiring.
+          if (path == 'lib/services/session_controller.dart' && line.contains('_platform = LocalOnlySessionPlatform(),')) continue;
+          if (path == 'lib/utils/pdf_export.dart' && line.contains('static pw.Widget _testDataBand()')) continue;
+          uses.add('$path: ${line.trim()}');
+          final before = src.substring(0, m.start);
+          final ifBlock = before.lastIndexOf('if (kDevMode) {');
+          final inBlock = ifBlock >= 0 &&
+              '{'.allMatches(before.substring(ifBlock)).length > '}'.allMatches(before.substring(ifBlock)).length;
+          expect(inBlock || line.contains('kDevMode && '), isTrue, reason: '$path: ${line.trim()}');
+        }
+      }
+      expect(uses.where((u) => u.contains('buildDevModeApp(')), hasLength(1));
+      expect(uses.where((u) => u.contains('DevModeHome(')), hasLength(1));
+      expect(uses.where((u) => u.contains('devModeBannerBuilder')), hasLength(1));
     });
 
     test('every dev-mode entry point is gated on kDevMode (define AND not release; defence in depth)', () {
@@ -180,7 +226,7 @@ void main() {
           reason: 'refuse before anything starts');
       final platform = File('lib/services/session_platform.dart').readAsStringSync();
       expect(platform, contains('LocalOnlySessionPlatform() {\n    if (!kDevMode) {'));
-      expect(File('lib/main.dart').readAsStringSync(), contains('bool get isDevMode => devMode && kDevMode;'));
+      expect(File('lib/main.dart').readAsStringSync(), contains('bool get isDevMode => kDevMode && devMode;'));
       expect(File('lib/config/dev_mode.dart').readAsStringSync(),
           contains('kDevMode && (context.dependOnInheritedWidgetOfExactType<DevMode>()?.enabled ?? true)'));
     });
@@ -449,7 +495,11 @@ void main() {
       }
       expect(RegExp(r'\(TEST\)').allMatches(dev).length, greaterThanOrEqualTo(2), reason: 'header and footer');
       expect(await pdfText(false), isNot(contains('(TEST)')));
-    });
+    }, skip: !kDevMode);
+
+    test('without the define testData: true is ignored (marker compiled out)', () async {
+      expect(await pdfText(true), isNot(contains('(TEST)')));
+    }, skip: kDevMode);
 
     test('the PDF button passes DevMode.of(context)', () {
       final src = String.fromCharCodes(File('lib/screens/patient_detail_screen.dart').readAsBytesSync());

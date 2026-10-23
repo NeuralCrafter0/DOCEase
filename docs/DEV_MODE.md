@@ -92,14 +92,29 @@ name the flavor (`--flavor prod` or `--flavor dev`).
 - Dev mode can only be turned on by the define. Every injectable entry point is gated on
   `kDevMode` (define on and not release), so nothing can enable it in a build without the
   define (security F4-R3):
-  - `DOCEaseApp(devMode: true)`: the effective value is `isDevMode => devMode && kDevMode`.
+  - `DOCEaseApp(devMode: true)`: the effective value is `isDevMode => kDevMode && devMode`.
   - `DevMode(enabled: true)`: `DevMode.of` is `kDevMode && enabled`, so a scope can only turn
     dev mode off.
   - `SessionController.localOnly` and `LocalOnlySessionPlatform` (which approves everyone)
     throw `StateError`.
   - `buildDevModeApp` returns the refusal screen.
+  - The TEST DATA markers (PDF band, PDF file-name prefix, share text) apply only when
+    `kDevMode && testData`; without the define `testData: true` is ignored.
   - Not gated: the providers' `cloudSync: false`. It only turns cloud work off and never skips
     sign-in, the lock or approval, or changes the owner. Unit-test fakes use it in both modes.
+- Dev-only code is compiled out of builds without the define. `kDevMode` and
+  `kDevBuildRefused` are compile-time constants, and `main()` uses them directly
+  (`if (kDevBuildRefused) { ... }`, `if (kDevMode) { ... }`), as does `DOCEaseApp.build`. The AOT
+  compiler then drops `buildDevModeApp`, `DevModeHome`, the banner, `localOnly`, the TEST DATA
+  markers and their strings from release builds. Rule for new dev-only code: put it directly
+  under `if (kDevMode) {` or after `kDevMode && ` (constant first). A runtime value (a function
+  result like `decideStartMode(...)`, a getter, a local variable) keeps the code in the binary.
+  `dev_mode_security_test.dart` checks this for the known dev symbols. To check a release APK
+  (expect 0 for each):
+
+      unzip -p build/app/outputs/flutter-apk/app-prod-release.apk lib/arm64-v8a/libapp.so \
+        | strings | grep -c -e 'DEV MODE' -e buildDevModeApp -e 'TEST DATA'
+
 - Tests: run the suite twice. Both commands pass unchanged (apart from `test/widget_test.dart`,
   below), because tests that
   need one mode skip themselves in the other (`skip: !kDevMode` / `skip: kDevMode` inside the
@@ -111,11 +126,15 @@ name the flavor (`--flavor prod` or `--flavor dev`).
   Only with the define (`skip: !kDevMode`): in `test/backend/dev_mode_test.dart`, the `session`
   group (4 tests), `DOCEaseApp(devMode: true) skips lock and login, shows the banner` and
   `session screens offer no Sign out in dev mode`; in `test/backend/current_owner_test.dart`,
-  `dev mode (localOnly): owner is "local"`.
+  `dev mode (localOnly): owner is "local"`; in `test/backend/dev_mode_security_test.dart`,
+  `dev mode PDFs say TEST DATA; real ones do not`.
   Only without the define (`skip: kDevMode`): the `without the define, every dev-mode entry
   point refuses` group in `dev_mode_test.dart` (4 tests: `DOCEaseApp(devMode: true)` is
-  ignored; `localOnly`, `LocalOnlySessionPlatform` and `buildDevModeApp` refuse).
-  Everything else runs in both. New dev-mode tests that need it on use `skip: !kDevMode`.
+  ignored; `localOnly`, `LocalOnlySessionPlatform` and `buildDevModeApp` refuse), and
+  `without the define testData: true is ignored (marker compiled out)` in
+  `dev_mode_security_test.dart`.
+  Everything else runs in both. The PDF file-name and share-text marker tests in
+  `dev_mode_followups_test.dart` run in both and expect the marker only when `kDevMode`. New dev-mode tests that need it on use `skip: !kDevMode`.
   `test/widget_test.dart` is the broken Flutter template and fails in both modes, on `main`
   too.
 - The profile and medicines use the DB engineer's key-value settings table
