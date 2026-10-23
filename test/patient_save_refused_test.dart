@@ -69,7 +69,7 @@ void main() {
   setupFirebaseCoreMocks();
   setUpAll(() async => Firebase.initializeApp());
 
-  testWidgets('F-PAT-05 refused registration shows a message and keeps the form open', (t) async {
+  testWidgets('F-PAT-05 refused registration closes the form and tells the doctor', (t) async {
     final p = RefusingProvider();
     await open(t, const AddPatientScreen(), p);
     await t.enterText(nameField, 'Asha Rao');
@@ -78,33 +78,26 @@ void main() {
     await t.tap(find.text('Register Profile'));
     await t.pumpAndSettle();
     expect(t.takeException(), isNull);
-    expect(find.text("Couldn't register this patient. Nothing was saved. Please try again."), findsOneWidget);
-    expect(find.text('Register Profile'), findsOneWidget, reason: 'form stays open');
-    expect(find.text('Asha Rao'), findsOneWidget, reason: 'nothing typed is lost');
+    expect(find.text("Couldn't register this patient. Nothing was saved."), findsOneWidget);
+    expect(find.text('Register Profile'), findsNothing, reason: 'form closes');
+    expect(find.text('Asha Rao'), findsNothing, reason: 'the unsaved patient is not shown');
+    expect(find.textContaining('Asha'), findsNothing, reason: 'no patient data in the message');
     expect(find.textContaining('+91987'), findsNothing, reason: 'no patient data in the message');
     expect(p.saved, isEmpty);
-
-    // Once the database accepts it again, the same tap saves and closes.
-    p.refuse = false;
-    await t.tap(find.text('Register Profile'));
-    await t.pumpAndSettle();
-    expect(p.saved, hasLength(1));
-    expect(find.text('Register Profile'), findsNothing);
   });
-
-  testWidgets('F-PAT-06 refused edit shows a message and does not close as if saved', (t) async {
+  testWidgets('F-PAT-06 refused edit closes the form and says the old details were kept', (t) async {
     final p = RefusingProvider();
     await open(t, AddPatientScreen(existingPatient: ravi), p);
     await t.enterText(nameField, 'Ravi Changed');
     await t.tap(find.text('Save Changes'));
     await t.pumpAndSettle();
     expect(t.takeException(), isNull);
-    expect(find.text("Couldn't save these changes. The previous details were kept. Please try again."), findsOneWidget);
-    expect(find.text('Save Changes'), findsOneWidget);
+    expect(find.text("Couldn't save these changes. The previous details were kept."), findsOneWidget);
+    expect(find.text('Save Changes'), findsNothing, reason: 'form closes');
+    expect(find.text('Ravi Changed'), findsNothing, reason: 'the refused edit is not shown');
     expect(find.textContaining('refused'), findsNothing);
     expect(p.saved, isEmpty);
   });
-
   testWidgets('a save that goes through still closes the form', (t) async {
     final p = RefusingProvider(refuse: false);
     await open(t, AddPatientScreen(existingPatient: ravi), p);

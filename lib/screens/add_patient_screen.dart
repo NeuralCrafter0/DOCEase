@@ -120,16 +120,18 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
         }
       } catch (_) {
         // The local database refused the save; the provider has already
-        // dropped the new patient or restored the previous details. Stay on
-        // the form so nothing typed is lost, and say so without any patient
-        // data in the message. TODO(after #13 merges): narrow this to
+        // dropped the new patient or restored the previous details. Close
+        // the form, so the screen underneath shows what is really stored
+        // (QA F-PAT-05/06), and say so there without any patient data in
+        // the message. TODO(after #13 merges): narrow this to
         // `on SaveRefusedException`.
         if (!mounted) return;
-        setState(() => _saving = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        final messenger = ScaffoldMessenger.of(context);
+        Navigator.of(context).pop();
+        messenger.showSnackBar(SnackBar(
           content: Text(isNew
-              ? "Couldn't register this patient. Nothing was saved. Please try again."
-              : "Couldn't save these changes. The previous details were kept. Please try again."),
+              ? "Couldn't register this patient. Nothing was saved."
+              : "Couldn't save these changes. The previous details were kept."),
         ));
         return;
       }
