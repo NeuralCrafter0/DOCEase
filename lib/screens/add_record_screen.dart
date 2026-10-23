@@ -7,6 +7,7 @@ import 'package:flutter_typeahead/flutter_typeahead.dart';
 import '../models/patient.dart';
 import '../providers/patient_provider.dart';
 import '../providers/medicine_provider.dart';
+import '../utils/prescription_lines.dart';
 
 class AddRecordScreen extends StatefulWidget {
   final String patientId;
@@ -166,16 +167,13 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
           border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: Colors.grey.shade200)),
         ),
       ),
-      suggestionsCallback: (pattern) {
-        if (pattern.isEmpty) return [];
-        return medProvider.frequentMedicines.where((m) => m.toLowerCase().contains(pattern.toLowerCase())).toList();
-      },
+      // Match and complete only the line being typed, so every medicine line
+      // gets suggestions and picking one keeps the other lines.
+      suggestionsCallback: (_) => PrescriptionLines.suggestionsFor(_prescriptionController.value, medProvider.frequentMedicines),
       itemBuilder: (context, suggestion) => ListTile(title: Text(suggestion), leading: const Icon(Icons.history, size: 16)),
       onSelected: (suggestion) {
         setState(() {
-          final currentText = _prescriptionController.text;
-          // Replace partial typing with full medicine name
-          _prescriptionController.text = suggestion;
+          _prescriptionController.value = PrescriptionLines.applySuggestion(_prescriptionController.value, suggestion);
         });
       },
     );
