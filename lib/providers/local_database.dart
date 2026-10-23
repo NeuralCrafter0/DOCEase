@@ -368,4 +368,17 @@ abstract class LocalDatabase {
   /// tombstone and decrements the unsynced counter. A no-op if there is
   /// none (never double-decrements). Throws on database errors.
   Future<void> clearPendingDelete(String id);
+
+  /// Local key-value settings (e.g. the doctor profile and medicines list
+  /// as JSON). Values are opaque strings stored in the encrypted database;
+  /// they never touch `sync_state` or the unsynced counter, and are lost
+  /// with the file on [resetAndResync] (the old file is kept aside).
+  /// All three throw if no database is open.
+  Future<String?> getSetting(String key);
+
+  /// Inserts or replaces the value for [key].
+  Future<void> putSetting(String key, String value);
+
+  /// Removes [key]; a no-op if it is not set.
+  Future<void> deleteSetting(String key);
 }

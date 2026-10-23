@@ -226,6 +226,29 @@ class FakeLocalDatabase implements LocalDatabase {
     log.add('clearTombstone:$id');
     tombstones.remove(id);
   }
+
+  final Map<String, String> settings = {};
+  void _requireOpen() {
+    if (state is! DbReady) throw StateError('No doctor database is open.');
+  }
+
+  @override
+  Future<String?> getSetting(String key) async {
+    _requireOpen();
+    return settings[key];
+  }
+
+  @override
+  Future<void> putSetting(String key, String value) async {
+    _requireOpen();
+    settings[key] = value;
+  }
+
+  @override
+  Future<void> deleteSetting(String key) async {
+    _requireOpen();
+    settings.remove(key);
+  }
 }
 
 /// [FirestoreHelper] fake: never touches Firebase. Each write waits for

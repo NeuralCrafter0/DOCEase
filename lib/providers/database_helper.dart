@@ -435,7 +435,10 @@ class DatabaseHelper implements LocalDatabase {
       final db = await body();
       _db = db;
       _uid = uid;
-      if (_schemaVersion >= 2) await _reconcileCounter(uid, db);
+      if (_schemaVersion >= 2) {
+        await _createV2Tables(db);
+        await _reconcileCounter(uid, db);
+      }
       _emit(DbReady(uid));
       return db;
     } on DbOpenException catch (e) {
@@ -673,9 +676,11 @@ class DatabaseHelper implements LocalDatabase {
     }
     try {
       final counts = await _rowCounts(db);
-      // A pending delete is an unsynced change too: never replace it.
+      // A pending delete is an unsynced change too, and settings (profile,
+      // medicines) exist nowhere else: never replace either.
       return (counts['patients'] ?? 0) == 0 &&
-          (counts['pending_deletes'] ?? 0) == 0;
+          (counts['pending_deletes'] ?? 0) == 0 &&
+          (counts['settings'] ?? 0) == 0;
     } finally {
       await db.close();
     }
@@ -999,10 +1004,22 @@ class DatabaseHelper implements LocalDatabase {
           'patients', {'updated_at': DateTime.now().millisecondsSinceEpoch});
       await db.execute(
           'CREATE INDEX idx_patients_sync_state ON patients(sync_state)');
-      // Tombstones for deletes Firestore has not confirmed yet.
-      await db.execute('CREATE TABLE pending_deletes ('
-          'patient_id TEXT PRIMARY KEY, deleted_at INTEGER NOT NULL)');
+      await _createV2Tables(db);
     }
+  }
+
+  /// Tables added in v2 besides the patients columns. `IF NOT EXISTS`, so
+  /// it also repairs v2 files created by earlier builds of this branch,
+  /// before these tables were folded into v2 (see [_guard]).
+  static Future<void> _createV2Tables(Database db) async {
+    // Tombstones for deletes Firestore has not confirmed yet.
+    await db.execute('CREATE TABLE IF NOT EXISTS pending_deletes ('
+        'patient_id TEXT PRIMARY KEY, deleted_at INTEGER NOT NULL)');
+    // Local key-value store (doctor profile, medicines list, ...). Values
+    // are opaque strings; never synced and never counted as unsynced.
+    await db.execute('CREATE TABLE IF NOT EXISTS settings ('
+        'key TEXT PRIMARY KEY, value TEXT NOT NULL, '
+        'updated_at INTEGER NOT NULL)');
   }
 
   static Future<void> _onDowngrade(Database db, int from, int to) async {
@@ -1261,6 +1278,36 @@ class DatabaseHelper implements LocalDatabase {
           where: 'patient_id = ?', whereArgs: [id]);
       if (n > 0) await _decrementCounter(_uid!, db);
     });
+  }
+
+  // --- settings ------------------------------------------------------------
+  // Local-only key-value rows. They never touch sync_state or the unsynced
+  // counter. All three throw if no database is open (or it failed to open).
+  // Errors are not logged here: sqflite messages include the SQL arguments,
+  // i.e. the value, so callers should log only describeDbError(e).
+
+  @override
+  Future<String?> getSetting(String key) async {
+    final db = await database;
+    final rows = await db.query('settings',
+        columns: ['value'], where: 'key = ?', whereArgs: [key], limit: 1);
+    return rows.isEmpty ? null : rows.first['value'] as String;
+  }
+
+  @override
+  Future<void> putSetting(String key, String value) async {
+    final db = await database;
+    await db.rawInsert(
+        'INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) '
+        'ON CONFLICT(key) DO UPDATE SET value = excluded.value, '
+        'updated_at = excluded.updated_at',
+        [key, value, DateTime.now().millisecondsSinceEpoch]);
+  }
+
+  @override
+  Future<void> deleteSetting(String key) async {
+    final db = await database;
+    await db.delete('settings', where: 'key = ?', whereArgs: [key]);
   }
 
   /// All patients. Each row is parsed on its own, so one bad row no longer

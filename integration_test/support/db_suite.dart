@@ -280,6 +280,197 @@ void runDbSuite(DbSuiteHarness h) {
     await d.close();
   });
 
+  // --- settings (local key-value store, schema v2) ------------------------
+
+  Future<List<String>> tableNames(Database db) async => [
+        for (final r in await db.rawQuery(
+            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"))
+          r['name'] as String
+      ];
+
+  Future<void> expectSettingsTable(Database db) async {
+    final cols = {
+      for (final c in await db.rawQuery('PRAGMA table_info(settings)'))
+        c['name'] as String: c
+    };
+    expect(cols.keys, unorderedEquals(['key', 'value', 'updated_at']));
+    expect(cols['key']!['type'], 'TEXT');
+    expect(cols['key']!['pk'], 1);
+    expect(cols['value']!['type'], 'TEXT');
+    expect(cols['value']!['notnull'], 1);
+    expect(cols['updated_at']!['type'], 'INTEGER');
+    expect(cols['updated_at']!['notnull'], 1);
+  }
+
+  h.define('SET-01 fresh v2 create has the settings table, empty', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    expect(await userVersion(db), 2);
+    expect(await tableNames(db),
+        containsAll(['patients', 'pending_deletes', 'settings']));
+    await expectSettingsTable(db);
+    expect(await d.getSetting('doctor_profile'), isNull);
+    await d.close();
+  });
+
+  h.define('SET-02 putSetting upserts; delete; counter and sync_state '
+      'untouched', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    await d.insertPatient(patient('p1'));
+    expect(await d.markSynced('p1', (await d.dirtyPatients()).single.updatedAt!),
+        isTrue);
+    expect(await d.unsyncedCount(), const UnsyncedCount.known(0));
+    final counterBefore = await counterOf(uidA);
+    final patientBefore = await rawRows(db);
+
+    await d.putSetting('medicines', '["Paracetamol"]');
+    final first = (await db.query('settings')).single;
+    await d.putSetting('medicines', '["Paracetamol","Amoxicillin"]');
+    final rows = await db.query('settings');
+    expect(rows, hasLength(1), reason: 'upsert, not a second row');
+    expect(rows.single['value'], '["Paracetamol","Amoxicillin"]');
+    expect(rows.single['updated_at'] as int,
+        greaterThanOrEqualTo(first['updated_at'] as int));
+    expect(await d.getSetting('medicines'), '["Paracetamol","Amoxicillin"]');
+    await d.putSetting('doctor_profile', '{}');
+    expect(await d.getSetting('doctor_profile'), '{}');
+
+    await d.deleteSetting('medicines');
+    expect(await d.getSetting('medicines'), isNull);
+    await d.deleteSetting('medicines'); // no-op
+    await d.deleteSetting('never_set'); // no-op
+    expect(await d.getSetting('doctor_profile'), '{}');
+
+    expect(await d.unsyncedCount(), const UnsyncedCount.known(0));
+    expect(await counterOf(uidA), counterBefore);
+    expect(await rawRows(db), patientBefore);
+    expect(await d.dirtyPatients(), isEmpty);
+    await d.close();
+  });
+
+  h.define('SET-03 settings survive close and reopen byte-for-byte; other '
+      'doctors do not see them', () async {
+    await wipe();
+    const json = '{"name":"Dr. A \u00e9\u2022","meds":["x","y"],"n":1}';
+    final d = helper();
+    await d.openFor(uidA);
+    await d.putSetting('doctor_profile', json);
+    await d.close();
+    await expectLater(d.getSetting('doctor_profile'), throwsA(anything),
+        reason: 'closed: must throw, not return a stale value');
+
+    final d2 = helper();
+    await d2.openFor(uidA);
+    expect(await d2.getSetting('doctor_profile'), json);
+    await d2.openFor(uidB);
+    expect(await d2.getSetting('doctor_profile'), isNull);
+    await d2.close();
+  });
+
+  h.define('SET-04 v1 -> v2 upgrade adds the settings table and keeps rows',
+      () async {
+    await wipe();
+    final v1 = helper(schemaVersion: 1);
+    final db1 = await v1.openFor(uidA);
+    expect(await tableNames(db1), isNot(contains('settings')));
+    for (var i = 0; i < 3; i++) {
+      await db1.insert('patients', v1Row(i));
+    }
+    await v1.close();
+
+    final d = helper();
+    final db = await d.openFor(uidA);
+    expect(await userVersion(db), 2);
+    await expectSettingsTable(db);
+    expect(await db.query('settings'), isEmpty);
+    expect(await rawRows(db), hasLength(3));
+    await d.putSetting('k', 'v');
+    expect(await d.getSetting('k'), 'v');
+    expect(await d.unsyncedCount(), const UnsyncedCount.known(3),
+        reason: 'only the 3 upgraded patients count');
+    await d.close();
+  });
+
+  h.define('SET-05 a v2 file from an earlier build (no settings or '
+      'pending_deletes table) is repaired on open', () async {
+    await wipe();
+    final d = helper();
+    await d.openFor(uidA);
+    await d.insertPatient(patient('p1'));
+    await d.close();
+    final raw = await h.opener.open(dbPath(uidA), key: (await keyOf(uidA))!);
+    await raw.execute('DROP TABLE settings');
+    await raw.execute('DROP TABLE pending_deletes');
+    await raw.close();
+
+    final db = await d.openFor(uidA);
+    expect(d.state, isA<DbReady>());
+    await expectSettingsTable(db);
+    expect(await tableNames(db), contains('pending_deletes'));
+    await d.putSetting('k', 'v');
+    expect(await d.getSetting('k'), 'v');
+    expect((await d.fetchPatients()).single.id, 'p1');
+    expect(await d.unsyncedCount(), const UnsyncedCount.known(1));
+    await d.close();
+  });
+
+  h.define('SET-06 setting values are not readable in the raw file', () async {
+    await wipe();
+    const marker = 'ZZ_SETTING_MARKER_Dr_Profile_ZZ';
+    const keyMarker = 'ZZ_SETTING_KEY_ZZ';
+    final d = helper();
+    await d.openFor(uidA);
+    await d.putSetting(keyMarker, '{"name":"$marker"}');
+    await d.close();
+
+    final file = dbPath(uidA);
+    expect(isPlainSqlite(file), isFalse);
+    for (final f in Directory(dir).listSync().whereType<File>()) {
+      expect(containsBytes(f.path, marker), isFalse, reason: p.basename(f.path));
+      expect(containsBytes(f.path, keyMarker), isFalse,
+          reason: p.basename(f.path));
+    }
+    await expectCannotOpen(file, null);
+    await expectCannotOpen(file, fallbackKey);
+    await expectCannotOpen(file, DatabaseHelper.generateKey());
+    final db = await h.opener.open(file, key: (await keyOf(uidA))!);
+    expect((await db.query('settings')).single['value'], '{"name":"$marker"}');
+    await db.close();
+  });
+
+  h.define('SET-07 settings calls throw when no DB is open or it failed',
+      () async {
+    await wipe();
+    final none = helper();
+    await expectLater(none.getSetting('k'), throwsA(isA<StateError>()));
+    await expectLater(none.putSetting('k', 'v'), throwsA(isA<StateError>()));
+    await expectLater(none.deleteSetting('k'), throwsA(isA<StateError>()));
+
+    final failed = helper(keys: _FailingKeys(h.keys, failRead: true));
+    await expectLater(failed.openFor(uidA), throwsA(isA<DbOpenException>()));
+    await expectLater(failed.putSetting('k', 'v'),
+        throwsA(isA<DbOpenException>()));
+    expect(File(dbPath(uidA)).existsSync(), isFalse);
+  });
+
+  h.define('SET-08 claim never replaces a doctor DB holding only settings',
+      () async {
+    await wipe();
+    await seedLegacy(rows: 2);
+    final legacyBefore = File(legacyPath()).readAsBytesSync();
+    final d = helper();
+    await d.openFor(uidA);
+    await d.putSetting('doctor_profile', '{"n":1}');
+    await d.close();
+    expect(await d.claimLegacyDb(uidA), isFalse);
+    expect(File(legacyPath()).readAsBytesSync(), legacyBefore);
+    expect(await d.getSetting('doctor_profile'), '{"n":1}');
+    await d.close();
+  });
+
   h.define('unsyncedCount follows dirty/synced, and markSynced is a '
       'compare-and-set (edit during flight)', () async {
     await wipe();

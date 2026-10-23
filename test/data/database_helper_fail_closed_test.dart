@@ -417,6 +417,25 @@ void main() {
       });
     });
   });
+  group('settings', () {
+    test('throw with no open DB and after a failed open; never open a DB',
+        () async {
+      final h = helper();
+      await expectLater(h.getSetting('k'), throwsA(isA<StateError>()));
+      await expectLater(h.putSetting('k', 'v'), throwsA(isA<StateError>()));
+      await expectLater(h.deleteSetting('k'), throwsA(isA<StateError>()));
+      expect(opener.calls, isEmpty);
+
+      keys.failRead = true;
+      await expectLater(h.openFor(uid), throwsA(isA<DbOpenException>()));
+      await expectLater(
+          h.putSetting('k', 'v'),
+          throwsA(isA<DbOpenException>()
+              .having((e) => e.error, 'error', DbOpenError.keyUnavailable)));
+      expect(opener.calls, isEmpty);
+      expect(files(), isEmpty);
+    });
+  });
 }
 
 /// Accepts writes but never stores them (a broken keystore).
