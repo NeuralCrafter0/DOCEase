@@ -434,12 +434,18 @@ void main() {
       expect(fake.authCalls, 0);
     });
 
-    testWidgets('SecurityWrapper without a lock host builds nothing behind it', (t) async {
+    testWidgets('SecurityWrapper without a lock host above it brings its own (fail closed)', (t) async {
+      fake.result = false;
       await t.pumpWidget(const MaterialApp(home: SecurityWrapper()));
-      expect(t.takeException(), isA<AssertionError>());
       await settle(t);
+      expectLocked();
       expect(protectedSubtreeBuilt(), isFalse);
-      expect(fake.authCalls, 0);
+      expect(fake.authCalls, 1);
+      fake.result = true;
+      await t.tap(find.text(unlockButton));
+      await settle(t);
+      expect(find.text(lockTitle), findsNothing);
+      expect(protectedSubtreeBuilt(), isTrue);
     });
   });
 }
