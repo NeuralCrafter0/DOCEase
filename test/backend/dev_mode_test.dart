@@ -7,6 +7,7 @@ import 'dart:io';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:docease/config/dev_mode.dart';
+import 'package:docease/dev/dev_build_refused.dart';
 import 'package:docease/dev/dev_mode_app.dart';
 import 'package:docease/models/doctor.dart';
 import 'package:docease/models/patient.dart';
@@ -18,6 +19,7 @@ import 'package:docease/main.dart';
 import 'package:docease/services/attachments.dart';
 import 'package:docease/services/local_photo_store.dart';
 import 'package:docease/services/session_controller.dart';
+import 'package:docease/services/session_platform.dart';
 import 'package:docease/widgets/avatar_image.dart';
 import 'package:docease/widgets/session_status_view.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -242,7 +244,7 @@ void main() {
       await session.idle;
       expect(session.phase, SessionPhase.ready);
     });
-  });
+  }, skip: !kDevMode); // SessionController.localOnly needs the define
 
   group('patients and visits', () {
     late VisitDb db;
@@ -434,14 +436,14 @@ void main() {
   });
 
   group('ui', () {
-    testWidgets('DevMode scope is explicit; without one the compile-time switch applies', (tester) async {
+    testWidgets('DevMode scope can only turn dev mode off; without the define it is always off', (tester) async {
       bool? seen;
       Widget probe() => Builder(builder: (c) {
             seen = DevMode.of(c);
             return const SizedBox();
           });
       await tester.pumpWidget(DevMode(enabled: true, child: probe()));
-      expect(seen, isTrue);
+      expect(seen, kDevMode, reason: 'enabled: true is ignored without the define');
       await tester.pumpWidget(DevMode(enabled: false, child: probe()));
       expect(seen, isFalse);
       await tester.pumpWidget(probe());
@@ -464,7 +466,7 @@ void main() {
       expect(find.text('DOCEase Secured'), findsNothing);
       expect(find.text(kDevModeBannerText), findsOneWidget);
       session.dispose();
-    });
+    }, skip: !kDevMode);
 
     testWidgets('DOCEaseApp(devMode: false) keeps the normal path and no banner', (tester) async {
       await tester.pumpWidget(const DOCEaseApp(ready: false, devMode: false));
@@ -493,7 +495,41 @@ void main() {
       expect(find.text('Try again'), findsOneWidget);
       expect(find.text('Sign out'), findsNothing);
       session.dispose();
-    });
+    }, skip: !kDevMode);
+  });
+
+  // Security F4-R3: nothing injectable can turn dev mode on in a build
+  // without the define. Runs only in the plain `flutter test` run.
+  group('without the define, every dev-mode entry point refuses', () {
+    testWidgets('DOCEaseApp(devMode: true) is ignored: normal path, no banner', (tester) async {
+      const app = DOCEaseApp(ready: false, devMode: true);
+      expect(app.isDevMode, isFalse);
+      await tester.pumpWidget(app);
+      expect(find.text('Clinical Cloud Connection Error'), findsOneWidget);
+      expect(find.byType(DevModeHome), findsNothing);
+      expect(find.text(kDevModeBannerText), findsNothing);
+    }, skip: kDevMode);
+
+    test('SessionController.localOnly throws and opens nothing', () {
+      final db = LocalSessionDb();
+      expect(
+          () => SessionController.localOnly(
+              db: db,
+              patients: localPatients(db, photos),
+              doctor: localDoctor(db, photos),
+              medicines: localMedicines(db),
+              observeAppLifecycle: false),
+          throwsStateError);
+      expect(db.events, isEmpty);
+    }, skip: kDevMode);
+
+    test('LocalOnlySessionPlatform (approves everyone) cannot be created', () {
+      expect(() => LocalOnlySessionPlatform(), throwsStateError);
+    }, skip: kDevMode);
+
+    test('buildDevModeApp returns the refusal app', () async {
+      expect(await buildDevModeApp(const SizedBox()), isA<DevBuildRefusedApp>());
+    }, skip: kDevMode);
   });
 
   group('wiring (source checks)', () {
@@ -503,7 +539,8 @@ void main() {
       expect(dev, greaterThan(0));
       expect(dev, lessThan(main.indexOf('Firebase.initializeApp')));
       expect(dev, lessThan(main.indexOf('GoogleSignIn.instance')));
-      expect(main, contains('devMode\n          ? const DevModeHome()'));
+      expect(main, contains('isDevMode\n          ? const DevModeHome()'));
+      expect(main, contains('bool get isDevMode => devMode && kDevMode;'));
       expect(main, contains('DOCEaseApp(ready: true, devMode: true)'));
       expect(main, contains('const SecurityWrapper()'), reason: 'the lock is kept, only bypassed');
     });
