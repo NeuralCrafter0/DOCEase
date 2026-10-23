@@ -114,7 +114,9 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
   Widget _buildLabel(String text) => Padding(padding: const EdgeInsets.only(bottom: 10, left: 4), child: Text(text, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Color(0xFF475569))));
 
   Widget _buildModernInput(TextEditingController controller, String hint, IconData icon, {TextInputType? keyboardType}) {
-    return TextFormField(controller: controller, keyboardType: keyboardType, style: const TextStyle(fontWeight: FontWeight.w700), decoration: InputDecoration(hintText: hint, prefixIcon: Icon(icon, color: const Color(0xFF6366F1), size: 20), filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: Colors.grey.shade200))));
+    // Patient data: keep it out of the keyboard's learned words and
+    // suggestion history (security review C12).
+    return TextFormField(controller: controller, keyboardType: keyboardType, enableIMEPersonalizedLearning: false, autocorrect: false, enableSuggestions: false, style: const TextStyle(fontWeight: FontWeight.w700), decoration: InputDecoration(hintText: hint, prefixIcon: Icon(icon, color: const Color(0xFF6366F1), size: 20), filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: Colors.grey.shade200))));
   }
 
   Widget _buildHighPerfSelector(List<String> options, String selectedValue, Function(String) onSelected) {
