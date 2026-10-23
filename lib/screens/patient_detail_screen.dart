@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import '../utils/vitals_display.dart';
+import 'vitals_trends_screen.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:share_plus/share_plus.dart';
 import '../providers/patient_provider.dart';
@@ -95,6 +96,7 @@ class PatientDetailScreen extends StatelessWidget {
             title: Text(patient.name, style: const TextStyle(fontWeight: FontWeight.w800, color: Color(0xFF1E293B))),
             backgroundColor: Colors.transparent, elevation: 0,
             actions: [
+              IconButton(tooltip: 'Vitals trends', icon: const Icon(Icons.show_chart_rounded, color: Color(0xFF6366F1)), onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (c) => VitalsTrendsScreen(patientId: patient.id)))),
               IconButton(icon: const Icon(Icons.edit_outlined, color: Color(0xFF6366F1)), onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (c) => AddPatientScreen(existingPatient: patient)))),
               IconButton(icon: const Icon(Icons.delete_outline, color: Colors.redAccent), onPressed: () => _showModernDeletePatientConfirm(context, provider, patient)),
               IconButton(
