@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/widgets.dart';
 
 import '../config/dev_mode.dart';
@@ -107,7 +106,8 @@ class SessionController with ChangeNotifier {
     if (observeAppLifecycle) _observeLifecycle();
   }
 
-  /// Dev mode (kDevMode): no auth, approval, Firestore or legacy-DB claim.
+  /// Dev mode only: throws [StateError] unless [kDevMode] is true.
+  /// No auth, approval, Firestore or legacy-DB claim.
   /// Opens the encrypted DB for [kLocalOwnerId] straight away and loads
   /// patients, profile and medicines from it. [signOut] does nothing. The
   /// legacy plain database, if any, is left untouched for the real account.
@@ -123,8 +123,11 @@ class SessionController with ChangeNotifier {
         _db = db ?? DatabaseHelper.instance,
         _platform = LocalOnlySessionPlatform(),
         _localOnly = true {
-    // Defence in depth: main() refuses dev mode in release builds.
-    if (kReleaseMode) throw StateError('Dev mode is refused in release builds');
+    // Only in a dev build (define on, not release): main() decides the start
+    // mode, and nothing else may open the dev session or skip sign-in.
+    if (!kDevMode) {
+      throw StateError('SessionController.localOnly needs DOCEASE_DEV_MODE=true (debug/profile)');
+    }
     _dbSub = _db.states.listen(_onDbState);
     if (observeAppLifecycle) _observeLifecycle();
     _schedule();

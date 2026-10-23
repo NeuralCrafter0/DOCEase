@@ -76,8 +76,12 @@ void main() async {
 
 class DOCEaseApp extends StatelessWidget {
   final bool ready;
-  /// Dev mode (injectable for tests; main passes it explicitly).
+  /// Dev mode as requested by main(). Only takes effect when [kDevMode] is
+  /// true: in a build without the define it is ignored (see [isDevMode]).
   final bool devMode;
+
+  /// The effective value: `devMode && kDevMode`.
+  bool get isDevMode => devMode && kDevMode;
   const DOCEaseApp({super.key, required this.ready, this.devMode = false});
 
   @override
@@ -89,8 +93,8 @@ class DOCEaseApp extends StatelessWidget {
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF6366F1), surface: const Color(0xFFF8FAFC)),
       ),
-      builder: devMode ? devModeBannerBuilder : null,
-      home: devMode
+      builder: isDevMode ? devModeBannerBuilder : null,
+      home: isDevMode
           ? const DevModeHome() // bypasses SecurityWrapper (lock) and login
           : !ready 
           ? const Scaffold(body: Center(child: Text('Clinical Cloud Connection Error')))
