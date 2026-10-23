@@ -85,6 +85,17 @@ Not covered: a copy whose Storage path couldn't be saved locally stays
 until sign-out, and image_picker's own temp copies in the cache directory
 aren't deleted.
 
+**Parked, for when PR #2 resumes (not fixed yet).** After an upload, the
+visit's local JPEG path is replaced with the Storage path. If the local copy
+is still on the phone at that point (its delete after the upload failed, or
+the case above), nothing points to it any more: deleting the visit or the
+patient later removes the Storage path only and leaves the local file
+behind until sign-out. Fix when resuming: keep the local path next to the
+Storage path until the copy is confirmed deleted (or retry the delete by
+the visit's uuid file name), and make visit/patient delete remove both,
+through `LocalAttachmentFiles`. Add a test: upload, delete the visit, no
+file left.
+
 ## Interface dependencies on the DB branch
 
 | Used here | Status |
