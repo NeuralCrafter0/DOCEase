@@ -180,7 +180,7 @@ class PatientDetailScreen extends StatelessWidget {
       height: MediaQuery.of(context).size.height * 0.85, decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(24))), padding: const EdgeInsets.all(24.0),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text("${DateFormat('EEEE, MMM dd, yyyy').format(record.date)} • ${record.visitType}", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Color(0xFF6366F1))), Text(record.diagnosis, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 24, color: Color(0xFF1E293B)))])),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text("${DateFormat('EEEE, MMM dd, yyyy').format(record.date)} â€¢ ${record.visitType}", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Color(0xFF6366F1))), Text(record.diagnosis, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 24, color: Color(0xFF1E293B)))])),
           Row(children: [
             IconButton(onPressed: () { Navigator.pop(ctx); Navigator.push(context, MaterialPageRoute(builder: (c) => AddRecordScreen(patientId: patient.id, existingRecord: record))); }, icon: const Icon(Icons.edit_outlined, color: Color(0xFF6366F1))),
             IconButton(onPressed: () => _showModernDeleteRecordConfirm(context, provider, patient.id, record.id), icon: const Icon(Icons.delete_outline, color: Colors.redAccent)),
