@@ -1,0 +1,183 @@
+rules_version = '2';
+
+// DOCEase Firestore security rules.
+//
+// NOT DEPLOYED. The project owner has not approved a deploy to the live
+// project (med-history-299a1). These rules are exercised only against the
+// local emulator (see firebase/README.md and firebase/test/).
+//
+// Model: every document lives under doctors/{uid} and only the signed-in
+// doctor whose Firebase uid equals {uid} may touch it, on reads AND writes,
+// and only once their email is verified and an admin has approved them
+// (approvedDoctors/{uid}).
+// There is no cross-doctor listing, no collection-group access, and every
+// path that is not matched explicitly below is denied by the catch-all at
+// the end of this file.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ------------------------------------------------------------ helpers
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // The caller is the doctor that owns {uid}.
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+    // The caller owns {uid}, has a verified email in the ID token, and has
+    // been approved by an admin (approvedDoctors/{uid} exists; only the
+    // Admin SDK / console can create it). Required on every doctors/** path.
+    // The email_verified check lives here in the rules so it cannot be
+    // bypassed by a modified client.
+    function isApprovedDoctor(uid) {
+      return isOwner(uid)
+        && request.auth.token.email_verified == true
+        && exists(/databases/$(database)/documents/approvedDoctors/$(uid));
+    }
+
+    // Required string field of bounded length.
+    function reqStr(d, k, minLen, maxLen) {
+      return (k in d) && d[k] is string
+        && d[k].size() >= minLen && d[k].size() <= maxLen;
+    }
+
+    // Optional string field: absent, null, or a string of bounded length.
+    function optStr(d, k, maxLen) {
+      return !(k in d) || d[k] == null
+        || (d[k] is string && d[k].size() <= maxLen);
+    }
+
+    // Optional ownership field: if present it must name the path's doctor.
+    function ownerFieldMatches(d, k, uid) {
+      return !(k in d) || d[k] == uid;
+    }
+
+    // A list of medicine names: at most 2,000 entries, each 1-200
+    // characters, no line breaks. Rules have no loops, so the per-entry
+    // check joins the list with a newline and
+    //  (a) requires that splitting it again gives back exactly the same
+    //      list. split() returns strings, so this fails for any non-string
+    //      entry (join() stringifies numbers/null instead of failing) and
+    //      for any entry that itself contains a newline;
+    //  (b) matches every newline-separated segment against the length
+    //      bound, which also rejects empty entries.
+    function validMedicineItems(items) {
+      return items is list && items.size() <= 2000
+        && (items.size() == 0
+          || (items.join('\n').split('\n') == items
+            && items.join('\n').matches('[^\\n]{1,200}(\\n[^\\n]{1,200})*')));
+    }
+
+    // ------------------------------------------------- doctors/{uid}
+
+    // Doctor profile. Written by DoctorProvider.saveDoctorProfile with
+    // set(..., merge: true), so request.resource.data is the whole document
+    // after the merge and is validated as a whole.
+    function validDoctor(d, uid) {
+      return d.keys().hasOnly([
+          'id', 'title', 'name', 'email', 'age', 'mobileNumber',
+          'specialty', 'clinicName', 'practiceMode', 'profileImageUrl',
+          // Legacy (pre settings/medicines) list. Still readable and kept
+          // writable during the migration window because older app builds
+          // write it with merge:true. Remove once all clients are updated.
+          'frequentMedicines'
+        ])
+        // id is required and must equal the path uid (agreed with QA).
+        && ('id' in d) && d.id == uid
+        && optStr(d, 'title', 20)
+        && optStr(d, 'name', 200)
+        && optStr(d, 'email', 320)
+        && optStr(d, 'age', 10)
+        && optStr(d, 'mobileNumber', 32)
+        && optStr(d, 'specialty', 200)
+        && optStr(d, 'clinicName', 200)
+        && optStr(d, 'practiceMode', 50)
+        && (!('profileImageUrl' in d) || d.profileImageUrl == null
+          || (d.profileImageUrl is string
+            && d.profileImageUrl.size() <= 2048
+            && d.profileImageUrl.matches('https://firebasestorage[.]googleapis[.]com/.+')))
+        // Legacy list: type and count only, so existing documents written
+        // by older builds stay saveable.
+        && (!('frequentMedicines' in d)
+          || (d.frequentMedicines is list && d.frequentMedicines.size() <= 2000));
+    }
+
+    match /doctors/{uid} {
+      // get only: listing the doctors collection is never allowed.
+      allow get: if isApprovedDoctor(uid);
+      allow create, update: if isApprovedDoctor(uid)
+        && validDoctor(request.resource.data, uid);
+      // No delete: account removal is an admin operation.
+
+      // ------------------------------- doctors/{uid}/patients/{patientId}
+
+      // Full patient record, including the visit history array, exactly as
+      // Patient.toJson() writes it.
+      function validPatient(d, uid, patientId) {
+        return d.keys().hasAll([
+            'id', 'name', 'age', 'gender', 'phone', 'relation', 'history'
+          ])
+          && d.keys().hasOnly([
+            'id', 'name', 'age', 'gender', 'phone', 'relation', 'history',
+            // Not written by the app today. If a future build adds an
+            // ownership field it must name the path's doctor.
+            'doctorId', 'owner', 'ownerUid'
+          ])
+          && d.id == patientId
+          // Today's forms allow blank name/age/phone (QA UI-01/UI-02), so
+          // the minimum length is 0 until form validation lands.
+          && reqStr(d, 'name', 0, 200)
+          && reqStr(d, 'age', 0, 10)
+          && reqStr(d, 'gender', 0, 20)
+          && reqStr(d, 'phone', 0, 32)
+          && reqStr(d, 'relation', 0, 50)
+          // Rules cannot iterate, so individual visits are not validated;
+          // the array is bounded and Firestore caps the doc at 1 MiB.
+          && d.history is list && d.history.size() <= 1000
+          && ownerFieldMatches(d, 'doctorId', uid)
+          && ownerFieldMatches(d, 'owner', uid)
+          && ownerFieldMatches(d, 'ownerUid', uid);
+      }
+
+      match /patients/{patientId} {
+        // list is allowed only on the owner's own subcollection; a query
+        // on another doctor's path, or a collection-group query, matches
+        // no allow rule and is denied.
+        allow get, list: if isApprovedDoctor(uid);
+        allow create, update: if isApprovedDoctor(uid)
+          && patientId.size() <= 128
+          && validPatient(request.resource.data, uid, patientId);
+        allow delete: if isApprovedDoctor(uid);
+      }
+
+      // ------------------------------ doctors/{uid}/settings/medicines
+
+      // Only the `medicines` settings document exists. Any other id under
+      // settings/ falls through to the catch-all deny.
+      match /settings/medicines {
+        allow get: if isApprovedDoctor(uid);
+        allow create, update: if isApprovedDoctor(uid)
+          && request.resource.data.keys().hasOnly(['items'])
+          && request.resource.data.keys().hasAll(['items'])
+          && validMedicineItems(request.resource.data.items);
+        // No delete: clearing the list is an update to items: [].
+      }
+    }
+    // ------------------------------------------------- approvedDoctors/{uid}
+    // Admin-managed allowlist. A doctor may read only their own entry (so the
+    // app can show "waiting for approval"); nobody can list it, and no
+    // client may create, change or delete it.
+    match /approvedDoctors/{uid} {
+      allow get: if isOwner(uid);
+    }
+
+
+    // ------------------------------------------------- default deny
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
