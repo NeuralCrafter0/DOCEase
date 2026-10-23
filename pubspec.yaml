@@ -54,6 +54,7 @@ dependencies:
   local_auth: ^3.0.1
   sqflite_sqlcipher: ^3.4.0
   flutter_secure_storage: ^10.0.0
+  crypto: 3.0.7
   intl_phone_field: ^3.2.0
   fl_chart: ^1.1.1
   flutter_typeahead: ^5.2.0
