@@ -9,6 +9,8 @@ import 'providers/doctor_provider.dart';
 import 'providers/medicine_provider.dart';
 import 'providers/database_helper.dart';
 import 'providers/firestore_settings.dart';
+import 'config/dev_mode.dart';
+import 'dev/dev_mode_app.dart';
 import 'services/log_codes.dart';
 import 'services/session_controller.dart';
 import 'widgets/session_status_view.dart';
@@ -17,7 +19,13 @@ import 'screens/login_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
+
+  // Dev mode: no Firebase, Google Sign-In, login or lock (see dev_mode.dart).
+  if (kDevMode) {
+    runApp(await buildDevModeApp(const DOCEaseApp(ready: true, devMode: true)));
+    return;
+  }
+
   bool firebaseReady = false;
   try {
     await Firebase.initializeApp();
@@ -53,7 +61,9 @@ void main() async {
 
 class DOCEaseApp extends StatelessWidget {
   final bool ready;
-  const DOCEaseApp({super.key, required this.ready});
+  /// Dev mode (injectable for tests; main passes it explicitly).
+  final bool devMode;
+  const DOCEaseApp({super.key, required this.ready, this.devMode = false});
 
   @override
   Widget build(BuildContext context) {
@@ -64,7 +74,10 @@ class DOCEaseApp extends StatelessWidget {
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF6366F1), surface: const Color(0xFFF8FAFC)),
       ),
-      home: !ready 
+      builder: devMode ? devModeBannerBuilder : null,
+      home: devMode
+          ? const DevModeHome() // bypasses SecurityWrapper (lock) and login
+          : !ready 
           ? const Scaffold(body: Center(child: Text('Clinical Cloud Connection Error')))
           : const SecurityWrapper(),
     );
