@@ -9,6 +9,7 @@ import '../models/patient.dart';
 import '../providers/patient_provider.dart';
 import '../providers/medicine_provider.dart';
 import '../utils/attachment_processor.dart';
+import '../utils/attachment_storage.dart';
 
 class AddRecordScreen extends StatefulWidget {
   final String patientId;
@@ -36,7 +37,16 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   late String _selectedVisitType;
   late List<String> _attachmentPaths;
   final ImagePicker _picker = ImagePicker();
-  late final AttachmentProcessor _processor = widget.attachmentProcessor ?? AttachmentProcessor();
+  /// Null when nobody is signed in (photos have no owner folder then).
+  late final AttachmentProcessor? _processor = widget.attachmentProcessor ?? _ownerProcessor();
+
+  static AttachmentProcessor? _ownerProcessor() {
+    final storage = AttachmentStorage.forCurrentOwner();
+    return storage == null ? null : AttachmentProcessor.forStorage(storage);
+  }
+
+  /// Most photos added to one visit in a single gallery pick.
+  static const int maxPhotosPerPick = 10;
   /// JPEGs created on this screen that are not saved yet; deleted if the
   /// doctor removes them or leaves without saving.
   final Set<String> _newAttachmentPaths = {};
@@ -102,14 +112,21 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   /// Anything that can't be converted is not attached; the doctor is told.
   Future<void> _addPhotos(ImageSource source) async {
     if (_picking) return;
+    final processor = _processor;
+    if (processor == null) {
+      _showMessage("Couldn't add photos because you're signed out. Sign in again and retry.");
+      return;
+    }
     _picking = true;
     List<XFile> picked;
     try {
       if (source == ImageSource.camera) {
-        final shot = await _picker.pickImage(source: ImageSource.camera, maxWidth: 2048, maxHeight: 2048);
+        // No maxWidth/maxHeight: the plugin's resize keeps a second,
+        // untracked copy with the original EXIF. AttachmentProcessor scales.
+        final shot = await _picker.pickImage(source: ImageSource.camera);
         picked = shot == null ? const [] : [shot];
       } else {
-        picked = await _picker.pickMultiImage(maxWidth: 2048, maxHeight: 2048);
+        picked = await _picker.pickMultiImage(limit: maxPhotosPerPick);
       }
     } on PlatformException catch (e) {
       _showMessage(_pickerErrorMessage(e, source));
@@ -123,7 +140,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
     final failures = <String>[];
     for (final file in picked) {
       try {
-        final path = await _processor.toJpegFile(file);
+        final path = await processor.toJpegFile(file);
         if (!mounted) {
           _deleteQuietly(path);
           continue;
