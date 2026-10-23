@@ -8,6 +8,7 @@ import 'package:firebase_storage/firebase_storage.dart';
 import 'package:uuid/uuid.dart';
 import '../models/patient.dart';
 import '../services/attachments.dart';
+import '../services/local_photo_store.dart';
 import '../services/log_codes.dart';
 import '../services/sync_cancel_token.dart';
 import 'database_helper.dart';
@@ -36,7 +37,11 @@ class PatientProvider with ChangeNotifier {
     FirebaseStorage? storage,
     Duration retryBaseDelay = const Duration(seconds: 30),
     Duration retryMaxDelay = const Duration(minutes: 5),
+    bool cloudSync = true,
+    LocalPhotoStore? photos,
   })  : _db = db ?? DatabaseHelper.instance,
+        _cloud = cloudSync,
+        _photosOverride = photos,
         _firestoreOverride = firestore,
         _authOverride = auth,
         _storageOverride = storage,
@@ -45,6 +50,16 @@ class PatientProvider with ChangeNotifier {
         _retryDelay = retryBaseDelay;
 
   final LocalDatabase _db;
+
+  /// False in dev mode (kDevMode): Firestore, Auth and Storage are never
+  /// touched; push, pull, retry and upload are skipped (rows stay dirty)
+  /// and picked photos are kept on the phone in [LocalPhotoStore].
+  final bool _cloud;
+  final LocalPhotoStore? _photosOverride;
+  LocalPhotoStore get _photos => _photosOverride ?? LocalPhotoStore.instance;
+
+  /// Whether this provider syncs with Firebase (false in dev mode).
+  bool get cloudSync => _cloud;
   final FirestoreHelper? _firestoreOverride;
   final FirebaseAuth? _authOverride;
   final FirebaseStorage? _storageOverride;
@@ -104,6 +119,7 @@ class PatientProvider with ChangeNotifier {
   bool _live(String? uid, SyncCancelToken token) => !token.isCancelled && _uid == uid;
 
   String? get _signedInUid {
+    if (!_cloud) return _uid;
     try {
       return _auth.currentUser?.uid;
     } catch (_) {
@@ -112,6 +128,7 @@ class PatientProvider with ChangeNotifier {
   }
 
   String? get _bucket {
+    if (!_cloud) return null;
     try {
       return _storage.bucket;
     } catch (_) {
@@ -164,6 +181,7 @@ class PatientProvider with ChangeNotifier {
   /// unit tests; the app never gets here without Firebase) is the check
   /// left to the open-DB uid.
   bool _isSignedIn(String uid) {
+    if (!_cloud) return true; // dev mode: the open-DB uid check decides
     try {
       return _auth.currentUser?.uid == uid;
     } catch (_) {
@@ -190,6 +208,10 @@ class PatientProvider with ChangeNotifier {
     }
     if (!_live(uid, token)) return;
     _patients = local;
+    if (!_cloud) {
+      notifyListeners(); // dev mode: on-phone data only, no push or pull
+      return;
+    }
     _isSyncing = true;
     notifyListeners();
     try {
@@ -281,7 +303,7 @@ class PatientProvider with ChangeNotifier {
   /// app resume). Safe to call any time; concurrent calls share one run.
   Future<void> retryDirty() async {
     final uid = _uid;
-    if (uid == null || _token.isCancelled || !_dbReadyFor(uid)) return;
+    if (!_cloud || uid == null || _token.isCancelled || !_dbReadyFor(uid)) return;
     await _pushDirty(uid, _token);
   }
 
@@ -422,6 +444,7 @@ class PatientProvider with ChangeNotifier {
   /// After a local write: push now. On failure schedule a retry; on success
   /// flush anything else that was waiting (connectivity is back).
   Future<void> _afterLocalWrite(String patientId, String? version) async {
+    if (!_cloud) return; // dev mode: the row stays dirty; nothing is pushed
     final uid = _uid;
     final token = _token;
     _unconfirmed.add(patientId);
@@ -549,11 +572,14 @@ class PatientProvider with ChangeNotifier {
 
   /// Whether [path] is a local file picked in this session (the only local
   /// files the UI should render).
-  bool isPickedThisSession(String path) => _pendingUploads.contains(path);
+  /// In dev mode also every photo kept in the app's photo folders.
+  bool isPickedThisSession(String path) =>
+      _pendingUploads.contains(path) || (!_cloud && _photos.isAppPhoto(path));
 
   /// Downloads a `clinical_attachments/{uid}/...` object through the
   /// Storage SDK (so the rules apply). Null for other paths or on error.
   Future<Uint8List?> loadAttachmentBytes(String storagePath) async {
+    if (!_cloud) return null; // dev mode: no Storage
     final uid = _uid;
     if (uid == null || !storagePath.startsWith('clinical_attachments/$uid/')) return null;
     try {
@@ -620,6 +646,7 @@ class PatientProvider with ChangeNotifier {
     final token = _token;
     await _db.markPendingDelete(id); // throws: nothing changed
     _forget(id);
+    if (!_cloud) return; // dev mode: the tombstone stays; no cloud delete
     final ok = await _confirmCloudDelete(id);
     if (!ok && _live(uid, token)) _scheduleRetry(uid, token);
   }
@@ -649,6 +676,7 @@ class PatientProvider with ChangeNotifier {
     String patientId,
     Future<List<VisitRecord>?> Function(Patient current) change, {
     bool awaitPush = false,
+    List<String>? newCopies,
   }) {
     final run = _historyChain.then<(Future<void>,)?>((_) async {
       final current = _byId(patientId);
@@ -672,13 +700,23 @@ class PatientProvider with ChangeNotifier {
         notifyListeners();
         throw LocalSaveFailedException(patientId);
       }
-      if (!_live(uid, token)) return null;
+      // Saved: from here on the visit references its photos, so never
+      // report "not saved" (that would discard kept photo copies).
+      if (!_live(uid, token)) return (Future<void>.value(),);
       _replaceInMemory(updated);
-      _pendingUploads.addAll(_newLocalFiles(latest, updated));
+      final fresh = _newLocalFiles(latest, updated);
+      if (_cloud) _pendingUploads.addAll(fresh);
       notifyListeners();
       return (_afterLocalWrite(patientId, version),); // a record: not awaited here
     });
     _historyChain = run.then((_) {}, onError: (_) {});
+    if (newCopies != null) {
+      // Photo copies made for this save are deleted only when nothing was
+      // saved (refused, failed or skipped before the write).
+      unawaited(run.then((pending) async {
+        if (pending == null) await _discardCopies(newCopies);
+      }, onError: (Object _) => _discardCopies(newCopies)));
+    }
     return run.then((pending) async {
       if (pending == null) return;
       final push = pending.$1;
@@ -720,31 +758,75 @@ class PatientProvider with ChangeNotifier {
   /// `clinical_attachments/{uid}/{patientId}/{uuid}.{jpg|png|webp}` and the
   /// visit stores those Storage paths. When the local save is refused the
   /// visit is not kept (memory unchanged) and the error is rethrown.
-  Future<void> addRecord(String patientId, VisitRecord record) =>
-      _mutateHistory(patientId, (current) async {
-        final toUpload = await _validateNewAttachments(patientId, record.attachmentPaths);
-        _validatedPicks.addAll(toUpload);
-        final latest = _byId(patientId) ?? current;
-        return [record, ...latest.history];
-      });
+  ///
+  /// In dev mode nothing is uploaded: each new photo is kept in the app's
+  /// photo folder (copied there unless it already is) and the visit stores
+  /// that path.
+  Future<void> addRecord(String patientId, VisitRecord record) {
+    final copies = <String>[];
+    return _mutateHistory(patientId, (current) async {
+      final toUpload = await _validateNewAttachments(patientId, record.attachmentPaths);
+      final kept = await _keepLocally(toUpload, copies);
+      _validatedPicks.addAll(toUpload.map((e) => kept[e] ?? e));
+      final latest = _byId(patientId) ?? current;
+      return [_withPaths(record, kept), ...latest.history];
+    }, newCopies: copies);
+  }
 
   /// Edits a visit. Only attachments not already on the stored visit are
   /// new picks (validated and uploaded as in [addRecord]); stored entries
   /// are kept, and only cloud-safe ones are written to Firestore. A refused
   /// save leaves the old visit in memory.
-  Future<void> updateRecord(String patientId, VisitRecord record) =>
-      _mutateHistory(patientId, (current) async {
-        final i = current.history.indexWhere((r) => r.id == record.id);
-        if (i == -1) return null;
-        final stored = current.history[i].attachmentPaths.toSet();
-        final added = record.attachmentPaths.where((e) => !stored.contains(e)).toList();
-        final toUpload = await _validateNewAttachments(patientId, added);
-        _validatedPicks.addAll(toUpload);
-        final latest = _byId(patientId) ?? current;
-        final j = latest.history.indexWhere((r) => r.id == record.id);
-        if (j == -1) return null;
-        return [...latest.history]..[j] = record;
-      });
+  Future<void> updateRecord(String patientId, VisitRecord record) {
+    final copies = <String>[];
+    return _mutateHistory(patientId, (current) async {
+      final i = current.history.indexWhere((r) => r.id == record.id);
+      if (i == -1) return null;
+      final stored = current.history[i].attachmentPaths.toSet();
+      final added = record.attachmentPaths.where((e) => !stored.contains(e)).toList();
+      final toUpload = await _validateNewAttachments(patientId, added);
+      final kept = await _keepLocally(toUpload, copies);
+      _validatedPicks.addAll(toUpload.map((e) => kept[e] ?? e));
+      final latest = _byId(patientId) ?? current;
+      final j = latest.history.indexWhere((r) => r.id == record.id);
+      if (j == -1) return null;
+      return [...latest.history]..[j] = _withPaths(record, kept);
+    }, newCopies: copies);
+  }
+
+  /// Dev mode: keeps each validated pick in the app's photo folder and
+  /// returns original -> kept path for those that were copied (recorded in
+  /// [copies]). In cloud mode nothing is copied (the upload path is used).
+  Future<Map<String, String>> _keepLocally(List<String> picks, List<String> copies) async {
+    final out = <String, String>{};
+    if (_cloud) return out;
+    for (final path in picks) {
+      final type = UploadImageType.forPath(path);
+      if (type == null) continue; // validated already; defensive
+      final kept = await _photos.keepVisitPhoto(path, type);
+      if (kept != path) {
+        out[path] = kept;
+        copies.add(kept);
+      }
+    }
+    return out;
+  }
+
+  static VisitRecord _withPaths(VisitRecord r, Map<String, String> repl) => repl.isEmpty
+      ? r
+      : _copyRecord(r, [for (final e in r.attachmentPaths) repl[e] ?? e]);
+
+  /// Deletes photo copies of a save that did not happen. Never deletes a
+  /// file a visit in memory still references.
+  Future<void> _discardCopies(List<String> copies) async {
+    final referenced = {
+      for (final p in _patients)
+        for (final r in p.history) ...r.attachmentPaths,
+    };
+    for (final c in copies) {
+      if (!referenced.contains(c)) await _photos.deleteAppPhoto(c);
+    }
+  }
 
   /// Deletes a visit; a refused save keeps it in memory.
   Future<void> deleteRecord(String patientId, String recordId) =>

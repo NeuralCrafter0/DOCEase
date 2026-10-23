@@ -1,0 +1,30 @@
+{
+  // DOCEase run configurations. Dev mode (no Firebase, login or lock, on-phone
+  // data only) needs the define; the "release-like" entry is what a real
+  // build does (login, biometric lock and Firebase sync on).
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "DOCEase (dev mode)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "args": ["--dart-define=DOCEASE_DEV_MODE=true"]
+    },
+    {
+      "name": "DOCEase (dev mode, profile)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "flutterMode": "profile",
+      "args": ["--dart-define=DOCEASE_DEV_MODE=true"]
+    },
+    {
+      "name": "DOCEase (Firebase, login + lock)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "args": ["--dart-define=DOCEASE_DEV_MODE=false"]
+    }
+  ]
+}
