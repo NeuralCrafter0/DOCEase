@@ -8,6 +8,8 @@ import '../providers/patient_provider.dart';
 import '../providers/doctor_provider.dart';
 import '../models/patient.dart';
 import '../utils/pdf_export.dart';
+import '../utils/visit_share_text.dart';
+import '../widgets/share_confirm_sheet.dart';
 import 'add_patient_screen.dart';
 import 'add_record_screen.dart';
 
@@ -20,9 +22,13 @@ class PatientDetailScreen extends StatelessWidget {
     if (await canLaunchUrl(launchUri)) await launchUrl(launchUri);
   }
 
-  void _shareVisitSummary(BuildContext context, dynamic doctor, Patient patient, VisitRecord record) {
+  /// Asks before any visit data leaves the app, and shares only the fields
+  /// the doctor kept ticked.
+  Future<void> _shareVisitSummary(BuildContext context, dynamic doctor, Patient patient, VisitRecord record) async {
+    final fields = await ShareConfirmSheet.show(context, patientName: patient.name);
+    if (fields == null) return;
     final String docName = doctor != null ? "${doctor.title} ${doctor.name}" : "Doctor";
-    final String message = "*Visit Summary - DOCEase*\n*Patient:* ${patient.name}\n*Date:* ${DateFormat('dd MMM yyyy').format(record.date)}\n*Type:* ${record.visitType}\n\n*Vitals:* BP: ${record.bp ?? 'N/A'}, Temp: ${record.temp ?? 'N/A'}\n*Diagnosis:* ${record.diagnosis}\n*Prescription:* ${record.prescription}\n\n*Dr. $docName*";
+    final String message = VisitShareText.build(patient: patient, record: record, fields: fields, signOff: 'Dr. $docName');
     Share.share(message);
   }
 
