@@ -7,6 +7,7 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:local_auth/local_auth.dart';
 import 'providers/patient_provider.dart';
 import 'providers/doctor_provider.dart';
+import 'utils/picker_hygiene.dart';
 import 'providers/medicine_provider.dart';
 import 'providers/database_helper.dart';
 import 'screens/home_screen.dart';
@@ -36,6 +37,9 @@ void main() async {
       child: DOCEaseApp(ready: firebaseReady),
     ),
   );
+  // Photo picker: system Photo Picker on Android, and remove the picker's
+  // leftover copies (original EXIF/GPS) from an interrupted pick.
+  PickerHygiene.atStartup().ignore();
 }
 
 class DOCEaseApp extends StatelessWidget {
