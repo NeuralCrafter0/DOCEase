@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:intl_phone_field/intl_phone_field.dart';
 import 'package:intl_phone_field/country_picker_dialog.dart';
 import 'package:intl_phone_field/countries.dart';
 import '../models/patient.dart';
 import '../providers/patient_provider.dart';
+import '../widgets/private_phone_field.dart';
 
 /// Validators for the patient form. Public so they can be unit-tested.
 class PatientFormValidators {
@@ -176,7 +176,7 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
               // per-country length check stays inside IntlPhoneField.
               FormField<String>(
                 validator: (_) => PatientFormValidators.phone(_phoneController.text),
-                builder: (field) => IntlPhoneField(
+                builder: (field) => PrivatePhoneField(
                   controller: _phoneController,
                   initialCountryCode: _initialCountryCode,
                   style: const TextStyle(fontWeight: FontWeight.w700),
@@ -203,7 +203,9 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
   Widget _buildLabel(String text) => Padding(padding: const EdgeInsets.only(bottom: 10, left: 4), child: Text(text, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Color(0xFF475569))));
 
   Widget _buildModernInput(TextEditingController controller, String hint, IconData icon, {TextInputType? keyboardType, FormFieldValidator<String>? validator, List<TextInputFormatter>? inputFormatters, TextCapitalization textCapitalization = TextCapitalization.none}) {
-    return TextFormField(controller: controller, keyboardType: keyboardType, validator: validator, inputFormatters: inputFormatters, textCapitalization: textCapitalization, style: const TextStyle(fontWeight: FontWeight.w700), decoration: InputDecoration(hintText: hint, prefixIcon: Icon(icon, color: const Color(0xFF6366F1), size: 20), filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: Colors.grey.shade200))));
+    // Patient data: keep it out of the keyboard's learned words and
+    // suggestion history (security review C12).
+    return TextFormField(controller: controller, keyboardType: keyboardType, validator: validator, inputFormatters: inputFormatters, textCapitalization: textCapitalization, enableIMEPersonalizedLearning: false, autocorrect: false, enableSuggestions: false, smartDashesType: SmartDashesType.disabled, smartQuotesType: SmartQuotesType.disabled, style: const TextStyle(fontWeight: FontWeight.w700), decoration: InputDecoration(hintText: hint, prefixIcon: Icon(icon, color: const Color(0xFF6366F1), size: 20), filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: Colors.grey.shade200))));
   }
 
   Widget _buildHighPerfSelector(List<String> options, String selectedValue, Function(String) onSelected) {

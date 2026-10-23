@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'home_screen.dart';
+import '../utils/auth_error_messages.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -16,15 +17,16 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _isLoading = false;
 
   Future<void> _login() async {
-    if (_emailController.text.isEmpty || _passwordController.text.isEmpty) return;
+    if (_emailController.text.trim().isEmpty || _passwordController.text.isEmpty) return;
     setState(() => _isLoading = true);
     try {
       await FirebaseAuth.instance.signInWithEmailAndPassword(
         email: _emailController.text.trim(),
-        password: _passwordController.text.trim(),
+        // Never trim: spaces can be part of the password.
+        password: _passwordController.text,
       );
     } catch (e) {
-      _showError(e.toString());
+      if (mounted) _showError(AuthErrorMessages.forEmailSignIn(e));
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -49,7 +51,8 @@ class _LoginScreenState extends State<LoginScreen> {
       
       await FirebaseAuth.instance.signInWithCredential(credential);
     } catch (e) {
-      _showError('Google Sign-In failed: $e');
+      final message = AuthErrorMessages.forGoogleSignIn(e);
+      if (message != null && mounted) _showError(message);
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }

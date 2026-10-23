@@ -182,6 +182,8 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
       builder: (context, controller, focusNode) => TextField(
         controller: controller,
         focusNode: focusNode,
+        enableIMEPersonalizedLearning: false,
+        autocorrect: false, enableSuggestions: false, smartDashesType: SmartDashesType.disabled, smartQuotesType: SmartQuotesType.disabled,
         maxLines: 4,
         style: const TextStyle(fontWeight: FontWeight.w700),
         decoration: InputDecoration(
@@ -243,14 +245,16 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF64748B))),
       const SizedBox(height: 6),
-      TextField(controller: controller, decoration: InputDecoration(hintText: hint, hintStyle: TextStyle(fontSize: 13, color: Colors.grey.shade300), contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12), border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: Colors.grey.shade100)))),
+      TextField(controller: controller, enableIMEPersonalizedLearning: false, autocorrect: false, enableSuggestions: false, smartDashesType: SmartDashesType.disabled, smartQuotesType: SmartQuotesType.disabled, decoration: InputDecoration(hintText: hint, hintStyle: TextStyle(fontSize: 13, color: Colors.grey.shade300), contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12), border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: Colors.grey.shade100)))),
     ]);
   }
 
   Widget _buildLabel(String text) => Padding(padding: const EdgeInsets.only(bottom: 10, left: 4), child: Text(text, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Color(0xFF475569))));
 
   Widget _buildModernInput(TextEditingController controller, String hint, IconData icon, {int maxLines = 1, FormFieldValidator<String>? validator}) {
-    return TextFormField(controller: controller, maxLines: maxLines, validator: validator, style: const TextStyle(fontWeight: FontWeight.w700), decoration: InputDecoration(hintText: hint, prefixIcon: Icon(icon, color: const Color(0xFF6366F1), size: 20), filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: Colors.grey.shade200))));
+    // Clinical text: no keyboard learning, autocorrect, suggestions or smart
+    // punctuation (security review C12, PR #7 review).
+    return TextFormField(controller: controller, maxLines: maxLines, validator: validator, enableIMEPersonalizedLearning: false, autocorrect: false, enableSuggestions: false, smartDashesType: SmartDashesType.disabled, smartQuotesType: SmartQuotesType.disabled, style: const TextStyle(fontWeight: FontWeight.w700), decoration: InputDecoration(hintText: hint, prefixIcon: Icon(icon, color: const Color(0xFF6366F1), size: 20), filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: Colors.grey.shade200))));
   }
 
   Widget _buildHighPerfSelector(List<String> options, String selectedValue, Function(String) onSelected) {
