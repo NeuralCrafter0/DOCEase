@@ -14,6 +14,9 @@ import '../services/log_codes.dart';
 import '../services/sync_cancel_token.dart';
 import 'database_helper.dart';
 import 'firestore_helper.dart';
+import 'save_refused_exception.dart';
+
+export 'save_refused_exception.dart';
 
 /// Patients of the signed-in doctor. The local (encrypted, per-doctor)
 /// database is the source of truth; Firestore is the backup.
@@ -610,42 +613,53 @@ class PatientProvider with ChangeNotifier {
 
   void setSearchQuery(String query) { _searchQuery = query; notifyListeners(); }
 
-  /// Throws [UnsyncedCounterException] (patient not kept, nothing synced)
-  /// when the local save is refused.
+  /// Throws [SaveRefusedException] when the save is refused (for example
+  /// the counter can't be kept, `UnsyncedCounterException`, or the patient
+  /// is unreadable). The patient is then no longer in the list and nothing
+  /// is synced.
   Future<void> addPatient(Patient patient) async {
-    _ensureWritable(patient);
+    try {
+      _ensureWritable(patient);
+    } catch (e, st) {
+      Error.throwWithStackTrace(SaveRefusedException(PatientSaveOperation.add, e), st);
+    }
     _patients.add(patient);
     notifyListeners();
     final String? version;
     try {
       version = await _db.insertPatient(patient);
-    } catch (e) {
+    } catch (e, st) {
       // Save refused: don't show it as saved, don't sync.
       _patients.removeWhere((p) => identical(p, patient));
       notifyListeners();
-      rethrow;
+      Error.throwWithStackTrace(SaveRefusedException(PatientSaveOperation.add, e), st);
     }
     unawaited(_afterLocalWrite(patient.id, version));
   }
 
-  /// Throws [UnsyncedCounterException] (previous version restored, nothing
-  /// synced) when the local save is refused.
+  /// Throws [SaveRefusedException] when the save is refused: the previous
+  /// version is shown again and nothing is synced. Does nothing if no
+  /// patient has this id.
   Future<void> updatePatient(Patient patient) async {
     final index = _patients.indexWhere((p) => p.id == patient.id);
     if (index != -1) {
-      _ensureWritable(_patients[index]);
-      _ensureWritable(patient);
+      try {
+        _ensureWritable(_patients[index]);
+        _ensureWritable(patient);
+      } catch (e, st) {
+        Error.throwWithStackTrace(SaveRefusedException(PatientSaveOperation.update, e), st);
+      }
       final previous = _patients[index];
       _patients[index] = patient;
       notifyListeners();
       final String? version;
       try {
         version = await _db.insertPatient(patient);
-      } catch (e) {
+      } catch (e, st) {
         final i = _patients.indexWhere((p) => identical(p, patient));
         if (i != -1) _patients[i] = previous;
         notifyListeners();
-        rethrow;
+        Error.throwWithStackTrace(SaveRefusedException(PatientSaveOperation.update, e), st);
       }
       unawaited(_afterLocalWrite(patient.id, version));
     }
