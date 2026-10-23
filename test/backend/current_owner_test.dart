@@ -158,7 +158,7 @@ void main() {
     c = build(); // for tearDown
   });
 
-  test('dev mode (localOnly): owner is "local"; folder hash matches PR #8', () async {
+  test('dev mode (localOnly): owner is "local"', () async {
     final s = SessionController.localOnly(
       db: SessionDb(),
       patients: SpyPatients(log),
@@ -169,11 +169,14 @@ void main() {
     await settle(s);
     expect(s.phase, SessionPhase.ready);
     expect(CurrentOwner.id, kLocalOwnerId);
+    s.dispose();
+    expect(CurrentOwner.id, isNull);
+  }, skip: !kDevMode); // SessionController.localOnly needs the define
+
+  test('PR #8 owner folder hash for "local" is pinned', () {
     // PR #8's AttachmentStorage.ownerFolderName uses the same
     // sha256(owner)[:32]; pin it so either side notices a change.
     expect(LocalPhotoStore.ownerFolderName(kLocalOwnerId), '25bf8e1a2393f1108d37029b3df55932');
-    s.dispose();
-    expect(CurrentOwner.id, isNull);
   });
 }
 

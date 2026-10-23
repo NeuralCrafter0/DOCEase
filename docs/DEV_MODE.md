@@ -84,13 +84,40 @@ name the flavor (`--flavor prod` or `--flavor dev`).
 ## For code and tests
 
 - `lib/config/dev_mode.dart`: `kDevModeRequested` (the define), `kDevMode` (define and not
-  release), `decideStartMode()`, `kLocalOwnerId`, and `DevMode`, an injectable widget flag
+  release), `decideStartMode()`, `kLocalOwnerId`, and `DevMode`, a widget flag that can only turn dev mode off
   (`DevMode.of(context)`). Only `main()` decides the start mode.
 - `lib/dev/dev_build_refused.dart`: the refusal screen. `lib/dev/dev_mode_app.dart` wires dev mode.
 - Providers take `cloudSync: false`; `SessionController.localOnly(...)` replaces the auth flow;
   `DOCEaseApp(devMode: true)` picks `DevModeHome` and the banner.
-- Tests set the mode explicitly and pass with or without the define:
-  `flutter test` and `flutter test --dart-define=DOCEASE_DEV_MODE=true`.
+- Dev mode can only be turned on by the define. Every injectable entry point is gated on
+  `kDevMode` (define on and not release), so nothing can enable it in a build without the
+  define (security F4-R3):
+  - `DOCEaseApp(devMode: true)`: the effective value is `isDevMode => devMode && kDevMode`.
+  - `DevMode(enabled: true)`: `DevMode.of` is `kDevMode && enabled`, so a scope can only turn
+    dev mode off.
+  - `SessionController.localOnly` and `LocalOnlySessionPlatform` (which approves everyone)
+    throw `StateError`.
+  - `buildDevModeApp` returns the refusal screen.
+  - Not gated: the providers' `cloudSync: false`. It only turns cloud work off and never skips
+    sign-in, the lock or approval, or changes the owner. Unit-test fakes use it in both modes.
+- Tests: run the suite twice. Both commands pass unchanged (apart from `test/widget_test.dart`,
+  below), because tests that
+  need one mode skip themselves in the other (`skip: !kDevMode` / `skip: kDevMode` inside the
+  test file; no tags):
+
+      flutter test
+      flutter test --dart-define=DOCEASE_DEV_MODE=true
+
+  Only with the define (`skip: !kDevMode`): in `test/backend/dev_mode_test.dart`, the `session`
+  group (4 tests), `DOCEaseApp(devMode: true) skips lock and login, shows the banner` and
+  `session screens offer no Sign out in dev mode`; in `test/backend/current_owner_test.dart`,
+  `dev mode (localOnly): owner is "local"`.
+  Only without the define (`skip: kDevMode`): the `without the define, every dev-mode entry
+  point refuses` group in `dev_mode_test.dart` (4 tests: `DOCEaseApp(devMode: true)` is
+  ignored; `localOnly`, `LocalOnlySessionPlatform` and `buildDevModeApp` refuse).
+  Everything else runs in both. New dev-mode tests that need it on use `skip: !kDevMode`.
+  `test/widget_test.dart` is the broken Flutter template and fails in both modes, on `main`
+  too.
 - The profile and medicines use the DB engineer's key-value settings table
   (`LocalDatabase.getSetting`/`putSetting`, PR #10), inside the encrypted DB.
 - `CurrentOwner.id` (`lib/services/current_owner.dart`): the owner of the open session, or null.
@@ -120,7 +147,9 @@ name the flavor (`--flavor prod` or `--flavor dev`).
   fails a release with the define on, and the app would only show the refusal screen.
 - Dev/tester jobs: `flutter build apk --profile --flavor dev --dart-define=DOCEASE_DEV_MODE=true`
   (or `--debug`). Artifacts: `app-dev-profile.apk` / `app-dev-debug.apk`.
-- Tests: `flutter test` (optionally also with `--dart-define=DOCEASE_DEV_MODE=true`).
+- Tests: two jobs, `flutter test` and `flutter test --dart-define=DOCEASE_DEV_MODE=true` (see
+  "For code and tests"). No tags or excludes are needed; `test/widget_test.dart` fails in both
+  until the owner fixes or removes it.
 
 ## Later
 
