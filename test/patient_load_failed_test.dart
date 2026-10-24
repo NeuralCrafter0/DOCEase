@@ -76,6 +76,29 @@ class _Patients extends PatientProvider {
   Patient findById(String id) => _list.firstWhere((p) => p.id == id);
 }
 
+/// Deletes that can be held open ([gate]) or refused ([refuse]).
+class _Deleting extends _Patients {
+  _Deleting({super.list});
+  final deletes = <String>[];
+  Completer<void>? gate;
+  bool refuse = false;
+  Future<void> _delete(String what, void Function() apply) async {
+    deletes.add(what);
+    if (gate != null) await gate!.future;
+    if (refuse) throw StateError('refused'); // stands in for SaveRefusedException
+    apply();
+    notifyListeners();
+  }
+  @override
+  Future<void> deleteRecord(String patientId, String recordId) => _delete('visit $recordId', () {
+        _list = [for (final p in _list) p.id == patientId ? Patient(id: p.id, name: p.name, age: p.age, gender: p.gender, phone: p.phone, history: [for (final r in p.history) if (r.id != recordId) r]) : p];
+      });
+  @override
+  Future<void> deletePatient(String id) => _delete('patient $id', () {
+        _list = [for (final p in _list) if (p.id != id) p];
+      });
+}
+
 class _Doctor extends DoctorProvider {
   @override
   Doctor? get currentDoctor => _doc;
@@ -246,6 +269,131 @@ void main() {
       await openVisitSheet(t);
       expect(find.byTooltip('Edit visit'), findsOneWidget);
       expect(find.byTooltip('Delete visit'), findsOneWidget);
+    });
+  });
+
+  group('detail: open sheets on session end, reload failure and refused deletes', () {
+    final sheetOpen = find.byTooltip('Share visit');
+    Future<void> openDetailFromHome(WidgetTester t, PatientProvider p) async {
+      await _pump(t, p, Builder(builder: (ctx) => Scaffold(body: TextButton(
+        onPressed: () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => const PatientDetailScreen(patientId: 'p1'))),
+        child: const Text('open detail'),
+      ))));
+      await t.tap(find.text('open detail'));
+      await t.pumpAndSettle();
+    }
+    Future<void> openSheet(WidgetTester t) async {
+      await t.tap(find.text('Viral fever').first);
+      await t.pumpAndSettle();
+      expect(sheetOpen, findsOneWidget, reason: 'precondition');
+    }
+
+    testWidgets('session end closes the visit sheet and the detail screen: no diagnosis or symptoms left', (t) async {
+      final p = _Patients(list: [_ravi]);
+      await openDetailFromHome(t, p);
+      await openSheet(t);
+      p.endSession();
+      await t.pump();
+      expect(find.text('Fever'), findsNothing, reason: 'gone from the first frame, not only once the sheet has animated away');
+      expect(find.text('Viral fever'), findsNothing);
+      await t.pumpAndSettle();
+      expect(t.takeException(), isNull);
+      expect(find.text('Viral fever'), findsNothing);
+      expect(find.text('Fever'), findsNothing);
+      expect(find.text('Ravi Kumar'), findsNothing);
+      expect(sheetOpen, findsNothing);
+      expect(find.text('open detail'), findsOneWidget, reason: 'back on the first route, which is never popped');
+    });
+
+    testWidgets('session end with the delete confirm open closes it too', (t) async {
+      final p = _Deleting(list: [_ravi]);
+      await openDetailFromHome(t, p);
+      await openSheet(t);
+      await t.tap(find.byTooltip('Delete visit'));
+      await t.pumpAndSettle();
+      expect(find.text('Delete'), findsOneWidget);
+      p.endSession();
+      await t.pumpAndSettle();
+      expect(find.text('Delete'), findsNothing);
+      expect(sheetOpen, findsNothing);
+      expect(find.text('open detail'), findsOneWidget);
+    });
+
+    testWidgets('a reload failing while the sheet is open removes its Edit/Delete', (t) async {
+      final p = _Patients(list: [_ravi])..succeed = false;
+      await openDetailFromHome(t, p);
+      await openSheet(t);
+      expect(find.byTooltip('Delete visit'), findsOneWidget);
+      await p.reload();
+      await t.pumpAndSettle();
+      expect(p.loadFailed, isTrue);
+      expect(find.byTooltip('Edit visit'), findsNothing);
+      expect(find.byTooltip('Delete visit'), findsNothing);
+      expect(sheetOpen, findsOneWidget, reason: 'reading and sharing stay available');
+      expect(find.text('Fever'), findsWidgets);
+    });
+
+    testWidgets('refused visit delete: says so, sheet and screen stay open', (t) async {
+      final p = _Deleting(list: [_ravi])..refuse = true;
+      await openDetailFromHome(t, p);
+      await openSheet(t);
+      await t.tap(find.byTooltip('Delete visit'));
+      await t.pumpAndSettle();
+      await t.tap(find.text('Delete'));
+      await t.pumpAndSettle();
+      expect(p.deletes, ['visit v1']);
+      expect(find.text('Could not delete this visit. Nothing was deleted.'), findsOneWidget);
+      expect(find.text('Delete'), findsNothing, reason: 'only the confirm closes');
+      expect(sheetOpen, findsOneWidget, reason: 'the visit sheet stays open');
+      expect(find.text('Ravi Kumar'), findsWidgets, reason: 'the detail screen stays open');
+    });
+
+    testWidgets('visit delete waits for the result; a second tap is ignored; success closes the sheet only', (t) async {
+      final p = _Deleting(list: [_ravi])..gate = Completer<void>();
+      await openDetailFromHome(t, p);
+      await openSheet(t);
+      await t.tap(find.byTooltip('Delete visit'));
+      await t.pumpAndSettle();
+      await t.tap(find.text('Delete'));
+      await t.pump();
+      await t.tap(find.text('Delete'));
+      await t.pump();
+      expect(p.deletes, ['visit v1'], reason: 'second tap while deleting is ignored');
+      expect(find.text('Delete'), findsOneWidget, reason: 'nothing closes before the result is known');
+      expect(sheetOpen, findsOneWidget);
+      p.gate!.complete();
+      await t.pumpAndSettle();
+      expect(find.text('Delete'), findsNothing);
+      expect(sheetOpen, findsNothing);
+      expect(find.text('Ravi Kumar'), findsWidgets, reason: 'the detail screen stays');
+      expect(find.text('open detail'), findsNothing);
+      expect(find.textContaining('Could not delete'), findsNothing);
+    });
+
+    testWidgets('refused patient delete: says so and the detail screen stays open', (t) async {
+      final p = _Deleting(list: [_ravi])..refuse = true;
+      await openDetailFromHome(t, p);
+      await t.tap(find.byIcon(Icons.delete_outline).first);
+      await t.pumpAndSettle();
+      await t.tap(find.text('Delete All'));
+      await t.pumpAndSettle();
+      expect(p.deletes, ['patient p1']);
+      expect(find.text('Could not delete this patient. Nothing was deleted.'), findsOneWidget);
+      expect(find.text('Delete All'), findsNothing);
+      expect(find.text('Ravi Kumar'), findsWidgets);
+      expect(find.text('open detail'), findsNothing);
+    });
+
+    testWidgets('patient delete that works goes back to the list', (t) async {
+      final p = _Deleting(list: [_ravi]);
+      await openDetailFromHome(t, p);
+      await t.tap(find.byIcon(Icons.delete_outline).first);
+      await t.pumpAndSettle();
+      await t.tap(find.text('Delete All'));
+      await t.pumpAndSettle();
+      expect(t.takeException(), isNull);
+      expect(find.text('open detail'), findsOneWidget);
+      expect(find.text('Ravi Kumar'), findsNothing);
     });
   });
 }
