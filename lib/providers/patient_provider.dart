@@ -103,6 +103,7 @@ class PatientProvider with ChangeNotifier {
   /// The owner [_patients] was read for (null: nothing loaded).
   String? _listOwner;
   bool _loadFailed = false;
+  bool _hasLoaded = false;
   DbReadFailure? _loadFailure;
   Future<void>? _pushInFlight;
 
@@ -159,6 +160,14 @@ class PatientProvider with ChangeNotifier {
   /// startup sweep do not run either.
   bool get loadFailed => _loadFailed;
 
+  /// False after [clear] and on an owner or session change, until the
+  /// first load for the current owner settles (success or failure); then
+  /// true, also while a later [reload] runs. A stale owner's load, or one
+  /// cancelled by [clear], never sets it. Listeners are notified when it
+  /// flips. The UI's empty state is
+  /// `hasLoaded && patients.isEmpty && !loadFailed` (contract §7 G2).
+  bool get hasLoaded => _hasLoaded;
+
   /// The reason enum value of the failed load ([DbReadFailure]), for
   /// diagnostics only; null when [loadFailed] is false.
   Object? get loadFailure => _loadFailure;
@@ -204,7 +213,7 @@ class PatientProvider with ChangeNotifier {
       _token.cancel();
       // Owner change: the old owner's list and load state go, even while
       // loadFailed is true (security: never one doctor's patients for the next).
-      final had = _patients.isNotEmpty || _loadFailed || _listOwner != null;
+      final had = _patients.isNotEmpty || _loadFailed || _hasLoaded || _listOwner != null;
       _resetLoadState();
       if (had) notifyListeners();
     }
@@ -240,6 +249,7 @@ class PatientProvider with ChangeNotifier {
     _patients = [];
     _listOwner = null;
     _loadFailed = false;
+    _hasLoaded = false;
     _loadFailure = null;
     _activeLoad = null;
     _loadStatus?.cleared();
@@ -252,6 +262,7 @@ class PatientProvider with ChangeNotifier {
       _listOwner = null;
     }
     _loadFailed = true;
+    _hasLoaded = true; // settled (callers check _live first)
     _loadFailure = error is DbReadException ? error.reason : DbReadFailure.readFailed;
     _loadStatus?.failed(uid);
     notifyListeners();
@@ -329,6 +340,7 @@ class PatientProvider with ChangeNotifier {
     _patients = local;
     _listOwner = uid;
     _loadFailed = false;
+    _hasLoaded = true; // notified below on both paths
     _loadFailure = null;
     _loadStatus?.loaded(uid);
     if (!_cloud) {
@@ -399,9 +411,13 @@ class PatientProvider with ChangeNotifier {
   /// same patient runs, and no end-of-pull overwrite can undo a save made
   /// after this patient was applied.
   ///
-  /// A patient saved locally after the fetch started ([fetchedAfter]) is
-  /// kept and retried with a fresh snapshot, even if its push already made
-  /// the row clean: the fetched copy predates that save.
+  /// A patient written locally after the fetch started ([fetchedAfter]: a
+  /// save, or an upload swap, security #16 M-2) is kept as stored and
+  /// skipped by this pull, even if its push already made the row clean:
+  /// the fetched copy predates that write. Nothing re-fetches it in this
+  /// session (the pull runs once per session), and its next push replaces
+  /// the whole cloud doc, so a visit that exists only in the cloud can
+  /// still be lost (pre-existing; tracked in #16 "When Firebase returns").
   Future<_Pulled> _applyCloud(Patient cp, String uid, SyncCancelToken token, int fetchedAfter) =>
       _underPatientLock(cp.id, () async {
         if (!_live(uid, token) || !_dbReadyFor(uid)) return _Pulled.unchanged;
@@ -681,6 +697,15 @@ class PatientProvider with ChangeNotifier {
           notSwappable++;
           continue;
         }
+        // Security #16 L-2: only a regular file directly in the owner's
+        // visit folder is uploaded (links not followed, no sub-folder).
+        // Anything else stays local, is no longer pending, and is left to
+        // the sweep; a missing file is left to putFile (retried).
+        if (await _isRejectedPhotoFile(path, _openDbUid ?? uid)) {
+          _pendingUploads.remove(path);
+          notSwappable++;
+          continue;
+        }
         final uploaded = _unswapped[path];
         if (uploaded != null) {
           out[path] = uploaded; // already uploaded; only its swap is retried
@@ -737,6 +762,9 @@ class PatientProvider with ChangeNotifier {
         if (!_live(uid, token) || _openDbUid != owner) break; // owner changed: no swap
         try {
           if (await _swapPath(owner, patientId, local, storagePath)) {
+            // Security #16 M-2: the swap is a local row write; a pull
+            // snapshot fetched before it must not be applied over it.
+            _noteLocalSave(patientId);
             swapped[local] = storagePath;
           } else {
             gone.add(storagePath); // photo or visit removed mid-upload
@@ -927,10 +955,10 @@ class PatientProvider with ChangeNotifier {
     );
   }
 
-  static VisitRecord _copyRecord(VisitRecord r, List<String> attachments) => VisitRecord(
+  static VisitRecord _copyRecord(VisitRecord r, List<String> attachments, {String? notes}) => VisitRecord(
         id: r.id, date: r.date, visitType: r.visitType,
         symptoms: r.symptoms, diagnosis: r.diagnosis, prescription: r.prescription,
-        notes: r.notes, bp: r.bp, temp: r.temp, pulse: r.pulse, weight: r.weight, sugar: r.sugar,
+        notes: notes ?? r.notes, bp: r.bp, temp: r.temp, pulse: r.pulse, weight: r.weight, sugar: r.sugar,
         attachmentPaths: attachments,
       );
 
@@ -1349,6 +1377,19 @@ class PatientProvider with ChangeNotifier {
     return key != null && key.startsWith('${AttachmentRefs.attachmentsFolder}/') ? key : null;
   }
 
+  /// Security #16 L-2: [path] exists (links not followed) but is not a
+  /// regular file directly in [owner]'s visit folder. A missing file is
+  /// not rejected here: the save's validation or the upload's retry
+  /// handles it as before.
+  Future<bool> _isRejectedPhotoFile(String path, String owner) async {
+    try {
+      if (FileSystemEntity.typeSync(path, followLinks: false) == FileSystemEntityType.notFound) return false;
+    } catch (_) {
+      return true;
+    }
+    return !await _photos.isOwnedVisitFile(path, owner: owner);
+  }
+
   /// Removes from [patientId]'s registry every key that [rows] reference.
   void _consumePicks(String owner, String patientId, Iterable<Patient> rows) {
     if (owner != _sessionPicksOwner) return;
@@ -1392,8 +1433,10 @@ class PatientProvider with ChangeNotifier {
       }
       final key = owner == null ? null : _visitKey(e, owner);
       final mine = key != null || (owner != null && _photos.isAppPhoto(e, owner: owner));
-      if (key != null && (rowKeys.contains(key) || picks.contains(key))) {
+      if (key != null && rowKeys.contains(key)) {
         kept.add(e);
+      } else if (key != null && picks.contains(key) && !await _isRejectedPhotoFile(e, owner!)) {
+        kept.add(e); // L-2: a link or a sub-folder file is not a pick
       } else if (mine || _photos.isAppPhoto(e)) {
         dropped++; // an app photo the row no longer has, or another owner's
       } else {
@@ -1546,6 +1589,13 @@ class PatientProvider with ChangeNotifier {
       record = _mapSwappedRecord(record, owner, swapped);
       final i = storedRow.history.indexWhere((r) => r.id == record.id);
       if (i == -1) return null;
+      // Contract B2/G9: the visit form neither loads nor sends `notes`.
+      // Null means "not provided": keep the stored notes (from the row read
+      // strictly under this lock). An explicit '' clears them.
+      final storedNotes = storedRow.history[i].notes;
+      if (record.notes == null && storedNotes != null) {
+        record = _copyRecord(record, record.attachmentPaths, notes: storedNotes);
+      }
       final stored = storedRow.history[i].attachmentPaths.toSet();
       // A form can keep a cloud reference, never introduce one: a Storage
       // path (or legacy URL) the stored row no longer holds was removed by

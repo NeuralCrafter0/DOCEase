@@ -512,13 +512,14 @@ void main() {
     // #10's swap only takes photos in the owner's attachments/ folder, so
     // the others are not uploaded at all (no unreferenced Storage object).
     // Another owner's photo is never accepted into this owner's visit
-    // (security #16 L-1): it is left out, and left on disk.
-    expect(storage.uploads.length, 1);
-    expect(db.swapCalls, 1);
+    // (security #16 L-1): it is left out, and left on disk. A symlink in
+    // the owner's own folder is not a regular file (security #16 L-2): even
+    // registered, it is left out of the save and never uploaded, so the
+    // link target is never sent.
+    expect(storage.uploads, isEmpty);
+    expect(db.swapCalls, 0);
     final stored = rowPaths('p1');
-    expect(stored, hasLength(3));
-    expect(stored.sublist(0, 2), [outside, loose]);
-    expect(stored[2], startsWith('clinical_attachments/$doctorA/p1/'));
+    expect(stored, [outside, loose]);
     expect(provider.findById('p1').history.single.attachmentPaths, stored);
     expect(File(outside).existsSync(), isTrue);
     expect(File(theirs).existsSync(), isTrue);
@@ -685,6 +686,87 @@ void main() {
     expect(provider.retryPendingForTesting, isTrue, reason: 'retried later');
     expect(logs.where((l) => l.contains('markSynced failed')), isEmpty,
         reason: 'false is not an error');
+  });
+
+  group('security #16 L-2: only a regular file directly in the owner folder', () {
+    test('LocalPhotoStore.isOwnedVisitFile: regular file yes; link, sub-folder, dot-segments, other owner, missing no', () async {
+      await load();
+      final dir = photos.visitFolderFor(doctorA)!;
+      final regular = photoIn(dir, n('a.jpg'));
+      expect(await photos.isOwnedVisitFile(regular, owner: doctorA), isTrue);
+      final target = photoIn(p.join(root.path, 'elsewhere'), 'target.jpg');
+      final link = Link(p.join(dir, n('l.jpg')))..createSync(target);
+      expect(await photos.isOwnedVisitFile(link.path, owner: doctorA), isFalse);
+      final nested = photoIn(p.join(dir, 'sub'), n('b.jpg'));
+      expect(await photos.isOwnedVisitFile(nested, owner: doctorA), isFalse);
+      expect(await photos.isOwnedVisitFile(p.join(dir, 'sub', '..', p.basename(regular)), owner: doctorA), isFalse);
+      expect(await photos.isOwnedVisitFile(p.join(dir, '.', p.basename(regular)), owner: doctorA), isFalse);
+      expect(await photos.isOwnedVisitFile(regular, owner: 'doctorB'), isFalse);
+      expect(await photos.isOwnedVisitFile(p.join(dir, n('missing.jpg')), owner: doctorA), isFalse);
+      expect(await photos.isOwnedVisitFile(p.relative(regular), owner: doctorA), isFalse);
+      Directory(p.join(dir, n('d.jpg'))).createSync();
+      expect(await photos.isOwnedVisitFile(p.join(dir, n('d.jpg')), owner: doctorA), isFalse);
+    });
+
+    test('a symlinked owner folder makes nothing in it a regular owned file', () async {
+      await load();
+      final dir = photos.visitFolderFor(doctorA)!;
+      final real = Directory(p.join(root.path, 'realdir'))..createSync();
+      final victim = photoIn(real.path, n('v.jpg'));
+      if (Directory(dir).existsSync()) Directory(dir).deleteSync(recursive: true);
+      Link(dir).createSync(real.path, recursive: true);
+      expect(await photos.isOwnedVisitFile(p.join(dir, p.basename(victim)), owner: doctorA), isFalse);
+    });
+
+    test('registered symlink and sub-folder picks are left out of the save, nothing uploaded, files untouched', () async {
+      await load();
+      final dir = photos.visitFolderFor(doctorA)!;
+      final target = photoIn(p.join(root.path, 'elsewhere'), 'secret.jpg');
+      final link = Link(p.join(dir, n('link.jpg')))..createSync(target, recursive: true);
+      final nested = photoIn(p.join(dir, 'sub'), n('nested.jpg'));
+      final good = pick('good.jpg');
+      provider.registerPickedAttachment(patientId: 'p1', localPath: link.path);
+      provider.registerPickedAttachment(patientId: 'p1', localPath: nested);
+      final logs = <String>[];
+      await captureLogs(logs, () async {
+        await provider.addRecord('p1', visit('v1', [link.path, nested, good]));
+        await settle();
+      });
+      expect(storage.uploads, hasLength(1), reason: 'only the regular pick');
+      final stored = rowPaths('p1');
+      expect(stored, hasLength(1));
+      expect(stored.single, startsWith('clinical_attachments/$doctorA/p1/'));
+      expect(FileSystemEntity.typeSync(link.path, followLinks: false), FileSystemEntityType.link);
+      expect(File(target).existsSync(), isTrue);
+      expect(File(nested).existsSync(), isTrue);
+      expect(logs, contains('Photos: 2 photo(s) not picked this session left out of a save'));
+      expect(logs.where((l) => l.contains(root.path) || l.contains('secret')), isEmpty);
+    });
+
+    test('a stored photo replaced by a symlink before upload is never uploaded; stays local, not deleted', () async {
+      await load();
+      storage.failUploads = true;
+      final a = pick('a.jpg');
+      await provider.addRecord('p1', visit('v1', [a]));
+      await settle();
+      expect(rowPaths('p1'), [a]);
+      final target = photoIn(p.join(root.path, 'elsewhere'), 'secret.jpg');
+      File(a).deleteSync();
+      Link(a).createSync(target);
+      storage.failUploads = false;
+      final logs = <String>[];
+      await captureLogs(logs, () async {
+        await provider.retryDirty();
+        await settle();
+      });
+      expect(storage.uploads, isEmpty);
+      expect(db.swapCalls, 0);
+      expect(rowPaths('p1'), [a]);
+      expect(FileSystemEntity.typeSync(a, followLinks: false), FileSystemEntityType.link);
+      expect(File(target).existsSync(), isTrue);
+      expect(storage.deleted, isEmpty);
+      expect(logs, contains('Upload: 1 photo(s) outside the owner folder kept local'));
+    });
   });
 }
 

@@ -6,8 +6,9 @@
 // memory per patient inside that same lock, right after applying the row.
 // Both orders are covered: the pull applies first and the save runs while
 // the pull is still busy with another patient; or the save holds the lock
-// and the pull waits for it. A pull whose snapshot predates a local save is
-// never applied to that patient (retried with a fresh snapshot instead).
+// and the pull waits for it. A pull whose snapshot predates a local write
+// (a save, or an upload swap: security #16 M-2) is never applied to that
+// patient; this pull skips it (it is not re-fetched in the same session).
 //
 // Gates are hook-based (Completers), no timers.
 import 'dart:async';
@@ -18,6 +19,7 @@ import 'package:docease/providers/patient_provider.dart';
 import 'package:docease/services/local_photo_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+import 'package:uuid/uuid.dart';
 import 'fakes.dart';
 
 const doctorA = 'doctorA';
@@ -268,5 +270,86 @@ void main() {
     final apply = body('_applyCloud');
     expect(apply, contains('_underPatientLock('));
     expect(apply.indexOf('_db.applyCloudPatient('), lessThan(apply.indexOf('_showInMemory(cp)')));
+  });
+
+  // Security #16 M-2, ported from security's H7 probe (real SQLCipher there,
+  // MergeDb here): an upload that finishes while the pull is held must
+  // count as a local write, or the older cloud copy (more visits, clean
+  // row) wins and the photo is lost locally and then from the cloud.
+  test('M-2 (H7): an upload swap during the pull window keeps the photo', () async {
+    final storage = FakeStorage()..failUploads = true;
+    final support = Directory(p.join(root.path, 'support_h7'))..createSync();
+    final photos = LocalPhotoStore(supportDir: () async => support);
+    await photos.init();
+    final d = _RaceDb()..state = const DbReady(doctorA);
+    d.rows['p1'] = testPatient('p1', history: [visit('v0')]);
+    d.rows['p2'] = testPatient('p2');
+    d.dirty['p1'] = false;
+    d.dirty['p2'] = false;
+    final r = CloudFirestoreHelper();
+    final pp = PatientProvider(
+        db: d, firestore: r, auth: FakeAuth(doctorA), storage: storage, photos: photos,
+        retryBaseDelay: const Duration(hours: 1), retryMaxDelay: const Duration(hours: 1));
+    addTearDown(pp.dispose);
+    await pp.loadAndSync(doctorA);
+    await pp.backgroundIdleForTesting();
+    final local = p.join(photos.visitFolderFor(doctorA)!, '${const Uuid().v4()}.jpg');
+    File(local)
+      ..createSync(recursive: true)
+      ..writeAsBytesSync(List.filled(64, 7));
+    pp.registerPickedAttachment(patientId: 'p1', localPath: local);
+    final v1 = VisitRecord(
+        id: 'v1', date: DateTime(2026, 1, 3), visitType: 'Consultation', symptoms: 's',
+        diagnosis: 'd-v1', prescription: 'p', attachmentPaths: [local]);
+    await pp.addRecord('p1', v1);
+    await pp.backgroundIdleForTesting();
+    expect(d.rows['p1']!.history.firstWhere((v) => v.id == 'v1').attachmentPaths, [local],
+        reason: 'upload failed: still local and pending');
+    // Another device: p1 has one more visit; its v1 never had the photo.
+    r.cloud = [
+      testPatient('p2', history: [visit('wC'), visit('w1')]),
+      testPatient('p1', history: [visit('vC'), visit('v1'), visit('v0')]),
+    ];
+    final entered = Completer<void>();
+    final release = Completer<void>();
+    d.applyEntered['p2'] = entered;
+    d.applyGates['p2'] = release;
+    final pull = pp.syncNowForTesting(); // its push fails (uploads failing), then the pull
+    await entered.future; // the pull fetched and is held on p2
+    storage.failUploads = false;
+    await pp.retryDirty(); // app resume: upload, swap, push, markSynced while the pull is held
+    await pp.backgroundIdleForTesting();
+    List<String> v1Paths() => d.rows['p1']!.history.firstWhere((v) => v.id == 'v1').attachmentPaths;
+    expect(v1Paths(), hasLength(1));
+    final storagePath = v1Paths().single;
+    expect(storagePath, startsWith('clinical_attachments/$doctorA/p1/'));
+    expect(d.dirty['p1'], isFalse, reason: 'the swap was pushed and confirmed');
+    release.complete();
+    await pull;
+    await pp.backgroundIdleForTesting();
+    // The pre-swap cloud copy is not applied over the swapped row.
+    expect(v1Paths(), [storagePath]);
+    expect(pp.findById('p1').history.firstWhere((v) => v.id == 'v1').attachmentPaths, [storagePath]);
+    expect(d.applyLog, isNot(contains('apply:p1')));
+    expect(storage.objects.keys, [storagePath]);
+    // The next push still carries the photo's Storage path.
+    await pp.addRecord('p1', visit('vX'));
+    await pp.backgroundIdleForTesting();
+    final pushed = r.payloads.lastWhere((x) => x.id == 'p1');
+    expect(pushed.history.firstWhere((v) => v.id == 'v1').attachmentPaths, [storagePath]);
+  });
+
+  test('source pin (M-2): every local row write records a local save, inside its lock', () {
+    final s = File('lib/providers/patient_provider.dart').readAsStringSync();
+    final swap = s.substring(s.indexOf('_swapUploaded('), s.indexOf('Future<bool> _swapPath('));
+    expect(swap, contains('if (await _swapPath(owner, patientId, local, storagePath)) {'));
+    final afterSwap = swap.substring(swap.indexOf('if (await _swapPath('));
+    final noted = afterSwap.indexOf('_noteLocalSave(patientId);');
+    expect(noted, greaterThan(0), reason: 'the swap records a local save');
+    expect(noted, lessThan(afterSwap.indexOf('swapped[local] = storagePath;')));
+    for (final m in RegExp(r'await _db\.(insertPatient|updatePatient)\(').allMatches(s)) {
+      final next = s.substring(m.end, m.end + 200);
+      expect(next, contains('_noteLocalSave('), reason: 'write at offset ${m.start}');
+    }
   });
 }
