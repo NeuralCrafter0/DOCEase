@@ -10,6 +10,8 @@ import 'patient_detail_screen.dart';
 import 'doctor_profile_screen.dart';
 import 'insights_screen.dart';
 import '../widgets/stat_card.dart';
+import '../widgets/patient_load_failed_view.dart';
+import '../utils/patient_load.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -73,18 +75,22 @@ class _HomeScreenState extends State<HomeScreen> {
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 const Text('Daily Pulse', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Color(0xFF1E293B))),
                 const SizedBox(height: 12),
-                _buildDailyStats(todayPatients, todayVisits),
+                _buildDailyStats(todayPatients, todayVisits, unknown: PatientLoad.failed(patientProvider) && patientProvider.patients.isEmpty),
                 const SizedBox(height: 24),
                 _buildProfessionalSearchBar(context),
                 const SizedBox(height: 16),
               ]),
             ),
           ),
+          // A failed reload keeps the last list: show it read-only under a banner.
+          if (PatientLoad.failed(patientProvider) && patientProvider.patients.isNotEmpty)
+            SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(24, 0, 24, 8), child: PatientRefreshFailedBanner(onRetry: () => PatientLoad.reload(patientProvider)))),
           _buildPatientList(patientProvider),
           const SliverPadding(padding: EdgeInsets.only(bottom: 100)),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
+      // Registering is refused while the list failed to load (and would risk duplicates).
+      floatingActionButton: PatientLoad.readOnly(patientProvider) ? null : FloatingActionButton.extended(
         backgroundColor: const Color(0xFF1E293B), foregroundColor: Colors.white,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         icon: const Icon(Icons.person_add_alt_1_outlined), label: const Text('Register Patient'),
@@ -107,11 +113,11 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildDailyStats(int pts, int vsts) {
+  Widget _buildDailyStats(int pts, int vsts, {bool unknown = false}) {
     return Row(children: [
-      _buildDailyCard('Today Patients', pts.toString(), Icons.person_outline, const Color(0xFF6366F1)),
+      _buildDailyCard('Today Patients', unknown ? '—' : pts.toString(), Icons.person_outline, const Color(0xFF6366F1)),
       const SizedBox(width: 12),
-      _buildDailyCard('Today Visits', vsts.toString(), Icons.history_edu_outlined, const Color(0xFF10B981)),
+      _buildDailyCard('Today Visits', unknown ? '—' : vsts.toString(), Icons.history_edu_outlined, const Color(0xFF10B981)),
     ]);
   }
 
@@ -137,6 +143,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildPatientList(PatientProvider provider) {
     final patients = provider.patients;
+    // Never show the empty state after a failed read: it leads to duplicate registrations.
+    if (patients.isEmpty && PatientLoad.failed(provider)) return SliverFillRemaining(hasScrollBody: false, child: PatientLoadFailedView(onRetry: () => PatientLoad.reload(provider)));
     if (patients.isEmpty) return const SliverFillRemaining(child: Center(child: Text('No Clinical Records')));
     return SliverList(
       delegate: SliverChildBuilderDelegate(
