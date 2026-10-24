@@ -75,16 +75,26 @@ name the flavor (`--flavor prod` or `--flavor dev`).
     deleted visit or a photo removed while editing), the provider deletes the dropped photos. A
     refused delete removes nothing. A photo another visit still uses is kept; a file that is
     already gone is ignored, so a second delete is harmless. "Still used" is never taken from the
-    in-memory list alone (it was loaded with `fetchPatients()`, which returns `[]` on a read
-    error): a fresh `referencedAttachmentKeys()` scan after the DB change must succeed, and a
+    in-memory list alone: a fresh `referencedAttachmentKeys()` scan after the DB change must succeed, and a
     still-used local entry that cannot be keyed aborts the cleanup too (left to the sweep; log
     `Photos: cleanup skipped (<reason>)`).
-  - Cloud mode (parked, security F8-R1): once a photo's Storage upload is confirmed and the visit
-    row has been rewritten to the Storage path, the same provider cleanup deletes the local copy
-    (PR #8 writes picks into `attachments/<owner folder>/`). A failed upload, or a rewrite that is
-    refused or not confirmed, keeps the file for the retry; a copy another visit or a pending
-    upload still uses is kept; files outside the owner folder are never deleted, and the Storage
-    path must be in the signed-in owner's folder for that patient. Tests:
+  - Cloud mode (parked, security F8-R1 and the #16 re-review): after a confirmed upload the DB
+    swaps the local path for the Storage path in the stored row (`swapAttachmentPath`, one
+    transaction, named arguments `expectedOwner`/`patientId`/`localPath`/`storagePath`); the
+    provider never writes a row snapshot back, so an edit saved mid-upload is kept, and a stale
+    form saved later gets the Storage path. The local copy is deleted only after the swap returned
+    true (PR #8 writes picks into `attachments/<owner folder>/`). A swap that throws (wrong owner,
+    bad path, corrupt row) deletes nothing, local or remote; the row stays dirty and the retry
+    swaps the same object again without a new upload. A swap that returns false (photo or visit
+    removed mid-upload) deletes the object that upload just wrote, at that exact path, only if a
+    strict `referencedAttachmentPaths()` scan shows nothing references it (log
+    `Upload: unused upload kept (<reason>)` otherwise). The Storage path must be in the owner's
+    folder for that patient (checked by us and the DB); files outside the owner folder are never
+    deleted. Since #10's `attachment_swaps` a local whole-row save may store the Storage path S
+    where the provider's memory still holds the local path L, so the push always sends the stored
+    rows from `dirtyPatientsStrict()` (never the in-memory list) and passes `markSynced` that
+    row's own `updatedAt`; after every local save the provider re-reads the patient strictly, so
+    the UI shows S. Tests:
     `test/backend/upload_cleanup_test.dart`.
   - At startup (`StartupHooks`, both start modes) a sweep waits for the first open DB and deletes
     files in that owner's `attachments/<owner folder>/` that no row references any more (e.g.
@@ -111,6 +121,16 @@ name the flavor (`--flavor prod` or `--flavor dev`).
     with `unrecognisedPath`, so that phone is never swept (safe; clinical records are not
     migrated). Provider cleanup is skipped there as well (the fresh scan fails the same way). A leftover avatar after a crash is
     not swept either. Tests: `test/backend/photo_cleanup_test.dart`.
+- Strict reads (DB engineer's audit, #16): the patient list, the push of dirty rows and the
+  tombstone pass use #10's `fetchPatientsStrict()`, `dirtyPatientsStrict()` and
+  `pendingDeletesStrict()`. A `DbReadException` (`notOpen`, `readFailed`, `unreadableRow`) sets
+  `PatientProvider.loadFailed`/`loadFailure` for the load (the list is kept only for the same
+  owner, `reload()` retries, every patient/visit write and delete is refused with
+  `SaveRefusedException`, the sweep skips) and keeps the sync retry pending for the push. The
+  lenient reads stay for display-only code. `MedicineProvider` never saves over a list it could
+  not read (local setting or Firestore): additions are kept in memory and saved together with
+  the stored list once a retried `load` succeeds; a stored value that is not a list is a failed
+  load. Tests: `test/backend/strict_load_test.dart`, `test/backend/load_guard_audit_test.dart`.
 - iOS: each owner photo folder is excluded from iCloud and computer backups when it is first used
   in a run, through #10's `PlatformBackupExcluder` (the existing `docease/backup_exclusion`
   channel in `ios/Runner/AppDelegate.swift`, which also covers the encrypted DB; no new native

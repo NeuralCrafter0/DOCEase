@@ -160,6 +160,16 @@ class FakeStorage implements FirebaseStorage {
   final Map<String, String?> uploads = {};
   final Map<String, Uint8List> objects = {};
   bool failUploads = false;
+
+  /// Number of putFile calls (a retried swap must not upload again).
+  int puts = 0;
+
+  /// Awaited before an upload completes: simulates work landing mid-upload.
+  Future<void> Function(String fullPath)? beforeUploadCompletes;
+
+  /// Paths passed to Reference.delete(), in order.
+  final List<String> deleted = [];
+  bool failDeletes = false;
   @override
   String get bucket => 'demo-docease.appspot.com';
   @override
@@ -181,9 +191,29 @@ class FakeRef implements Reference {
     if (storage.failUploads) {
       return FakeUploadTask(Future.error(FirebaseException(plugin: 'storage', code: 'unavailable')));
     }
-    storage.uploads[fullPath] = metadata?.contentType;
-    storage.objects[fullPath] = file.readAsBytesSync();
-    return FakeUploadTask(Future.value(FakeTaskSnapshot()));
+    storage.puts++;
+    final bytes = file.readAsBytesSync();
+    void record() {
+      storage.uploads[fullPath] = metadata?.contentType;
+      storage.objects[fullPath] = bytes;
+    }
+    final hook = storage.beforeUploadCompletes;
+    if (hook == null) {
+      record();
+      return FakeUploadTask(Future.value(FakeTaskSnapshot()));
+    }
+    return FakeUploadTask(hook(fullPath).then((_) {
+      record();
+      return FakeTaskSnapshot();
+    }));
+  }
+
+  @override
+  Future<void> delete() async {
+    if (storage.failDeletes) throw FirebaseException(plugin: 'storage', code: 'unavailable');
+    storage.deleted.add(fullPath);
+    storage.uploads.remove(fullPath);
+    storage.objects.remove(fullPath);
   }
 
   @override
@@ -264,6 +294,77 @@ class CloudFirestoreHelper extends FakeFirestoreHelper {
 class MergeDb extends FakeLocalDatabase {
   final List<String> applyLog = [];
 
+  // ---- swapAttachmentPath: #10's real fake (fed74ca) plus test hooks ----
+  int swapCalls = 0;
+
+  /// Thrown by the swap (after the call is counted, writing nothing) when set.
+  Object? swapThrows;
+
+  /// Runs at the start of each swap, before its checks.
+  void Function(String patientId, String localPath)? beforeSwap;
+
+  /// Runs after each swap that returned true (the row already holds the
+  /// Storage path).
+  void Function(String patientId, String localPath)? afterSwap;
+
+  /// Delegates to [FakeLocalDatabase.swapAttachmentPath], which follows
+  /// the DB engineer's contract: true = swapped (row dirty, new version);
+  /// false = no row, tombstoned or no entry with that key (nothing written);
+  /// ArgumentError for bad arguments (storage path not exactly
+  /// clinical_attachments/<owner>/<patientId>/<file>, local path not a
+  /// visit photo in the owner's attachments folder); DbReadException
+  /// notOpen (also an owner mismatch) / unreadableRow.
+  @override
+  Future<bool> swapAttachmentPath({
+    required String expectedOwner,
+    required String patientId,
+    required String localPath,
+    required String storagePath,
+  }) async {
+    swapCalls++;
+    beforeSwap?.call(patientId, localPath);
+    final t = swapThrows;
+    if (t != null) throw t;
+    final ok = await super.swapAttachmentPath(
+        expectedOwner: expectedOwner, patientId: patientId,
+        localPath: localPath, storagePath: storagePath);
+    if (ok) afterSwap?.call(patientId, localPath);
+    return ok;
+  }
+
+  /// When set, only fetchPatientsStrict throws it (the push's dirty read
+  /// keeps working).
+  Object? fetchStrictThrows;
+  int strictFetches = 0;
+
+  @override
+  Future<List<Patient>> fetchPatientsStrict() async {
+    strictFetches++;
+    final t = fetchStrictThrows;
+    if (t != null) throw t;
+    return [for (final p in await super.fetchPatientsStrict()) _stamped(p)];
+  }
+
+  /// Like the real DB, a strict read returns each row with its stored
+  /// version as `updatedAt` (the fake keeps the caller's copy otherwise).
+  Patient _stamped(Patient p) {
+    final v = versions[p.id];
+    if (v == null || p.updatedAt == v || p.hasParseErrors) return p;
+    return Patient.fromJson(p.toJson(), updatedAt: v);
+  }
+
+  /// Runs before each referencedAttachmentKeys scan (e.g. a write from
+  /// outside the provider's lock).
+  void Function()? beforeKeyScan;
+  int keyScans = 0;
+
+  @override
+  Future<Set<String>> referencedAttachmentKeys() {
+    keyScans++;
+    beforeKeyScan?.call();
+    return super.referencedAttachmentKeys();
+  }
+
   /// updatePatient throws UnsyncedCounterException (save refused).
   bool refuseUpdates = false;
 
@@ -312,6 +413,12 @@ class MergeDb extends FakeLocalDatabase {
   Future<List<Patient>> dirtyPatients() async {
     if (failDirtyRead) throw StateError('secret SQL with key x\'00\'');
     return super.dirtyPatients();
+  }
+
+  @override
+  Future<List<Patient>> dirtyPatientsStrict() async {
+    if (failDirtyRead) throw const DbReadException(DbReadFailure.readFailed);
+    return [for (final p in await super.dirtyPatientsStrict()) _stamped(p)];
   }
 
   @override
