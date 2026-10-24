@@ -11,12 +11,9 @@ import 'qa_sweep_ffi_test.dart' show RecOpener;
 import 'sqlcipher_ffi_test.dart' show MemKeys;
 
 const uidA = 'doctorA';
-// Failing-first (security L-2 on 3227338): QA_FAILING_FIRST=true in the env.
+// QA_FAILING_FIRST=true in the env (no failing-first cases left after #10 2414a7a).
+// ignore: unused_element
 final bool _ff = Platform.environment['QA_FAILING_FIRST'] == 'true';
-Object? get _ffL2 => _ff
-    ? null
-    : 'failing-first (L-2 removed photo comes back): set QA_FAILING_FIRST=true until '
-        '#10 drops a mapping on a local save without its key or Storage path';
 const uidB = 'doctorB';
 const android = '/data/user/0/com.docease.app/files';
 const androidAlias = '/data/data/com.docease.app/files';
@@ -414,7 +411,9 @@ void main() {
       final k = await db.referencedAttachmentKeys();
       expect(k, isNot(contains('attachments/$u1.jpg')));
       expect(k, contains('attachments/$u2.jpg'));
-      expect(await swaps(), hasLength(1));
+      // b217f46 / 2414a7a: the save no longer holds u1's key or S, so its
+      // mapping is dropped in the same transaction (was 1 on 3227338).
+      expect(await swaps(), isEmpty);
     });
 
     test('SWQ-QA-09 cleared with the patient delete (tombstone)', () async {
@@ -496,13 +495,13 @@ void main() {
       final pushed = (await db.dirtyPatientsStrict()).single;
       expect([for (final v in pushed.history) ...v.attachmentPaths], isNot(contains(storage(u1))),
           reason: 'the revived Storage reference would sync');
-    }, skip: _ffL2);
+    }); // normal since #10 2414a7a (was failing-first L-2)
 
     test('RM-02 the removal save drops the mapping in the same transaction', () async {
       expect(await swapA(), isTrue);
       await db.updatePatient(removed());
       expect(await swaps(), isEmpty);
-    }, skip: _ffL2);
+    }); // normal since #10 2414a7a (was failing-first L-2)
 
     test('RM-03 same through a local insertPatient of the pre-upload copy', () async {
       final preUpload = patient(name: 'Pre-upload');
@@ -510,7 +509,7 @@ void main() {
       await db.insertPatient(removed());
       await db.insertPatient(preUpload);
       expect(flat(await pathsOf('p1')), isNot(contains(storage(u1))));
-    }, skip: _ffL2);
+    }); // normal since #10 2414a7a (was failing-first L-2)
 
     test('RM-04 guard: a save that still holds S keeps the mapping (stale L later rewritten)',
         () async {
@@ -559,6 +558,88 @@ void main() {
           history: [visit('v1', [oldStorage])]);
       expect(await db.applyCloudPatient(cloud), isTrue);
       expect(await swaps(), hasLength(1));
+    });
+  });
+
+  group('b217f46 swappedPathsFor (real SQLCipher)', () {
+    Future<Map<String, String>> spf({String owner = uidA, String pid = 'p1'}) =>
+        db.swappedPathsFor(expectedOwner: owner, patientId: pid);
+    Matcher readErr(DbReadFailure r) =>
+        throwsA(isA<DbReadException>().having((e) => e.reason, 'reason', r));
+    Future<void> rawMap(String pid, String key, String to) =>
+        opener.last!.insert('attachment_swaps', {
+          'patient_id': pid,
+          'local_key': key,
+          'storage_path': to,
+          'swapped_at': DateTime.now().millisecondsSinceEpoch,
+        });
+
+    test('SPF-01 none recorded: empty map', () async {
+      expect(await spf(), isEmpty);
+    });
+
+    test('SPF-02 after a swap: attachments/<file> -> Storage path, read only', () async {
+      expect(await swapA(), isTrue);
+      final before = await snapshot();
+      expect(await spf(), {'attachments/$u1.jpg': storage(u1)});
+      expect(await snapshot(), before, reason: 'read only');
+    });
+
+    test('SPF-03 only that patient: p2 mappings are not returned for p1', () async {
+      await db.insertPatient(patient(id: 'p2', history: [visit('v1', [localA(u2)])]));
+      expect(await swapA(pid: 'p2', local: localA(u2), to: storage(u2, pid: 'p2')), isTrue);
+      expect(await spf(), isEmpty);
+      expect(await spf(pid: 'p2'), {'attachments/$u2.jpg': storage(u2, pid: 'p2')});
+    });
+
+    test('SPF-04 wrong owner: notOpen, nothing returned or written', () async {
+      expect(await swapA(), isTrue);
+      final before = await snapshot();
+      await expectLater(spf(owner: uidB), readErr(DbReadFailure.notOpen));
+      expect(await snapshot(), before);
+    });
+
+    test('SPF-05 closed DB: notOpen', () async {
+      await db.close();
+      await expectLater(spf(), readErr(DbReadFailure.notOpen));
+    });
+
+    test('SPF-06 tampered mappings excluded: another patient, another doctor, bad keys', () async {
+      expect(await swapA(), isTrue);
+      await rawMap('p1', 'attachments/$u2.jpg', storage(u2, pid: 'p2')); // other patient
+      await rawMap('p1', 'attachments/1d9b8e4a-6f3c-4e5d-9a01-4c3d5e6f7a81.jpg',
+          storage('1d9b8e4a-6f3c-4e5d-9a01-4c3d5e6f7a81', uid: uidB)); // other doctor
+      await rawMap('p1', 'profile/$u2.jpg', storage(u2)); // profile/ key
+      await rawMap('p1', '../attachments/$u2.jpg', storage(u2)); // traversal key
+      await rawMap('p1', 'attachments/2e0c9f5b-7a4d-4f6e-8b12-5d4e6f7a8b92.jpg',
+          'https://firebasestorage.googleapis.com/x.jpg'); // tokenized URL
+      final got = await spf();
+      // ignore: avoid_print
+      print('SPF-06 observed: $got');
+      expect(got, {'attachments/$u1.jpg': storage(u1)});
+    });
+
+    test('SPF-07 failed read: readFailed, nothing written', () async {
+      expect(await swapA(), isTrue);
+      await opener.last!.execute('ALTER TABLE attachment_swaps RENAME TO attachment_swaps_x');
+      final before = await snapshot();
+      await expectLater(spf(), readErr(DbReadFailure.readFailed));
+      expect(await snapshot(), before);
+      await opener.last!.execute('ALTER TABLE attachment_swaps_x RENAME TO attachment_swaps');
+      expect(await spf(), hasLength(1), reason: 'recovers once readable');
+    });
+
+    test('SPF-08 empty owner or patient: ArgumentError naming the parameter', () async {
+      await expectLater(spf(owner: ''),
+          throwsA(isA<ArgumentError>().having((e) => e.name, 'name', 'expectedOwner')));
+      await expectLater(spf(pid: ''),
+          throwsA(isA<ArgumentError>().having((e) => e.name, 'name', 'patientId')));
+    });
+
+    test('SPF-09 removal save drops it: spf empty after the photo is removed', () async {
+      expect(await swapA(), isTrue);
+      await db.updatePatient(patient(history: [visit('v1', [localA(u2)])]));
+      expect(await spf(), isEmpty);
     });
   });
 
