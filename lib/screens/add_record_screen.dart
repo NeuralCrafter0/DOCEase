@@ -144,13 +144,13 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   }
 
   Widget _buildDatePicker() {
-    return GestureDetector(
+    return Semantics(button: true, label: 'Visit date', child: GestureDetector(
       onTap: () async {
         final d = await showDatePicker(context: context, initialDate: _selectedDate, firstDate: DateTime(2000), lastDate: DateTime.now());
         if (d != null) setState(() => _selectedDate = d);
       },
       child: Container(padding: const EdgeInsets.all(18), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), border: Border.all(color: const Color(0xFFE2E8F0))), child: Row(children: [const Icon(Icons.calendar_month_outlined, color: Color(0xFF6366F1), size: 20), const SizedBox(width: 12), Text(DateFormat('EEEE, dd MMM yyyy').format(_selectedDate), style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16, color: Color(0xFF1E293B)))]))
-    );
+    ));
   }
 
   Widget _buildSmartPrescriptionField(MedicineProvider medProvider) {

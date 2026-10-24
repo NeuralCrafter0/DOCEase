@@ -98,6 +98,7 @@ class PatientDetailScreen extends StatelessWidget {
               IconButton(icon: const Icon(Icons.delete_outline, color: Colors.redAccent), onPressed: () => _showModernDeletePatientConfirm(context, provider, patient)),
               IconButton(
                 icon: const Icon(Icons.picture_as_pdf_outlined, color: Color(0xFF6366F1)), 
+                tooltip: 'Export PDF',
                 // Passed the Doctor object to the PDF generator here:
                 onPressed: () => PdfExport.generateAndPrintPatientReport(patient, doctor: doctor),
               ),
@@ -126,10 +127,10 @@ class PatientDetailScreen extends StatelessWidget {
   }
 
   Widget _buildFamilyChip(BuildContext context, Patient familyMember) {
-    return GestureDetector(
+    return Semantics(button: true, child: GestureDetector(
       onTap: () => Navigator.pushReplacement(context, MaterialPageRoute(builder: (c) => PatientDetailScreen(patientId: familyMember.id))),
       child: Container(margin: const EdgeInsets.only(right: 12), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), decoration: BoxDecoration(color: const Color(0xFFECFDF5), borderRadius: BorderRadius.circular(30), border: Border.all(color: const Color(0xFF10B981).withValues(alpha: 0.2))), child: Row(children: [Text(familyMember.name, style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF065F46), fontSize: 13)), const SizedBox(width: 6), Text('(${familyMember.relation})', style: const TextStyle(color: Color(0xFF10B981), fontSize: 11))])),
-    );
+    ));
   }
 
   Widget _buildProfessionalInfoCard(Patient patient, VisitRecord? lastVisit) {
@@ -144,7 +145,7 @@ class PatientDetailScreen extends StatelessWidget {
     return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Column(children: [Container(width: 10, height: 10, decoration: BoxDecoration(color: isLatest ? const Color(0xFF6366F1) : const Color(0xFFE2E8F0), shape: BoxShape.circle)), Container(width: 2, height: (record.bp != null && record.bp!.isNotEmpty) ? 160 : 120, color: const Color(0xFFF1F5F9))]),
       const SizedBox(width: 16),
-      Expanded(child: GestureDetector(
+      Expanded(child: Semantics(button: true, child: GestureDetector(
         onTap: () => _showRecordDetails(context, doctor, patient, record, provider),
         child: Container(
           padding: const EdgeInsets.all(16), margin: const EdgeInsets.only(bottom: 16),
@@ -167,7 +168,7 @@ class PatientDetailScreen extends StatelessWidget {
             ],
           ),
         ),
-      )),
+      ))),
     ]);
   }
 
@@ -182,9 +183,9 @@ class PatientDetailScreen extends StatelessWidget {
         Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
           Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text("${DateFormat('EEEE, MMM dd, yyyy').format(record.date)} • ${record.visitType}", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Color(0xFF6366F1))), Text(record.diagnosis, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 24, color: Color(0xFF1E293B)))])),
           Row(children: [
-            IconButton(onPressed: () { Navigator.pop(ctx); Navigator.push(context, MaterialPageRoute(builder: (c) => AddRecordScreen(patientId: patient.id, existingRecord: record))); }, icon: const Icon(Icons.edit_outlined, color: Color(0xFF6366F1))),
-            IconButton(onPressed: () => _showModernDeleteRecordConfirm(context, provider, patient.id, record.id), icon: const Icon(Icons.delete_outline, color: Colors.redAccent)),
-            IconButton(onPressed: () => _shareVisitSummary(context, doctor, patient, record), icon: const Icon(Icons.share_outlined, color: Color(0xFF6366F1))),
+            IconButton(onPressed: () { Navigator.pop(ctx); Navigator.push(context, MaterialPageRoute(builder: (c) => AddRecordScreen(patientId: patient.id, existingRecord: record))); }, icon: const Icon(Icons.edit_outlined, color: Color(0xFF6366F1)), tooltip: 'Edit visit'),
+            IconButton(onPressed: () => _showModernDeleteRecordConfirm(context, provider, patient.id, record.id), icon: const Icon(Icons.delete_outline, color: Colors.redAccent), tooltip: 'Delete visit'),
+            IconButton(onPressed: () => _shareVisitSummary(context, doctor, patient, record), icon: const Icon(Icons.share_outlined, color: Color(0xFF6366F1)), tooltip: 'Share visit'),
           ]),
         ]),
         const Divider(height: 40),
