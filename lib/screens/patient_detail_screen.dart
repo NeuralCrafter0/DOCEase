@@ -1,4 +1,3 @@
-import 'dart:io';
 import '../widgets/attachment_image.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';

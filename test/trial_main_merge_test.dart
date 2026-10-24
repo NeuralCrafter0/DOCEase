@@ -15,7 +15,6 @@ import 'package:docease/providers/local_database.dart';
 import 'package:docease/security/app_lock.dart';
 import 'package:docease/services/local_photo_store.dart';
 import 'package:docease/services/session_controller.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:provider/provider.dart';
