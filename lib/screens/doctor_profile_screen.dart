@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:intl_phone_field/intl_phone_field.dart';
 import 'package:intl_phone_field/country_picker_dialog.dart';
 import 'package:intl_phone_field/countries.dart';
@@ -12,12 +14,17 @@ import '../widgets/field_label.dart';
 import '../widgets/primary_button.dart';
 import '../widgets/segmented_selector.dart';
 import '../utils/input_rules.dart';
+import '../utils/attachment_processor.dart';
 import 'package:flutter/services.dart';
 import '../models/doctor.dart';
 import '../providers/doctor_provider.dart';
 
 class DoctorProfileScreen extends StatefulWidget {
-  const DoctorProfileScreen({super.key});
+  const DoctorProfileScreen({super.key, this.photoProcessor});
+
+  /// Re-encodes the picked profile photo. Tests pass their own; the app
+  /// uses [AttachmentProcessor] into a private temp folder.
+  final AttachmentProcessor? photoProcessor;
 
   @override
   State<DoctorProfileScreen> createState() => _DoctorProfileScreenState();
@@ -42,9 +49,35 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
   String _completePhoneNumber = '';
   String _initialCountryCode = 'IN';
 
+  /// The picked photo is decoded and re-encoded to a plain JPEG here (#8's
+  /// processor), so GPS, camera model and capture time never reach the
+  /// upload, and the picker's own copy is deleted. The new file is only
+  /// kept until it is replaced or this screen closes.
+  late final AttachmentProcessor _photoProcessor =
+      widget.photoProcessor ?? AttachmentProcessor(outputDirectory: _profilePhotoDir, maxEdge: 1024);
+
+  static Future<Directory> _profilePhotoDir() async =>
+      Directory(p.join((await getTemporaryDirectory()).path, 'profile_photo'));
+
+  static Future<void> _deleteQuietly(String path) async {
+    try {
+      final f = File(path);
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
+  }
+
+  /// Photos left behind if the app was closed while this screen was open.
+  static Future<void> _sweepProfilePhotos() async {
+    try {
+      final dir = await _profilePhotoDir();
+      if (await dir.exists()) await dir.delete(recursive: true);
+    } catch (_) {}
+  }
+
   @override
   void initState() {
     super.initState();
+    if (widget.photoProcessor == null) _sweepProfilePhotos();
     final doc = Provider.of<DoctorProvider>(context, listen: false).currentDoctor;
     _nameController = TextEditingController(text: doc?.name ?? '');
     _emailController = TextEditingController(text: doc?.email ?? FirebaseAuth.instance.currentUser?.email ?? '');
@@ -72,14 +105,45 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
     _mobileController = TextEditingController(text: initialNumber);
   }
 
+  @override
+  void dispose() {
+    // The re-encoded photo was uploaded on save (or never used): drop it.
+    final local = _localImage;
+    if (local != null) _deleteQuietly(local.path);
+    super.dispose();
+  }
+
   /// Asks whether to take a photo or pick one from the gallery, then picks.
   /// [preferred] is listed first (the camera button passes the camera).
   Future<void> _pickImage(ImageSource preferred) async {
-    if (!_isEditing) return;
+    if (!_isEditing || _isLoading) return;
     final source = await _chooseImageSource(preferred);
     if (source == null || !mounted) return;
-    final picked = await ImagePicker().pickImage(source: source, imageQuality: 50);
-    if (picked != null) setState(() => _localImage = File(picked.path));
+    // No imageQuality: the plugin's own re-compression copies EXIF (GPS,
+    // camera, time) into another temp file. The processor scales instead.
+    final picked = await ImagePicker().pickImage(source: source);
+    if (picked == null) return;
+    if (mounted) setState(() => _isLoading = true);
+    String? path;
+    String? error;
+    try {
+      path = await _photoProcessor.toJpegFile(picked);
+    } on AttachmentException catch (e) {
+      error = e.message;
+    } catch (_) {
+      error = const AttachmentException(AttachmentError.unreadable).message;
+    }
+    if (!mounted) {
+      if (path != null) await _deleteQuietly(path);
+      return;
+    }
+    final previous = _localImage;
+    setState(() {
+      _isLoading = false;
+      if (path != null) _localImage = File(path);
+    });
+    if (path != null && previous != null) await _deleteQuietly(previous.path);
+    if (error != null && mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
   }
 
   Future<ImageSource?> _chooseImageSource(ImageSource preferred) {
