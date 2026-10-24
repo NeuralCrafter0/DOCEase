@@ -416,6 +416,32 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
 
   Widget _buildThumbnail(String path) {
     final isNetwork = path.startsWith('http');
-    return Padding(padding: const EdgeInsets.only(right: 12), child: Stack(children: [ClipRRect(borderRadius: BorderRadius.circular(16), child: isNetwork ? Image.network(path, width: 100, height: 120, fit: BoxFit.cover) : Image.file(File(path), width: 100, height: 120, fit: BoxFit.cover)), Positioned(right: 4, top: 4, child: GestureDetector(onTap: () => _removeAttachment(path), child: const CircleAvatar(radius: 12, backgroundColor: Colors.redAccent, child: Icon(Icons.close, size: 14, color: Colors.white))))]));
+    return Padding(padding: const EdgeInsets.only(right: 12), child: Stack(children: [ClipRRect(borderRadius: BorderRadius.circular(16), child: isNetwork ? Image.network(path, key: ValueKey(path), width: 100, height: 120, fit: BoxFit.cover, errorBuilder: _photoUnavailableTile) : Image.file(File(path), key: ValueKey(path), width: 100, height: 120, fit: BoxFit.cover, errorBuilder: _photoUnavailableTile)), Positioned(right: 4, top: 4, child: GestureDetector(onTap: () => _removeAttachment(path), child: const CircleAvatar(radius: 12, backgroundColor: Colors.redAccent, child: Icon(Icons.close, size: 14, color: Colors.white))))]));
+  }
+
+  /// Shown when a thumbnail cannot be drawn, for example when the visit's
+  /// upload finished while this form was open and the local copy is gone
+  /// (QA STALE-05). Neutral on purpose: never the path or the raw error.
+  /// The remove (x) button stays on top of it in [_buildThumbnail]'s Stack.
+  /// The images are keyed by path so a removed tile's error state is never
+  /// reused for the next photo (the key sits under a single-child parent,
+  /// so a record listing a path twice cannot hit a duplicate-key error).
+  static Widget _photoUnavailableTile(BuildContext context, Object error, StackTrace? stackTrace) {
+    return Semantics(
+      label: 'Photo saved',
+      excludeSemantics: true,
+      child: Container(
+        key: const ValueKey('photo-unavailable-tile'),
+        width: 100,
+        height: 120,
+        color: const Color(0xFFF1F5F9),
+        alignment: Alignment.center,
+        child: const Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.photo_outlined, color: Color(0xFF64748B), size: 28),
+          SizedBox(height: 6),
+          Text('Photo saved', style: TextStyle(color: Color(0xFF64748B), fontSize: 12, fontWeight: FontWeight.w600)),
+        ]),
+      ),
+    );
   }
 }
