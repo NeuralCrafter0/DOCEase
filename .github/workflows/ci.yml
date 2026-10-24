@@ -1,7 +1,8 @@
 name: CI
 
 # Pipeline: gitleaks secret scan, flutter analyze, flutter test, Android build,
-# Firebase rules emulator tests (only when firebase/ exists)
+# Firebase rules emulator tests (only when firebase/ exists), real-SQLCipher DB
+# tests (only when tool/sqlcipher_harness/run.sh exists)
 # (release-mode, obfuscated APK; DEV build with DOCEASE_DEV_MODE=true on PRs and
 # branches; release-signed only on main/v* with secrets and DOCEASE_DEV_MODE=false).
 # Android only for now. Flutter is pinned to the version in .metadata.
@@ -86,9 +87,19 @@ jobs:
         run: flutter analyze --no-fatal-infos --no-fatal-warnings
 
   test:
-    name: flutter test
+    # The suite runs twice: plain (DOCEASE_DEV_MODE unset, i.e. dev mode off) and
+    # with --dart-define=DOCEASE_DEV_MODE=true. Both entries always run.
+    name: flutter test (${{ matrix.mode }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: dev mode off
+            dev_mode: "false"
+          - mode: DEV mode on
+            dev_mode: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -104,8 +115,16 @@ jobs:
       - name: flutter pub get (lockfile enforced)
         run: flutter pub get --enforce-lockfile
 
-      - name: flutter test
-        run: flutter test --no-pub
+      - name: flutter test (${{ matrix.mode }})
+        env:
+          DEV_MODE: ${{ matrix.dev_mode }}
+        run: |
+          set -euo pipefail
+          define=()
+          if [ "$DEV_MODE" = "true" ]; then define=(--dart-define=DOCEASE_DEV_MODE=true); fi
+          # Confirmed by the backend engineer: `flutter test` and `flutter test --dart-define=DOCEASE_DEV_MODE=true`;
+          # tests that need one mode skip themselves in the other. widget_test.dart is not excluded (QA PR #9 removes it).
+          flutter test --no-pub "${define[@]}"
 
   android-build:
     name: Android build (DEV profile APK / production release APK)
@@ -393,6 +412,27 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Scan release build for dev-mode markers (QA REL-07)
+        # Production (DOCEASE_DEV_MODE=false) builds only: the dev banner text must
+        # not be compiled into libapp.so of the release APK, or of the AAB when one
+        # is built. DEV profile builds contain it on purpose and skip this step.
+        if: steps.mode.outputs.dev_mode == 'false'
+        env:
+          SIGNED: ${{ steps.mode.outputs.signed }}
+          APK: ${{ steps.mode.outputs.apk }}
+          AAB: ${{ steps.mode.outputs.aab }}
+        run: |
+          set -euo pipefail
+          files=("$APK")
+          if [ "$SIGNED" = "true" ]; then files+=("$AAB"); fi
+          status=0
+          bash tool/ci/check_release_markers.sh "${files[@]}" || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "- Dev-marker scan (REL-07): clean, \"DEV MODE: test data only\" not in libapp.so (${#files[@]} file(s))" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Dev-marker scan (REL-07): **FAILED** (exit $status). Release build contains dev-mode code; nothing was uploaded" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
       - name: Upload APK
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -515,3 +555,61 @@ jobs:
         run: |
           npx --no-install firebase emulators:exec --only firestore,storage \
             --project "$FIREBASE_PROJECT_ID" "npm run test:run"
+
+  sqlcipher-db:
+    name: Real SQLCipher DB tests
+    # Runs the DB engineer's host harness (tool/sqlcipher_harness/run.sh): the
+    # DatabaseHelper suite against the system libsqlcipher through FFI. No
+    # Android SDK, Gradle or secrets. The harness adds its FFI packages to a temp
+    # copy only and fails if the real pubspec.yaml/pubspec.lock change.
+    # Skips (job passes) when the harness is not on this ref (main today).
+    runs-on: ubuntu-24.04 # pinned: the SQLCipher package below is the noble release
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      SQLCIPHER_APT_VERSION: "4.5.6-1build2" # Ubuntu 24.04 release pocket
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Detect SQLCipher harness
+        id: detect
+        env:
+          HARNESS_HASH: ${{ hashFiles('tool/sqlcipher_harness/run.sh') }}
+        run: |
+          if [ -n "$HARNESS_HASH" ] && [ -f tool/sqlcipher_harness/run.sh ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "## Real SQLCipher DB tests: skipped (no tool/sqlcipher_harness/run.sh on this ref)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Install libsqlcipher-dev ${{ env.SQLCIPHER_APT_VERSION }}
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            "libsqlcipher-dev=$SQLCIPHER_APT_VERSION" "libsqlcipher1=$SQLCIPHER_APT_VERSION"
+          dpkg-query -W libsqlcipher-dev libsqlcipher1
+      - name: Set up Flutter ${{ env.FLUTTER_VERSION }}
+        if: steps.detect.outputs.present == 'true'
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: Run the real-SQLCipher harness
+        if: steps.detect.outputs.present == 'true'
+        env:
+          FLUTTER_SUPPRESS_ANALYTICS: "true"
+        run: |
+          set -euo pipefail
+          status=0
+          bash tool/sqlcipher_harness/run.sh || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "## Real SQLCipher DB tests: passed (libsqlcipher $SQLCIPHER_APT_VERSION)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## Real SQLCipher DB tests: FAILED (harness exit $status)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
