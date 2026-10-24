@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 import '../models/patient.dart';
 import 'database_helper.dart';
 import 'firestore_helper.dart';
+import '../utils/patient_search.dart';
 
 class PatientProvider with ChangeNotifier {
   List<Patient> _patients = [];
@@ -21,12 +22,15 @@ class PatientProvider with ChangeNotifier {
     
     return _patients.where((p) {
       final nameMatch = p.name.toLowerCase().contains(cleanQuery);
-      final phoneMatch = p.phone.contains(cleanQuery);
+      final phoneMatch = phoneMatchesQuery(p.phone, cleanQuery);
       return nameMatch || phoneMatch;
     }).toList();
   }
 
   bool get isSyncing => _isSyncing;
+  /// Every patient on this phone, ignoring the home-screen search. Use this
+  /// for whole-practice views (Insights) and lookups by id.
+  List<Patient> get allPatients => [..._patients];
 
   bool isPhoneRegistered(String phone) => _patients.any((p) => p.phone.trim() == phone.trim());
 

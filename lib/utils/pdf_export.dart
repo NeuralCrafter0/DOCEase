@@ -4,6 +4,7 @@ import 'package:printing/printing.dart';
 import 'package:intl/intl.dart';
 import '../models/patient.dart';
 import '../models/doctor.dart';
+import 'vitals_display.dart';
 
 class PdfExport {
   static Future<void> generateAndPrintPatientReport(Patient patient, {Doctor? doctor}) async {
@@ -113,11 +114,8 @@ class PdfExport {
             pw.SizedBox(height: 12),
             pw.Text('Vitals:', style: pw.TextStyle(fontSize: 10, color: PdfColors.grey600, fontWeight: pw.FontWeight.bold)),
             pw.SizedBox(height: 4),
-            pw.Row(children: [
-              if (record.bp != null && record.bp!.isNotEmpty) _buildVitalPdfChip('BP', record.bp!),
-              if (record.temp != null && record.temp!.isNotEmpty) _buildVitalPdfChip('Temp', record.temp!),
-              if (record.pulse != null && record.pulse!.isNotEmpty) _buildVitalPdfChip('Pulse', record.pulse!),
-              if (record.weight != null && record.weight!.isNotEmpty) _buildVitalPdfChip('Weight', record.weight!),
+            pw.Wrap(runSpacing: 4, children: [
+              for (final v in filledVitals(record)) _buildVitalPdfChip(v.label, v.value),
             ]),
           ],
           pw.SizedBox(height: 12),
@@ -131,6 +129,6 @@ class PdfExport {
     );
   }
 
-  static bool _hasVitals(VisitRecord record) => (record.bp != null && record.bp!.isNotEmpty) || (record.temp != null && record.temp!.isNotEmpty) || (record.pulse != null && record.pulse!.isNotEmpty) || (record.weight != null && record.weight!.isNotEmpty);
+  static bool _hasVitals(VisitRecord record) => filledVitals(record).isNotEmpty;
   static pw.Widget _buildVitalPdfChip(String label, String val) => pw.Container(margin: const pw.EdgeInsets.only(right: 8), padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 2), decoration: pw.BoxDecoration(border: pw.Border.all(color: PdfColors.grey400), borderRadius: const pw.BorderRadius.all(pw.Radius.circular(4))), child: pw.Text('$label: $val', style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey700)));
 }
