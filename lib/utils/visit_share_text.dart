@@ -13,6 +13,13 @@ extension ShareFieldLabel on ShareField {
         ShareField.diagnosis => 'Diagnosis',
         ShareField.prescription => 'Prescription',
       };
+
+  /// What the box sends, shown under its label so the doctor sees exactly
+  /// what goes out (security review #7). Null when the label says it all.
+  String? get detail => switch (this) {
+        ShareField.vitals => 'BP, temperature, pulse, weight, blood sugar',
+        _ => null,
+      };
 }
 
 class VisitShareText {
