@@ -11,9 +11,11 @@ enum PatientSaveOperation { add, update }
 /// longer shown, and a refused update shows the previous version again.
 /// Nothing was synced.
 ///
-/// Screens catch this one type ("Could not save" and stay on the form) and
-/// never need to know the reason. [error] is the original error for code
-/// that does need to tell them apart.
+/// Screens catch this one type, show an error message (for example a
+/// SnackBar saying "Could not save"), close the form and keep no partial
+/// data (QA F-PAT-05/06, frontend #5); they never need to know the
+/// reason. [error] is the original error for code that does need to tell
+/// them apart.
 ///
 /// Compatible with code written against the original errors: a refusal
 /// caused by `UnsyncedCounterException` (secure storage failing) or
