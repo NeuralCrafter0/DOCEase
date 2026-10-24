@@ -31,6 +31,15 @@ class LocalPatientProvider with ChangeNotifier implements PatientProvider {
   @override
   bool get isSyncing => false;
 
+  /// The strict-read contract from #16 (loadFailed / reload()), which the
+  /// screens call directly once #20 is in. These fakes always load fine.
+  /// No @override, so this also compiles on main, which lacks them.
+  // ignore: annotate_overrides
+  bool get loadFailed => false;
+
+  // ignore: annotate_overrides
+  Future<void> reload() async {}
+
   @override
   Future<void> addRecord(String patientId, VisitRecord record) async {
     added.add((patientId, record));
