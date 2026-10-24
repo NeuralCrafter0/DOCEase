@@ -85,7 +85,12 @@ void main() {
   }
 
   /// Where PR #8's AttachmentStorage writes a pick: <support>/attachments/<ownerHash>/.
-  String pick(String name, {String owner = doctorA}) => photoIn(photos.visitFolderFor(owner)!, n(name));
+  /// Registered as #8 will after its copy (security #16 L-1).
+  String pick(String name, {String owner = doctorA, String patientId = 'p1'}) {
+    final path = photoIn(photos.visitFolderFor(owner)!, n(name));
+    provider.registerPickedAttachment(patientId: patientId, localPath: path);
+    return path;
+  }
 
   List<String> rowPaths(String id) => db.rows[id]!.history.expand((r) => r.attachmentPaths).toList();
 
@@ -449,7 +454,12 @@ void main() {
     test('the refresh after a swap fails: the local copy is kept and the push is retried', () async {
       await load();
       final a = pick('a.jpg');
-      db.fetchStrictThrows = const DbReadException(DbReadFailure.readFailed);
+      // Fails only the strict read after the swap (the save's own strict
+      // read, security #16 M-1, still succeeds).
+      db.beforeSwap = (_, _) {
+        db.beforeSwap = null;
+        db.fetchStrictThrows = const DbReadException(DbReadFailure.readFailed);
+      };
       final scansBefore = db.keyScans;
       final logs = <String>[];
       await captureLogs(logs, () async {
@@ -494,17 +504,21 @@ void main() {
     final loose = photoIn(p.join(photos.supportPath!, 'attachments'), n('loose.jpg'));
     final target = photoIn(p.join(root.path, 'elsewhere'), 'target.jpg');
     final link = Link(p.join(photos.visitFolderFor(doctorA)!, n('link.jpg')))..createSync(target, recursive: true);
+    provider.registerPickedAttachment(patientId: 'p1', localPath: link.path);
 
     await provider.addRecord('p1', visit('v1', [outside, theirs, loose, link.path]));
     await settle();
 
     // #10's swap only takes photos in the owner's attachments/ folder, so
     // the others are not uploaded at all (no unreferenced Storage object).
+    // Another owner's photo is never accepted into this owner's visit
+    // (security #16 L-1): it is left out, and left on disk.
     expect(storage.uploads.length, 1);
     expect(db.swapCalls, 1);
     final stored = rowPaths('p1');
-    expect(stored.sublist(0, 3), [outside, theirs, loose]);
-    expect(stored[3], startsWith('clinical_attachments/$doctorA/p1/'));
+    expect(stored, hasLength(3));
+    expect(stored.sublist(0, 2), [outside, loose]);
+    expect(stored[2], startsWith('clinical_attachments/$doctorA/p1/'));
     expect(provider.findById('p1').history.single.attachmentPaths, stored);
     expect(File(outside).existsSync(), isTrue);
     expect(File(theirs).existsSync(), isTrue);
@@ -519,6 +533,10 @@ void main() {
     db.rows['p2'] = testPatient('p2').copyWithHistoryForTest([visit('v9', [a])]);
     await load();
     expect(provider.findById('p2').history.single.attachmentPaths, [a]);
+    // Picked before any session was loaded: not registered (L-1). Register
+    // it again now, as the picker would in this session.
+    expect(provider.isRegisteredPickForTesting('p1', a), isFalse);
+    provider.registerPickedAttachment(patientId: 'p1', localPath: a);
 
     await provider.addRecord('p1', visit('v1', [a]));
     await settle();

@@ -74,10 +74,13 @@ void main() {
   late FakeStorage storage;
   late PatientProvider provider;
 
-  String pick(String name) {
+  /// A pick as #8 makes it, registered after its copy (security #16 L-1).
+  String pick(String name, {String patientId = 'p1'}) {
     final dir = photos.visitFolderFor(doctorA)!;
     Directory(dir).createSync(recursive: true);
-    return (File(p.join(dir, n(name)))..writeAsBytesSync(List.filled(64, 7))).path;
+    final path = (File(p.join(dir, n(name)))..writeAsBytesSync(List.filled(64, 7))).path;
+    provider.registerPickedAttachment(patientId: patientId, localPath: path);
+    return path;
   }
 
   String keyOf(String local) => AttachmentRefs.attachmentKey(local,
@@ -185,6 +188,8 @@ void main() {
       final a = pick('a.jpg');
       final form = await uploadedWhileFormOpen([a]);
       final ghost = p.join(photos.visitFolderFor(doctorA)!, n('ghost.jpg')); // never existed
+      // Picked this session (so not dropped by L-1), but its file is gone.
+      provider.registerPickedAttachment(patientId: 'p1', localPath: ghost);
       final before = storedV1().attachmentPaths;
       final writes = db.rowWrites;
 
@@ -307,17 +312,21 @@ void main() {
       final saveB = provider.updateRecord('p1', edited(staleForm, [a, b], dx: 'dx-B'));
       await drainMicrotasks(); // B gets every chance to move; A still holds the lock
       expect(db.rowWrites, 1 + 1, reason: 'B has not reached the DB: it waits for the lock');
+      final uploadsBefore = storage.uploads.length;
       releaseA.complete();
       await saveA;
       expect(db.swaps['p1']!.containsKey(keyOf(b)), isFalse, reason: '#10 2414a7a dropped b\'s mapping');
 
-      // B reads the stored row and swaps inside the lock, after A: Lb has
-      // no mapping and its file is gone, so B is refused (nothing written).
-      await expectLater(saveB, throwsA(isA<UnsupportedAttachmentException>()));
+      // B reads the stored row and swaps inside the lock, after A: La maps
+      // to Sa; Lb has no mapping, is not in the row and was not picked this
+      // session (its pick was consumed by the first save), so L-1 drops it
+      // silently. B's edit saves without b.
+      await saveB;
       await provider.backgroundIdleForTesting();
 
+      expect(storage.uploads.length, uploadsBefore, reason: 'b is not uploaded again');
       expect(storedV1().attachmentPaths, [sa]);
-      expect(storedV1().diagnosis, 'dx-A');
+      expect(storedV1().diagnosis, 'dx-B');
       expect(provider.findById('p1').history.single.attachmentPaths, [sa]);
       expect(storedV1().attachmentPaths, isNot(contains(sb)));
       expect(storedV1().attachmentPaths, isNot(contains(b)));
@@ -372,7 +381,10 @@ void main() {
       await saveA;
       await pull;
       await provider.backgroundIdleForTesting();
-      expect(db.applyLog, ['skip:p1'], reason: 'after A the row is dirty: the cloud copy is refused');
+      // The snapshot predates A's save: the provider keeps local (M-1 save
+      // sequence) before asking the DB, which would refuse it too (dirty).
+      expect(db.applyLog.where((e) => e == 'apply:p1'), isEmpty,
+          reason: 'after A the cloud copy is refused');
       expect(storedV1().diagnosis, 'dx-A');
     });
 

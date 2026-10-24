@@ -66,11 +66,14 @@ void main() {
   /// A pick as the app makes it (PR #8 / LocalPhotoStore):
   /// <support>/attachments/<ownerFolder>/<uuid>.<ext>. Only these are
   /// uploaded and swapped; anything else stays local (security #16).
-  Future<String> pick(String ext) async {
+  /// Registered as #8 will after its copy (security #16 L-1).
+  Future<String> pick(String ext, {String patientId = 'p1'}) async {
     await photos.init();
     final dir = Directory(photos.visitFolderFor('doctorA')!)..createSync(recursive: true);
     final id = (++picks).toRadixString(16).padLeft(12, '0');
-    return (File('${dir.path}/0000aaaa-bbbb-4ccc-addd-$id.$ext')..writeAsBytesSync(List.filled(32, 7))).path;
+    final path = (File('${dir.path}/0000aaaa-bbbb-4ccc-addd-$id.$ext')..writeAsBytesSync(List.filled(32, 7))).path;
+    provider.registerPickedAttachment(patientId: patientId, localPath: path);
+    return path;
   }
 
   String file(String name, {int bytes = 32}) {
@@ -406,7 +409,7 @@ void main() {
       await provider.loadAndSync('doctorA');
       provider.clear();
       await provider.loadAndSync('doctorA');
-      final added = await pick('webp');
+      final added = await pick('webp', patientId: 'p3');
       await provider.updateRecord(
           'p3', visit('v1', ['clinical_attachments/doctorA/p3/old.jpg', added]));
       await until(() => db.dirty['p3'] == false);
