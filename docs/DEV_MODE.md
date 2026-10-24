@@ -68,7 +68,25 @@ name the flavor (`--flavor prod` or `--flavor dev`).
   owner folder is the same hash the DB file name uses (`docease_<hash>.db`), so the uid is not on
   disk. Photo files are only ever deleted inside the folders of the owner that is asking
   (symlinks are refused): an unsaved copy when its save fails, and the previous doctor photo when
-  a new one is saved. Deleting a visit or patient does not delete its photos (PR #8 owns that).
+  a new one is saved, and the photos of a deleted patient or visit (below).
+- Photo cleanup (security's #8 review; `PatientProvider`, `services/photo_sweep.dart`), for dev
+  and real owners alike:
+  - After a local delete succeeds (`markPendingDelete` for a patient, the visit save for a
+    deleted visit or a photo removed while editing), the provider deletes the dropped photos. A
+    refused delete removes nothing. A photo another visit still uses is kept; a file that is
+    already gone is ignored, so a second delete is harmless.
+  - At startup (`StartupHooks`, both start modes) a sweep waits for the first open DB and deletes
+    files in that owner's `attachments/<owner folder>/` that no row references any more (e.g.
+    after a crash between the DB delete and the file delete). Rules: it skips everything unless
+    the full reference list is available (`referencedAttachmentKeys()`, which throws when no DB
+    is open, a row fails to parse or a local path can't be keyed); unsynced rows count as
+    referenced; only regular files directly in that folder, never symlinks, directories,
+    `profile/` or another owner's folder; files changed in the last 10 minutes are kept; logs
+    carry counts only.
+  - Both compare owner-relative keys (`attachments/<file>`), never raw paths, so
+    `/data/user/0/...` and `/data/data/...` name the same photo. Keys come from #10's
+    `attachmentKey` / `referencedAttachmentKeys()`; until #10 lands, `services/attachment_keys.dart`
+    has stand-ins with the same contract. Tests: `test/backend/photo_cleanup_test.dart`.
 - iOS: each owner photo folder is excluded from iCloud and computer backups when it is first used
   in a run, through #10's `PlatformBackupExcluder` (the existing `docease/backup_exclusion`
   channel in `ios/Runner/AppDelegate.swift`, which also covers the encrypted DB; no new native

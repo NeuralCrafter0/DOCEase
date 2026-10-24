@@ -146,6 +146,46 @@ class LocalPhotoStore {
     }
   }
 
+  /// The file in [owner]'s visit folder that [key] names, or null. Only
+  /// visit-photo keys (`attachments/<file>`, as returned by #10's
+  /// `attachmentKey`) map to a path; `profile/…` keys never do, so visit
+  /// cleanup can never reach the doctor's photo.
+  String? visitPathForKey(String owner, String key) {
+    final segs = key.split('/');
+    if (segs.length != 2 || segs.first != attachmentsFolder) return null;
+    final name = segs.last;
+    if (name.isEmpty || name == '.' || name == '..' || name.contains('\\')) return null;
+    final dir = visitFolderFor(owner);
+    return dir == null ? null : p.join(dir, name);
+  }
+
+  /// Strict delete for photo cleanup (security #8 review). Deletes [path]
+  /// only when all hold:
+  /// - it is lexically inside [owner]'s visit folder
+  ///   (`attachments/<ownerHash>/`, never `profile/`);
+  /// - it is a regular file, checked with `followLinks: false`, so
+  ///   symlinks and directories are never deleted or followed;
+  /// - its resolved path is still inside that folder (a symlinked
+  ///   `attachments/` or owner folder cannot redirect the delete).
+  /// A missing file returns false, so deleting twice is harmless. Never
+  /// throws.
+  Future<bool> deleteOwnedVisitFile(String path, {required String owner}) async {
+    try {
+      await init();
+      final dir = visitFolderFor(owner);
+      if (dir == null || !p.isAbsolute(path)) return false;
+      final n = p.normalize(path);
+      if (!p.isWithin(dir, n)) return false;
+      if (await FileSystemEntity.type(n, followLinks: false) != FileSystemEntityType.file) return false;
+      final real = p.normalize(await File(n).resolveSymbolicLinks());
+      if (!p.isWithin(dir, real)) return false;
+      await File(real).delete();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<bool> _realPathWithin(String path, String dir) async {
     try {
       return p.isWithin(dir, p.normalize(await File(path).resolveSymbolicLinks()));
