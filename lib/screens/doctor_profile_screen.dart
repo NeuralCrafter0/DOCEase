@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:intl_phone_field/intl_phone_field.dart';
 import 'package:intl_phone_field/country_picker_dialog.dart';
 import 'package:intl_phone_field/countries.dart';
@@ -11,12 +13,18 @@ import '../widgets/app_text_field.dart';
 import '../widgets/field_label.dart';
 import '../widgets/primary_button.dart';
 import '../widgets/segmented_selector.dart';
+import '../utils/input_rules.dart';
+import '../utils/attachment_processor.dart';
 import 'package:flutter/services.dart';
 import '../models/doctor.dart';
 import '../providers/doctor_provider.dart';
 
 class DoctorProfileScreen extends StatefulWidget {
-  const DoctorProfileScreen({super.key});
+  const DoctorProfileScreen({super.key, this.photoProcessor});
+
+  /// Re-encodes the picked profile photo. Tests pass their own; the app
+  /// uses [AttachmentProcessor] into a private temp folder.
+  final AttachmentProcessor? photoProcessor;
 
   @override
   State<DoctorProfileScreen> createState() => _DoctorProfileScreenState();
@@ -41,9 +49,55 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
   String _completePhoneNumber = '';
   String _initialCountryCode = 'IN';
 
+  /// The picked photo is decoded and re-encoded to a plain JPEG here (#8's
+  /// processor), so GPS, camera model and capture time never reach the
+  /// upload, and the picker's own copy is deleted. The new file is only
+  /// kept until it is replaced or this screen closes.
+  late final AttachmentProcessor _photoProcessor =
+      widget.photoProcessor ?? AttachmentProcessor(outputDirectory: _profilePhotoDir, maxEdge: 1024);
+
+  static Future<Directory> _profilePhotoDir() async =>
+      Directory(p.join((await getTemporaryDirectory()).path, 'profile_photo'));
+
+  /// Same wording as #8's visit-photo picker.
+  static String _pickerErrorMessage(String? code, ImageSource source) {
+    switch (code) {
+      case 'camera_access_denied':
+        return 'Camera access is off for DOCEase. Turn it on in Settings to take a profile photo.';
+      case 'photo_access_denied':
+        return 'Photo access is off for DOCEase. Turn it on in Settings to choose a profile photo.';
+      case 'no_available_camera':
+        return 'No camera is available on this device.';
+      default:
+        return source == ImageSource.camera
+            ? "Couldn't open the camera. Please try again."
+            : "Couldn't open your photos. Please try again.";
+    }
+  }
+
+  void _showPhotoMessage(String text) {
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  static Future<void> _deleteQuietly(String path) async {
+    try {
+      final f = File(path);
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
+  }
+
+  /// Photos left behind if the app was closed while this screen was open.
+  static Future<void> _sweepProfilePhotos() async {
+    try {
+      final dir = await _profilePhotoDir();
+      if (await dir.exists()) await dir.delete(recursive: true);
+    } catch (_) {}
+  }
+
   @override
   void initState() {
     super.initState();
+    if (widget.photoProcessor == null) _sweepProfilePhotos();
     final doc = Provider.of<DoctorProvider>(context, listen: false).currentDoctor;
     _nameController = TextEditingController(text: doc?.name ?? '');
     _emailController = TextEditingController(text: doc?.email ?? FirebaseAuth.instance.currentUser?.email ?? '');
@@ -71,10 +125,76 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
     _mobileController = TextEditingController(text: initialNumber);
   }
 
-  Future<void> _pickImage(ImageSource source) async {
-    if (!_isEditing) return;
-    final picked = await ImagePicker().pickImage(source: source, imageQuality: 50);
-    if (picked != null) setState(() => _localImage = File(picked.path));
+  @override
+  void dispose() {
+    // The re-encoded photo was uploaded on save (or never used): drop it.
+    final local = _localImage;
+    if (local != null) _deleteQuietly(local.path);
+    super.dispose();
+  }
+
+  /// Asks whether to take a photo or pick one from the gallery, then picks.
+  /// [preferred] is listed first (the camera button passes the camera).
+  Future<void> _pickImage(ImageSource preferred) async {
+    if (!_isEditing || _isLoading) return;
+    final source = await _chooseImageSource(preferred);
+    if (source == null || !mounted) return;
+    // No imageQuality: the plugin's own re-compression copies EXIF (GPS,
+    // camera, time) into another temp file. The processor scales instead.
+    final XFile? picked;
+    try {
+      picked = await ImagePicker().pickImage(source: source);
+    } on PlatformException catch (e) {
+      _showPhotoMessage(_pickerErrorMessage(e.code, source));
+      return;
+    } catch (_) {
+      _showPhotoMessage(_pickerErrorMessage(null, source)); // never the raw error
+      return;
+    }
+    if (picked == null) return;
+    if (mounted) setState(() => _isLoading = true);
+    String? path;
+    String? error;
+    try {
+      path = await _photoProcessor.toJpegFile(picked);
+    } on AttachmentException catch (e) {
+      error = e.message;
+    } catch (_) {
+      error = const AttachmentException(AttachmentError.unreadable).message;
+    }
+    if (!mounted) {
+      if (path != null) await _deleteQuietly(path);
+      return;
+    }
+    final previous = _localImage;
+    setState(() {
+      _isLoading = false;
+      if (path != null) _localImage = File(path);
+    });
+    if (path != null && previous != null) await _deleteQuietly(previous.path);
+    if (error != null) _showPhotoMessage(error);
+  }
+
+  Future<ImageSource?> _chooseImageSource(ImageSource preferred) {
+    final order = preferred == ImageSource.camera ? const [ImageSource.camera, ImageSource.gallery] : const [ImageSource.gallery, ImageSource.camera];
+    return showModalBottomSheet<ImageSource>(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(32))),
+      backgroundColor: Colors.white,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            for (final s in order)
+              ListTile(
+                leading: Icon(s == ImageSource.camera ? Icons.camera_alt_rounded : Icons.photo_library_rounded, color: AppColors.primary),
+                title: Text(s == ImageSource.camera ? 'Take photo' : 'Choose from gallery', style: const TextStyle(fontWeight: FontWeight.w700, color: AppColors.ink)),
+                onTap: () => Navigator.pop(ctx, s),
+              ),
+          ]),
+        ),
+      ),
+    );
   }
 
   Future<void> _saveProfile() async {
@@ -126,6 +246,10 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
               child: Stack(children: [
                 CircleAvatar(radius: 60, backgroundColor: const Color(0xFFEEF2FF), backgroundImage: _localImage != null ? FileImage(_localImage!) : (_profileImageUrl != null ? NetworkImage(_profileImageUrl!) : null) as ImageProvider?),
                 if (_isEditing) Positioned(bottom: 0, right: 0, child: GestureDetector(onTap: () => _pickImage(ImageSource.camera), child: Container(padding: const EdgeInsets.all(8), decoration: const BoxDecoration(color: Color(0xFF1E293B), shape: BoxShape.circle), child: const Icon(Icons.camera_alt, color: Colors.white, size: 20)))),
+                // No photo yet: a person icon instead of an empty circle. Kept as
+                // its own layer so the avatar line above stays as it is.
+                if (_localImage == null && _profileImageUrl == null)
+                  Positioned.fill(child: IgnorePointer(child: Semantics(label: 'No profile photo', child: Icon(Icons.person_rounded, size: 56, color: AppColors.primary.withValues(alpha: 0.35))))),
               ]),
             ),
             const SizedBox(height: 40),
@@ -136,9 +260,9 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
             _buildHighPerfSelector(['Solo Practice', 'Clinic Mode'], _selectedPracticeMode, (v) => setState(() => _selectedPracticeMode = v)),
             const SizedBox(height: 32),
             _buildLabel('Professional Details'),
-            _buildModernInput(_nameController, 'Full Name', Icons.person_outline),
+            _buildModernInput(_nameController, 'Full Name', Icons.person_outline, inputFormatters: InputRules.personName),
             const SizedBox(height: 24),
-            _buildModernInput(_emailController, 'Clinical Email', Icons.alternate_email_rounded, keyboardType: TextInputType.emailAddress),
+            _buildModernInput(_emailController, 'Clinical Email', Icons.alternate_email_rounded, keyboardType: TextInputType.emailAddress, inputFormatters: InputRules.email),
             const SizedBox(height: 24),
             Row(children: [
               Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [_buildLabel('Age'), _buildModernInput(_ageController, 'Yrs', Icons.cake_outlined, keyboardType: TextInputType.number, isAge: true)])),
@@ -165,9 +289,9 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
               ),
             ]),
             const SizedBox(height: 24),
-            _buildModernInput(_specialtyController, 'Specialty', Icons.medical_services_outlined),
+            _buildModernInput(_specialtyController, 'Specialty', Icons.medical_services_outlined, inputFormatters: InputRules.shortText),
             const SizedBox(height: 24),
-            _buildModernInput(_clinicController, 'Clinic / Hospital', Icons.local_hospital_outlined),
+            _buildModernInput(_clinicController, 'Clinic / Hospital', Icons.local_hospital_outlined, inputFormatters: InputRules.shortText),
             const SizedBox(height: 48),
             if (_isEditing)
               _isLoading ? const Center(child: CircularProgressIndicator()) : PrimaryButton(label: 'Save and Lock Profile', onPressed: _saveProfile),
@@ -180,11 +304,11 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
 
   Widget _buildLabel(String text) => FieldLabel(text);
 
-  Widget _buildModernInput(TextEditingController controller, String hint, IconData icon, {TextInputType? keyboardType, bool isAge = false}) {
+  Widget _buildModernInput(TextEditingController controller, String hint, IconData icon, {TextInputType? keyboardType, bool isAge = false, List<TextInputFormatter>? inputFormatters}) {
     return AppTextField(
       controller: controller, hint: hint, icon: icon, keyboardType: keyboardType,
       enabled: _isEditing,
-      inputFormatters: isAge ? [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(3)] : null,
+      inputFormatters: isAge ? [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(3)] : inputFormatters,
       textColor: _isEditing ? AppColors.ink : Colors.grey,
       fillColor: _isEditing ? Colors.white : AppColors.track,
     );
