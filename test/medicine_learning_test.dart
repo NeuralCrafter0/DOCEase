@@ -110,6 +110,35 @@ void main() {
     test('hyphenated names are kept whole', () {
       expect(PrescriptionLines.medicineNames('Amoxicillin-Clavulanate 625mg - $od'), ['Amoxicillin-Clavulanate 625mg']);
     });
+    // Security review (#6, Low): the learned list is doctor-wide and synced,
+    // so free-text instructions must never be learned.
+    test('instruction lines are never learned', () {
+      expect(
+        PrescriptionLines.medicineNames(
+          'Azithromycin 500mg - $od\nreview with sugar report Monday\nReview with sugar report on Monday.\n'
+          'Review on Monday\nTake after food\nCome back if fever persists, call us\nDrink plenty of water\n'
+          'Avoid oily food - $od\nRepeat CBC in 2 weeks\nPan-D (Pantoprazole+Domperidone)',
+          dosages: templates,
+        ),
+        ['Azithromycin 500mg', 'Pan-D (Pantoprazole+Domperidone)'],
+      );
+    });
+    test('drug-name shape', () {
+      for (final ok in ['Azithromycin 500mg', 'Tab. Dolo 650', 'Inj. Ceftriaxone 1g', 'Syp. Ambroxol',
+          'Vitamin D3 60000 IU', 'Paracetamol', 'Metformin SR 500 mg', 'पैरासिटामोल 500']) {
+        expect(PrescriptionLines.looksLikeMedicine(ok), isTrue, reason: ok);
+      }
+      for (final bad in ['review with sugar report Monday', 'Review on Monday', 'BP check tomorrow', 'ok.',
+          'Rest for three days', 'Is it better?', '2 tablets daily', 'Follow up', 'x' * 61,
+          'Metformin 500 mg twice daily after meals please']) {
+        expect(PrescriptionLines.looksLikeMedicine(bad), isFalse, reason: bad);
+      }
+    });
+    test('a line picked from the suggestions is kept even if it does not look like a drug name', () {
+      expect(PrescriptionLines.medicineNames('Dr Special Mix for kids', known: ['Dr Special Mix for kids']),
+          ['Dr Special Mix for kids']);
+      expect(PrescriptionLines.medicineNames('Dr Special Mix for kids'), isEmpty);
+    });
   });
 
   group('PrescriptionLines.applyDosage', () {
@@ -151,6 +180,16 @@ void main() {
       await save(t);
       patients.pending!.complete();
       await t.pumpAndSettle();
+      expect(meds.learned, ['Azithromycin 500mg']);
+    });
+
+    testWidgets('an instruction line in the prescription is not learned', (t) async {
+      final (patients, meds) = await openNote(t);
+      await typeInto(t, rx, 'Azithromycin 500mg\nreview with sugar report Monday');
+      await save(t);
+      patients.pending!.complete();
+      await t.pumpAndSettle();
+      expect(patients.saved, hasLength(1));
       expect(meds.learned, ['Azithromycin 500mg']);
     });
 
