@@ -102,6 +102,7 @@ class PatientProvider with ChangeNotifier {
   /// The owner [_patients] was read for (null: nothing loaded).
   String? _listOwner;
   bool _loadFailed = false;
+  bool _hasLoaded = false;
   DbReadFailure? _loadFailure;
   Future<void>? _pushInFlight;
 
@@ -155,6 +156,14 @@ class PatientProvider with ChangeNotifier {
   /// startup sweep do not run either.
   bool get loadFailed => _loadFailed;
 
+  /// False after [clear] and on an owner or session change, until the
+  /// first load for the current owner settles (success or failure); then
+  /// true, also while a later [reload] runs. A stale owner's load, or one
+  /// cancelled by [clear], never sets it. Listeners are notified when it
+  /// flips. The UI's empty state is
+  /// `hasLoaded && patients.isEmpty && !loadFailed` (contract §7 G2).
+  bool get hasLoaded => _hasLoaded;
+
   /// The reason enum value of the failed load ([DbReadFailure]), for
   /// diagnostics only; null when [loadFailed] is false.
   Object? get loadFailure => _loadFailure;
@@ -200,7 +209,7 @@ class PatientProvider with ChangeNotifier {
       _token.cancel();
       // Owner change: the old owner's list and load state go, even while
       // loadFailed is true (security: never one doctor's patients for the next).
-      final had = _patients.isNotEmpty || _loadFailed || _listOwner != null;
+      final had = _patients.isNotEmpty || _loadFailed || _hasLoaded || _listOwner != null;
       _resetLoadState();
       if (had) notifyListeners();
     }
@@ -236,6 +245,7 @@ class PatientProvider with ChangeNotifier {
     _patients = [];
     _listOwner = null;
     _loadFailed = false;
+    _hasLoaded = false;
     _loadFailure = null;
     _activeLoad = null;
     _loadStatus?.cleared();
@@ -248,6 +258,7 @@ class PatientProvider with ChangeNotifier {
       _listOwner = null;
     }
     _loadFailed = true;
+    _hasLoaded = true; // settled (callers check _live first)
     _loadFailure = error is DbReadException ? error.reason : DbReadFailure.readFailed;
     _loadStatus?.failed(uid);
     notifyListeners();
@@ -325,6 +336,7 @@ class PatientProvider with ChangeNotifier {
     _patients = local;
     _listOwner = uid;
     _loadFailed = false;
+    _hasLoaded = true; // notified below on both paths
     _loadFailure = null;
     _loadStatus?.loaded(uid);
     if (!_cloud) {
