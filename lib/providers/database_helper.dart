@@ -1200,6 +1200,9 @@ class DatabaseHelper implements LocalDatabase {
   /// carries [Patient.updatedAt] for [markSynced]. Rows that fail to parse
   /// are included (flagged, read-only) so callers can see them, but must
   /// not be pushed.
+  ///
+  /// Returns empty on error; do not use for destructive or "nothing to
+  /// push" decisions; use [dirtyPatientsStrict] instead.
   @override
   Future<List<Patient>> dirtyPatients() async {
     try {
@@ -1254,6 +1257,9 @@ class DatabaseHelper implements LocalDatabase {
   @override
   Future<void> deletePatient(String id) => markPendingDelete(id);
 
+  /// Returns empty on error (one non-text tombstone id hides them all); do
+  /// not use for destructive or "nothing to do" decisions; use
+  /// [pendingDeletesStrict] instead.
   @override
   Future<List<String>> pendingDeletes() async {
     try {
@@ -1361,6 +1367,10 @@ class DatabaseHelper implements LocalDatabase {
   /// All patients. Each row is parsed on its own, so one bad row no longer
   /// hides every patient; a row that fails to parse comes back flagged
   /// ([Patient.hasParseErrors]) with its stored data kept, and is read-only.
+  ///
+  /// Returns empty on error; do not use for destructive, overwrite or
+  /// "nothing to do" decisions, or to show "no patients"; use
+  /// [fetchPatientsStrict] instead.
   @override
   Future<List<Patient>> fetchPatients() async {
     try {
@@ -1372,6 +1382,93 @@ class DatabaseHelper implements LocalDatabase {
       return [];
     }
   }
+
+  // --- strict reads ----------------------------------------------------------
+  //
+  // Same queries as the lenient reads, but they never turn a failure into
+  // an empty or partial answer: they throw DbReadException(reason) with no
+  // patient data. The underlying error is logged only as a sanitized code.
+
+  @override
+  Future<List<Patient>> fetchPatientsStrict() => _strictRead('patients',
+      (db) async => patientsFromRowsStrict(await db.query('patients')));
+
+  @override
+  Future<List<Patient>> dirtyPatientsStrict() => _strictRead(
+      'dirty',
+      (db) async => patientsFromRowsStrict(await db.query('patients',
+          where: 'sync_state != ?',
+          whereArgs: [SyncState.synced],
+          orderBy: 'updated_at ASC, id ASC')));
+
+  @override
+  Future<List<String>> pendingDeletesStrict() => _strictRead(
+      'pending deletes',
+      (db) async => tombstoneIdsStrict(await db.query('pending_deletes',
+          columns: ['patient_id'],
+          orderBy: 'deleted_at ASC, patient_id ASC')));
+
+  /// Runs [body] on the open database. `notOpen` if there is none (or its
+  /// open failed), or if a different database is open by the time the read
+  /// finishes; `readFailed` for any other error.
+  Future<T> _strictRead<T>(
+      String what, Future<T> Function(Database db) body) async {
+    final Database db;
+    try {
+      db = await database; // waits for an open in progress
+    } catch (_) {
+      throw const DbReadException(DbReadFailure.notOpen);
+    }
+    final uid = _uid;
+    if (uid == null || !identical(_db, db)) {
+      throw const DbReadException(DbReadFailure.notOpen);
+    }
+    final T result;
+    try {
+      result = await body(db);
+    } on DbReadException {
+      rethrow;
+    } catch (e) {
+      debugPrint('SQLITE strict $what read failed: ${_describe(e)}');
+      throw const DbReadException(DbReadFailure.readFailed);
+    }
+    if (_uid != uid || !identical(_db, db)) {
+      throw const DbReadException(DbReadFailure.notOpen);
+    }
+    return result;
+  }
+
+  /// [rows] as patients, or throws `unreadableRow` if any row cannot be
+  /// decoded or would come back flagged ([Patient.hasParseErrors]).
+  @visibleForTesting
+  static List<Patient> patientsFromRowsStrict(
+      List<Map<String, Object?>> rows) {
+    final out = <Patient>[];
+    for (final row in rows) {
+      final Patient p;
+      try {
+        p = _patientFromRow(row);
+      } catch (_) {
+        throw const DbReadException(DbReadFailure.unreadableRow);
+      }
+      if (p.hasParseErrors) {
+        throw const DbReadException(DbReadFailure.unreadableRow);
+      }
+      out.add(p);
+    }
+    return out;
+  }
+
+  /// The tombstone ids in [rows], or throws `unreadableRow` if any is not
+  /// a non-empty string.
+  @visibleForTesting
+  static List<String> tombstoneIdsStrict(List<Map<String, Object?>> rows) => [
+        for (final r in rows)
+          switch (r['patient_id']) {
+            final String id when id.isNotEmpty => id,
+            _ => throw const DbReadException(DbReadFailure.unreadableRow),
+          },
+      ];
 
   static Patient _patientFromRow(Map<String, Object?> row) {
     final json = <String, dynamic>{
