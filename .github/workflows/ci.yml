@@ -2,14 +2,17 @@ name: CI
 
 # Pipeline: gitleaks secret scan, flutter analyze, flutter test, Android build,
 # Firebase rules emulator tests (only when firebase/ exists), real-SQLCipher DB
-# tests (only when tool/sqlcipher_harness/run.sh exists)
+# tests (only when tool/sqlcipher_harness/run.sh exists), Android emulator
+# integration tests (only when integration_test/**/*_test.dart exists),
+# asset/font/dependency budgets, and release size + Play readiness (arm64)
 # (release-mode, obfuscated APK; DEV build with DOCEASE_DEV_MODE=true on PRs and
 # branches; release-signed only on main/v* with secrets and DOCEASE_DEV_MODE=false).
 # Android only for now. Flutter is pinned to the version in .metadata.
 
 on:
   pull_request:
-    branches: [main]
+    # main, plus stacked CI PRs whose base is another ci/** branch.
+    branches: [main, "ci/**"]
   push:
     branches: [main]
     tags: ["v*"] # release tags: the only runs that upload debug symbols
@@ -412,6 +415,30 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: APK checks (size, 16 KB pages, target SDK, Firebase isolation)
+        # tool/ci/check_apk.py. Production builds (release/tag): 16 KB page
+        # support and Play's target SDK are enforced. DEV builds: report only,
+        # except that a dev-flavor build must be Firebase-isolated (PR #13 skips
+        # google-services and Analytics for dev). Without flavors (main today)
+        # the DEV APK is NOT isolated and is labelled so.
+        env:
+          DEV_MODE: ${{ steps.mode.outputs.dev_mode }}
+          FLAVOR: ${{ steps.mode.outputs.flavor }}
+          APK: ${{ steps.mode.outputs.apk }}
+        run: |
+          set -euo pipefail
+          bt="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | grep -vE -- '-rc[0-9]*$' | sort -V | tail -1)"
+          args=(--apk "$APK" --aapt2 "$bt/aapt2" --json-out "$RUNNER_TEMP/apk-report.json")
+          if [ "$DEV_MODE" = "false" ]; then
+            args+=(--title "APK checks (production)" --enforce-16kb --enforce-target-sdk)
+          elif [ "$FLAVOR" = "dev" ]; then
+            args+=(--title "APK checks (DEV, dev flavor)" --firebase forbid)
+          else
+            args+=(--title "APK checks (DEV, no flavors)" --firebase warn)
+          fi
+          status=0
+          python3 tool/ci/check_apk.py "${args[@]}" || status=$?
+          exit "$status"
       - name: Scan release build for dev-mode markers (QA REL-07)
         # Production (DOCEASE_DEV_MODE=false) builds only: the dev banner text must
         # not be compiled into libapp.so of the release APK, or of the AAB when one
@@ -440,7 +467,6 @@ jobs:
           path: ${{ steps.mode.outputs.apk }}
           retention-days: 7
           if-no-files-found: error
-
       - name: Upload AAB
         if: steps.mode.outputs.signed == 'true' && steps.mode.outputs.dev_mode == 'false'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -467,6 +493,93 @@ jobs:
       - name: Remove signing material
         if: always()
         run: rm -f "$RUNNER_TEMP/upload-keystore.jks" android/key.properties
+
+  assets-budget:
+    name: Assets, fonts and dependencies (budgets)
+    # tool/ci/check_assets.py with limits from tool/ci/budgets.json: asset and
+    # font sizes, image pixels, font licences, banned packages; on PRs also new
+    # dependencies (listed for sign-off) and new hard-coded remote image/font
+    # URLs in lib/ (fail). No Flutter or Gradle needed.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Check assets, fonts and dependencies
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "$BASE_REF" ]; then args=(--base "origin/$BASE_REF"); fi
+          python3 tool/ci/check_assets.py "${args[@]}"
+
+  release-size:
+    name: Release size and Play readiness (arm64)
+    # Measurement build: `flutter build apk --release --target-platform
+    # android-arm64 --analyze-size` with DOCEASE_DEV_MODE=false (--flavor prod
+    # when flavors exist). Not obfuscated (--analyze-size needs symbol names),
+    # debug-key signed, never uploaded; only the size report is. Enforces the
+    # apk.release_arm64 budgets, 16 KB page support and Play's target SDK.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Java ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+      - name: Set up Flutter ${{ env.FLUTTER_VERSION }}
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: flutter pub get (lockfile enforced)
+        run: flutter pub get --enforce-lockfile
+      - name: Build release APK for arm64 with size analysis
+        id: build
+        run: |
+          set -euo pipefail
+          flavor_args=(); apk=build/app/outputs/flutter-apk/app-release.apk
+          if grep -qE '^[[:space:]]*productFlavors[[:space:]]*\{' android/app/build.gradle.kts 2>/dev/null; then
+            flavor_args=(--flavor prod); apk=build/app/outputs/flutter-apk/app-prod-release.apk
+          fi
+          flutter build apk --release "${flavor_args[@]}" --target-platform android-arm64 \
+            --analyze-size --code-size-directory=build/size-report \
+            --dart-define=DOCEASE_DEV_MODE=false
+          mkdir -p build/size-report
+          cp "$HOME"/.flutter-devtools/apk-code-size-analysis_*.json build/size-report/ 2>/dev/null || true
+          test -f "$apk"
+          echo "apk=$apk" >> "$GITHUB_OUTPUT"
+      - name: Size budgets, 16 KB pages and target SDK
+        env:
+          APK: ${{ steps.build.outputs.apk }}
+        run: |
+          set -euo pipefail
+          bt="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | grep -vE -- '-rc[0-9]*$' | sort -V | tail -1)"
+          status=0
+          python3 tool/ci/check_apk.py --apk "$APK" --aapt2 "$bt/aapt2" \
+            --budget-key release_arm64 --enforce-16kb --enforce-target-sdk \
+            --title "Release APK, arm64 only (approximates a phone's download)" \
+            --json-out build/size-report/apk-report.json || status=$?
+          python3 tool/ci/dart_size_top.py build/size-report >> "$GITHUB_STEP_SUMMARY" || true
+          exit "$status"
+      - name: Upload size report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docease-size-report-arm64
+          path: build/size-report/
+          retention-days: 14
+          if-no-files-found: warn
 
   firebase-rules:
     name: Firebase rules (emulator tests)
@@ -613,3 +726,99 @@ jobs:
             echo "## Real SQLCipher DB tests: FAILED (harness exit $status)" >> "$GITHUB_STEP_SUMMARY"
           fi
           exit "$status"
+
+  android-integration:
+    name: Android emulator integration tests
+    # Runs every integration_test/**/*_test.dart on an API 34 x86_64 emulator
+    # (real sqflite_sqlcipher plugin and Android Keystore) through
+    # tool/ci/run_integration_tests.sh. Debug builds with the debug key; no
+    # secrets, no Firebase project access. Dev mode (DOCEASE_DEV_MODE=true) is
+    # the default; files in DEV_MODE_EXEMPT_TESTS run without the define (the
+    # DB engineer's device suite: its results do not depend on dev mode).
+    # Flavors are auto-detected like the Android build job: --flavor dev for
+    # the dev-mode group and --flavor prod for the exempt group when they exist.
+    # Skips (job passes) when there are no integration tests on this ref.
+    runs-on: ubuntu-latest # GitHub-hosted Linux runners expose /dev/kvm
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      EMULATOR_API_LEVEL: "34"
+      EMULATOR_TARGET: google_apis
+      EMULATOR_ARCH: x86_64
+      EMULATOR_OPTIONS: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+      # Space-separated, relative to the repo root. Add QA's device tests only
+      # when QA asks, and only here if they must not run in dev mode.
+      DEV_MODE_EXEMPT_TESTS: integration_test/db_encryption_migration_test.dart
+      INTEGRATION_DEVICE: emulator-5554
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Detect integration tests
+        id: detect
+        env:
+          TESTS_HASH: ${{ hashFiles('integration_test/**/*_test.dart') }}
+        run: |
+          if [ -n "$TESTS_HASH" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "## Android emulator integration tests: skipped (no integration_test/**/*_test.dart on this ref)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Enable KVM
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Set up Java ${{ env.JAVA_VERSION }}
+        if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+      - name: Set up Flutter ${{ env.FLUTTER_VERSION }}
+        if: steps.detect.outputs.present == 'true'
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: flutter pub get (lockfile enforced)
+        if: steps.detect.outputs.present == 'true'
+        run: flutter pub get --enforce-lockfile
+      - name: AVD cache
+        if: steps.detect.outputs.present == 'true'
+        id: avd-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-${{ runner.os }}-api${{ env.EMULATOR_API_LEVEL }}-${{ env.EMULATOR_TARGET }}-${{ env.EMULATOR_ARCH }}-v1
+      - name: Create AVD and snapshot for the cache
+        if: steps.detect.outputs.present == 'true' && steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: ${{ env.EMULATOR_API_LEVEL }}
+          target: ${{ env.EMULATOR_TARGET }}
+          arch: ${{ env.EMULATOR_ARCH }}
+          force-avd-creation: false
+          emulator-options: ${{ env.EMULATOR_OPTIONS }}
+          disable-animations: false
+          script: echo "Generated AVD snapshot for caching."
+      - name: Run integration tests on the emulator
+        if: steps.detect.outputs.present == 'true'
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: ${{ env.EMULATOR_API_LEVEL }}
+          target: ${{ env.EMULATOR_TARGET }}
+          arch: ${{ env.EMULATOR_ARCH }}
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save ${{ env.EMULATOR_OPTIONS }}
+          disable-animations: true
+          # One line: the action runs each script line in its own shell.
+          script: bash tool/ci/run_integration_tests.sh

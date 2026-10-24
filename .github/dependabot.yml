@@ -1,0 +1,40 @@
+# Dependabot version updates. Weekly, minor/patch grouped, at most 5 open PRs
+# per ecosystem. Dependabot only opens PRs: nothing is auto-merged and there is
+# no auto-merge workflow. Every update PR goes through CI and normal review.
+# Dependabot runs get no repository secrets, and none are configured for it.
+version: 2
+updates:
+  # GitHub Actions in .github/workflows. The workflows pin actions to full
+  # commit SHAs with a "# vX.Y.Z" comment; Dependabot updates both together.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Kolkata
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions-minor-patch:
+        update-types: [minor, patch]
+
+  # Dart/Flutter packages (pubspec.yaml / pubspec.lock). Major updates get
+  # their own PRs because they often need code changes.
+  - package-ecosystem: pub
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Kolkata
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    groups:
+      pub-minor-patch:
+        update-types: [minor, patch]
+
+  # Add an npm entry for /firebase once the Firebase rules tests are on main
+  # (Firebase is parked for now).
