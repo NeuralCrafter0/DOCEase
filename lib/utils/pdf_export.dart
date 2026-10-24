@@ -2,14 +2,67 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'package:intl/intl.dart';
+import 'pdf_fonts.dart';
 import '../models/patient.dart';
 import '../models/doctor.dart';
+import '../config/dev_mode.dart';
+import 'test_data_marker.dart';
+import 'doctor_name.dart';
+import 'visit_order.dart';
+import 'vitals_display.dart';
 
 class PdfExport {
-  static Future<void> generateAndPrintPatientReport(Patient patient, {Doctor? doctor}) async {
-    final pdf = pw.Document();
+  /// Marker printed at the top and bottom of every page in dev mode.
+  static const testDataMarker = kTestDataMarker;
 
-    final String docName = doctor != null ? "${doctor.title} ${doctor.name}" : "Clinical Practitioner";
+  /// [testData] (dev mode) puts [testDataMarker] on every page and in the
+  /// file name, so a dev-build letter can never pass as a real record.
+  /// Only in dev builds: without the define [testData] is ignored and the
+  /// marker code is compiled out (`kDevMode && testData`).
+  static Future<void> generateAndPrintPatientReport(Patient patient,
+      {Doctor? doctor, bool testData = false}) async {
+    await PdfFonts.ensureLoaded();
+    final pdf = buildPatientReport(patient, doctor: doctor, testData: testData);
+    // Dev mode only adds the TEST_DATA_ prefix; the rest is #7's neutral
+    // reportFileName scheme, which wins on merge.
+    await Printing.layoutPdf(
+        onLayout: (PdfPageFormat format) async => pdf.save(),
+        name: printFileName(patient, DateTime.now(), testData: testData));
+  }
+
+  /// The name offered by the print dialog: [reportFileName], with
+  /// `TEST_DATA_` in front in dev mode.
+  static String printFileName(Patient patient, DateTime now, {required bool testData}) {
+    final name = reportFileName(patient, now);
+    return kDevMode && testData ? '$kTestDataFilePrefix$name' : name;
+  }
+
+  /// Non-identifying file name for the print / "Save as PDF" dialog
+  /// (security review C6): `report_<first 8 id chars>_<yyyymmdd>.pdf`.
+  /// Never contains the patient's name.
+  // Same code as #7 (PdfExport.reportFileName); #7's version wins on merge.
+  static String reportFileName(Patient patient, DateTime now) {
+    final cleanId = patient.id.replaceAll(RegExp(r'[^A-Za-z0-9]'), '');
+    final shortId = cleanId.isEmpty ? 'patient' : cleanId.substring(0, cleanId.length < 8 ? cleanId.length : 8);
+    return 'report_${shortId}_${DateFormat('yyyyMMdd').format(now)}.pdf';
+  }
+
+  static pw.Widget _testDataBand() => pw.Container(
+        width: double.infinity,
+        margin: const pw.EdgeInsets.symmetric(vertical: 4),
+        padding: const pw.EdgeInsets.symmetric(vertical: 4),
+        color: PdfColors.red700,
+        child: pw.Center(
+            child: pw.Text(testDataMarker,
+                style: pw.TextStyle(color: PdfColors.white, fontSize: 12, fontWeight: pw.FontWeight.bold))),
+      );
+
+  /// The report document ([compress] false only for tests that read it).
+  static pw.Document buildPatientReport(Patient patient,
+      {Doctor? doctor, bool testData = false, bool compress = true}) {
+    final pdf = pw.Document(compress: compress);
+
+    final String docName = doctorDisplayName(doctor) ?? "Clinical Practitioner";
     final String clinicName = doctor?.clinicName ?? "DOCEase Medical Center";
     final String docSpecialty = doctor?.specialty ?? "General Medicine";
     final String docContact = doctor?.mobileNumber ?? "";
@@ -17,8 +70,11 @@ class PdfExport {
 
     pdf.addPage(
       pw.MultiPage(
+        theme: PdfFonts.theme,
         pageFormat: PdfPageFormat.a4,
         margin: const pw.EdgeInsets.all(32),
+        header: kDevMode && testData ? (pw.Context context) => _testDataBand() : null,
+        footer: kDevMode && testData ? (pw.Context context) => _testDataBand() : null,
         build: (pw.Context context) {
           return [
             pw.Row(
@@ -30,7 +86,7 @@ class PdfExport {
                   children: [
                     pw.Text(clinicName, style: pw.TextStyle(fontSize: 24, fontWeight: pw.FontWeight.bold, color: PdfColors.blue900)),
                     pw.SizedBox(height: 4),
-                    pw.Text('Dr. $docName', style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
+                    pw.Text(docName, style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
                     pw.Text(docSpecialty, style: const pw.TextStyle(fontSize: 12, color: PdfColors.grey700)),
                     if (docContact.isNotEmpty) pw.Text('Mob: $docContact', style: const pw.TextStyle(fontSize: 11, color: PdfColors.grey700)),
                     if (docEmail.isNotEmpty) pw.Text('Email: $docEmail', style: const pw.TextStyle(fontSize: 11, color: PdfColors.grey700)),
@@ -78,7 +134,7 @@ class PdfExport {
             pw.Text('CLINICAL TIMELINE', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: PdfColors.blue900)),
             pw.SizedBox(height: 16),
             if (patient.history.isEmpty) pw.Center(child: pw.Text('No clinical records available.'))
-            else ...patient.history.map((record) => _buildPdfVisitCard(record)),
+            else ...patient.history.newestFirst().map((record) => _buildPdfVisitCard(record)),
             pw.Spacer(),
             pw.Divider(color: PdfColors.grey300),
             pw.SizedBox(height: 8),
@@ -88,7 +144,7 @@ class PdfExport {
       ),
     );
 
-    await Printing.layoutPdf(onLayout: (PdfPageFormat format) async => pdf.save(), name: 'ClinicalReport_${patient.name.replaceAll(' ', '_')}.pdf');
+    return pdf;
   }
 
   static pw.Widget _buildPdfVisitCard(VisitRecord record) {
@@ -113,11 +169,8 @@ class PdfExport {
             pw.SizedBox(height: 12),
             pw.Text('Vitals:', style: pw.TextStyle(fontSize: 10, color: PdfColors.grey600, fontWeight: pw.FontWeight.bold)),
             pw.SizedBox(height: 4),
-            pw.Row(children: [
-              if (record.bp != null && record.bp!.isNotEmpty) _buildVitalPdfChip('BP', record.bp!),
-              if (record.temp != null && record.temp!.isNotEmpty) _buildVitalPdfChip('Temp', record.temp!),
-              if (record.pulse != null && record.pulse!.isNotEmpty) _buildVitalPdfChip('Pulse', record.pulse!),
-              if (record.weight != null && record.weight!.isNotEmpty) _buildVitalPdfChip('Weight', record.weight!),
+            pw.Wrap(runSpacing: 4, children: [
+              for (final v in filledVitals(record)) _buildVitalPdfChip(v.label, v.value),
             ]),
           ],
           pw.SizedBox(height: 12),
@@ -131,6 +184,6 @@ class PdfExport {
     );
   }
 
-  static bool _hasVitals(VisitRecord record) => (record.bp != null && record.bp!.isNotEmpty) || (record.temp != null && record.temp!.isNotEmpty) || (record.pulse != null && record.pulse!.isNotEmpty) || (record.weight != null && record.weight!.isNotEmpty);
+  static bool _hasVitals(VisitRecord record) => filledVitals(record).isNotEmpty;
   static pw.Widget _buildVitalPdfChip(String label, String val) => pw.Container(margin: const pw.EdgeInsets.only(right: 8), padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 2), decoration: pw.BoxDecoration(border: pw.Border.all(color: PdfColors.grey400), borderRadius: const pw.BorderRadius.all(pw.Radius.circular(4))), child: pw.Text('$label: $val', style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey700)));
 }

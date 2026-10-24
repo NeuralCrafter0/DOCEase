@@ -26,6 +26,8 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSFaceIDUsageDescription</key>
+	<string>DOCEase uses Face ID to unlock patient records on this device.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -66,5 +68,9 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+<key>NSCameraUsageDescription</key>
+<string>DOCEase uses the camera to add clinical photos to a patient's visit.</string>
+<key>NSPhotoLibraryUsageDescription</key>
+<string>DOCEase uses your photo library to add clinical photos to a patient's visit.</string>
 </dict>
 </plist>

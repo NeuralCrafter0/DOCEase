@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'home_screen.dart';
+import '../utils/auth_error_messages.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -16,15 +17,16 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _isLoading = false;
 
   Future<void> _login() async {
-    if (_emailController.text.isEmpty || _passwordController.text.isEmpty) return;
+    if (_emailController.text.trim().isEmpty || _passwordController.text.isEmpty) return;
     setState(() => _isLoading = true);
     try {
       await FirebaseAuth.instance.signInWithEmailAndPassword(
         email: _emailController.text.trim(),
-        password: _passwordController.text.trim(),
+        // Never trim: spaces can be part of the password.
+        password: _passwordController.text,
       );
     } catch (e) {
-      _showError(e.toString());
+      if (mounted) _showError(AuthErrorMessages.forEmailSignIn(e));
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -49,7 +51,8 @@ class _LoginScreenState extends State<LoginScreen> {
       
       await FirebaseAuth.instance.signInWithCredential(credential);
     } catch (e) {
-      _showError('Google Sign-In failed: $e');
+      final message = AuthErrorMessages.forGoogleSignIn(e);
+      if (message != null && mounted) _showError(message);
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -86,7 +89,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       color: const Color(0xFF6366F1),
                       borderRadius: BorderRadius.circular(18),
                       boxShadow: [
-                        BoxShadow(color: const Color(0xFF6366F1).withOpacity(0.3), blurRadius: 15, offset: const Offset(0, 8))
+                        BoxShadow(color: const Color(0xFF6366F1).withValues(alpha: 0.3), blurRadius: 15, offset: const Offset(0, 8))
                       ],
                     ),
                     child: const Icon(Icons.medical_services, size: 32, color: Colors.white),
@@ -138,7 +141,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           child: Row(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              Image.network('https://upload.wikimedia.org/wikipedia/commons/thumb/c/c1/Google_%22G%22_logo.svg/1200px-Google_%22G%22_logo.svg.png', height: 24),
+                              Image.asset('assets/images/google_g_logo.png', height: 24, width: 24),
                               const SizedBox(width: 12),
                               const Text('Continue with Google', style: TextStyle(color: Color(0xFF1E293B), fontWeight: FontWeight.bold, fontSize: 16)),
                             ],

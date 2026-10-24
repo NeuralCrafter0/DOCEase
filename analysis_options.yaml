@@ -9,6 +9,12 @@
 # packages, and plugins designed to encourage good coding practices.
 include: package:flutter_lints/flutter.yaml
 
+analyzer:
+  exclude:
+    # Host SQLCipher harness entry point: it imports sqflite_common_ffi, which
+    # only tool/sqlcipher_harness/run.sh adds (to a temp copy of the repo).
+    - tool/sqlcipher_harness/**
+
 linter:
   # The lint rules applied to this project can be customized in the
   # section below to disable rules from the `package:flutter_lints/flutter.yaml`

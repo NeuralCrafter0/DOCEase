@@ -1,0 +1,8 @@
+# Reviewed gitleaks findings, one fingerprint per line (commit:file:rule:line).
+#
+# Firebase Android API key in the committed google-services.json (initial commit).
+# The team has not yet decided whether to remove this file. Firebase client keys
+# are shipped inside the app, but should be restricted in Google Cloud Console
+# (Android app + SHA-1 restriction, API restrictions) and backed by security rules
+# / App Check. Delete this line to make the scan fail on it again.
+a302032ad25d77dd60369294162c431630844f57:android/app/google-services.json:gcp-api-key:31

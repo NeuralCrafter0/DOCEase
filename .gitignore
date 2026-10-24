@@ -43,3 +43,15 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Secrets and signing material (never commit)
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+key.properties
+
+# design review screenshots
+test/shots/goldens/
+test/shots/failures/

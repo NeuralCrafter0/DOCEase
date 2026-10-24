@@ -42,6 +42,8 @@ dependencies:
   path: ^1.9.1
   firebase_auth: ^6.2.0
   image_picker: ^1.2.1
+  image_picker_android: ^0.8.13+14
+  image_picker_platform_interface: ^2.11.1
   pdf: ^3.11.3
   printing: ^5.14.2
   path_provider: ^2.1.5
@@ -52,12 +54,15 @@ dependencies:
   local_auth: ^3.0.1
   sqflite_sqlcipher: ^3.4.0
   flutter_secure_storage: ^10.0.0
+  crypto: 3.0.7
   intl_phone_field: ^3.2.0
   fl_chart: ^1.1.1
   flutter_typeahead: ^5.2.0
 
 dev_dependencies:
   flutter_test:
+    sdk: flutter
+  integration_test:
     sdk: flutter
 
   # The "flutter_lints" package below contains a set of recommended lints to
@@ -78,6 +83,26 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+  # Devanagari fallback for the patient PDF (lib/utils/pdf_fonts.dart).
+  assets:
+    - assets/fonts/NotoSansDevanagari-Regular.ttf
+    # Google "G" for the sign-in button, bundled so it shows offline.
+    - assets/images/google_g_logo.png
+    # OFL licence for the bundled Figtree UI font (shown in the licence page).
+    - assets/fonts/figtree/OFL.txt
+  # UI typeface: Figtree (SIL OFL 1.1), static instances of the variable font
+  # so FontWeight maps exactly. About 160 KB in total.
+  fonts:
+    - family: Figtree
+      fonts:
+        - asset: assets/fonts/Figtree-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/Figtree-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Figtree-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/Figtree-Bold.ttf
+          weight: 700
 
   # To add assets to your application, add an assets section, like this:
   # assets:
