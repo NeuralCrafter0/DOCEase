@@ -1,5 +1,6 @@
 // Hand-written fakes for host unit tests. No extra packages.
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:docease/models/patient.dart';
@@ -248,6 +249,32 @@ class FakeLocalDatabase implements LocalDatabase {
   Future<void> deleteSetting(String key) async {
     _requireOpen();
     settings.remove(key);
+  }
+
+  /// Same pure collectors as DatabaseHelper, over the in-memory rows.
+  Set<String> _scan() {
+    final st = state;
+    if (st is DbFailed) {
+      throw const AttachmentScanIncomplete(AttachmentScanFailure.openFailed);
+    }
+    if (st is! DbReady) {
+      throw const AttachmentScanIncomplete(AttachmentScanFailure.noDatabase);
+    }
+    return AttachmentRefs.collectReferencedPaths(
+      historyValues: rows.values.map(
+          (p) => jsonEncode(p.history.map((r) => r.toJson()).toList())),
+      doctorProfileValue: settings[AttachmentRefs.doctorProfileSettingKey],
+    );
+  }
+
+  @override
+  Future<Set<String>> referencedAttachmentPaths() async => _scan();
+
+  @override
+  Future<Set<String>> referencedAttachmentKeys() async {
+    final paths = _scan();
+    return AttachmentRefs.referencedKeys(paths,
+        ownerFolderName: AttachmentRefs.ownerFolderNameFor(openUid!));
   }
 }
 

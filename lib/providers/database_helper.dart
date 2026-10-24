@@ -1310,6 +1310,54 @@ class DatabaseHelper implements LocalDatabase {
     await db.delete('settings', where: 'key = ?', whereArgs: [key]);
   }
 
+  // --- attachment references ---------------------------------------------
+
+  @override
+  Future<Set<String>> referencedAttachmentPaths() async =>
+      (await _scanAttachmentRefs()).paths;
+
+  @override
+  Future<Set<String>> referencedAttachmentKeys() async {
+    final scan = await _scanAttachmentRefs();
+    return AttachmentRefs.referencedKeys(scan.paths,
+        ownerFolderName: AttachmentRefs.ownerFolderNameFor(scan.owner));
+  }
+
+  /// One read transaction over `patients.history` and the doctor profile
+  /// setting. Never waits for an open in progress and never opens anything.
+  Future<({Set<String> paths, String owner})> _scanAttachmentRefs() async {
+    final state = _state;
+    final db = _db;
+    final owner = _uid;
+    if (state is DbFailed) {
+      throw const AttachmentScanIncomplete(AttachmentScanFailure.openFailed);
+    }
+    if (db == null || state is! DbReady || owner == null) {
+      throw const AttachmentScanIncomplete(AttachmentScanFailure.noDatabase);
+    }
+    List<Map<String, Object?>> rows;
+    List<Map<String, Object?>> profile;
+    try {
+      (rows, profile) = await db.transaction((txn) async {
+        final r = await txn.query('patients', columns: ['history']);
+        final s = await txn.query('settings',
+            columns: ['value'],
+            where: 'key = ?',
+            whereArgs: [AttachmentRefs.doctorProfileSettingKey],
+            limit: 1);
+        return (r, s);
+      });
+    } catch (e) {
+      debugPrint('Attachment scan: read failed (${describeDbError(e)})');
+      throw const AttachmentScanIncomplete(AttachmentScanFailure.readFailed);
+    }
+    final paths = AttachmentRefs.collectReferencedPaths(
+      historyValues: rows.map((r) => r['history']),
+      doctorProfileValue: profile.isEmpty ? null : profile.first['value'],
+    );
+    return (paths: paths, owner: owner);
+  }
+
   /// All patients. Each row is parsed on its own, so one bad row no longer
   /// hides every patient; a row that fails to parse comes back flagged
   /// ([Patient.hasParseErrors]) with its stored data kept, and is read-only.
