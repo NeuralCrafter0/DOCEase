@@ -113,9 +113,9 @@ class _PrivatePhoneFieldState extends State<PrivatePhoneField> {
           onTap: widget.enabled ? _changeCountry : null,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12),
+            // Dial code only: flag emoji need an emoji font, which isn't
+            // bundled (about 10 MB), so they'd render as boxes.
             child: Row(mainAxisSize: MainAxisSize.min, children: [
-              Text(_country.flag, style: const TextStyle(fontSize: 18)),
-              const SizedBox(width: 8),
               Text('+${_country.dialCode}', style: widget.style),
               const Icon(Icons.arrow_drop_down),
             ]),

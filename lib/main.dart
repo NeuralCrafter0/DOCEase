@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -26,6 +28,10 @@ import 'ui/session_route_reset.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Figtree's OFL licence, shown on the licence page with the packages'.
+  LicenseRegistry.addLicense(() async* {
+    yield LicenseEntryWithLineBreaks(['Figtree'], await rootBundle.loadString('assets/fonts/figtree/OFL.txt'));
+  });
   // Features register StartupHooks here (before the start-mode checks) so
   // they run in dev and normal mode alike; see services/startup_hooks.dart.
   // The photo sweep waits for the first open DB and sweeps only that owner.

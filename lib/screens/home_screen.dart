@@ -191,6 +191,7 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
 
+    final fabExtended = _fabExtended && MediaQuery.textScalerOf(context).scale(1) < 1.3;
     return Scaffold(
       key: _scaffold,
       drawer: wide ? null : Drawer(child: nav),
@@ -207,8 +208,10 @@ class _HomeScreenState extends State<HomeScreen> {
           ? null
           : FloatingActionButton.extended(
               key: QaKeys.homeRegisterPatient,
-              tooltip: _fabExtended ? null : 'Register patient',
-              isExtended: _fabExtended,
+              // Icon-only once scrolled, and always at large text sizes,
+              // where the wide label would cover the list. Static label only.
+              tooltip: fabExtended ? null : 'Register patient',
+              isExtended: fabExtended,
               icon: const Icon(Icons.person_add_alt_1_rounded),
               label: const Text('Register patient'),
               onPressed: () => _open(const AddPatientScreen()),
@@ -312,8 +315,9 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
         ..._buildListOrState(context, provider, visible, pad, readOnly: readOnly, failed: failed, loading: loading, hasAny: hasAny, now: now),
-        // Room for the floating button, which grows with the text size.
-        SliverPadding(padding: EdgeInsets.only(bottom: 72 + MediaQuery.textScalerOf(context).scale(40))),
+        // Room for the floating button (56) and its margins, so it never
+        // hides the last row.
+        const SliverPadding(padding: EdgeInsets.only(bottom: 96)),
       ],
     );
   }

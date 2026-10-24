@@ -89,7 +89,7 @@ flutter:
     # Google "G" for the sign-in button, bundled so it shows offline.
     - assets/images/google_g_logo.png
     # OFL licence for the bundled Figtree UI font (shown in the licence page).
-    - assets/fonts/OFL.txt
+    - assets/fonts/figtree/OFL.txt
   # UI typeface: Figtree (SIL OFL 1.1), static instances of the variable font
   # so FontWeight maps exactly. About 160 KB in total.
   fonts:
