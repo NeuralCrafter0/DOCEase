@@ -1,0 +1,78 @@
+rules_version = '2';
+
+// DOCEase Cloud Storage security rules.
+//
+// NOT DEPLOYED. The project owner has not approved a deploy to the live
+// project (med-history-299a1). Exercised only against the local emulator.
+//
+// Every object lives under a {uid} path segment and only that doctor may
+// read, create or delete it, once their email is verified and an admin has
+// approved them (approvedDoctors/{uid} in Firestore). Objects are immutable (no overwrite or
+// metadata update). Each upload is size-checked and limited to JPEG, PNG
+// or WebP. Everything else is denied by the catch-all at the end.
+//
+// Note: download URLs with ?token= bypass these rules entirely. The app
+// still stores such URLs today (attachments and avatars); see
+// firebase/README.md, "Known gaps".
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+    // Same gate as firestore.rules: owner, verified email, admin-approved.
+    // firestore.exists() is a cross-service read: on the first deploy the
+    // Storage service agent must be granted access to Firestore (the console
+    // prompts for it; see firebase/README.md) or every request is denied.
+    function isApprovedDoctor(uid) {
+      return isOwner(uid)
+        && request.auth.token.email_verified == true
+        && firestore.exists(/databases/(default)/documents/approvedDoctors/$(uid));
+    }
+
+    // Size and content type of the object being written.
+    // `resource == null`: the object must not exist yet. The Storage
+    // emulator treats an upload over an existing object as `create`, so
+    // this is what makes objects immutable (no silent overwrite).
+    function validImageUpload(maxBytes) {
+      return resource == null
+        && request.resource != null
+        && request.resource.size > 0
+        && request.resource.size <= maxBytes
+        && request.resource.contentType in ['image/jpeg', 'image/png', 'image/webp'];
+    }
+
+    // Plain file names only (the app uses a UUID or a millisecond timestamp
+    // plus .jpg).
+    function validFileName(name) {
+      return name.matches('[A-Za-z0-9_-]{1,128}[.](jpg|jpeg|png|webp)');
+    }
+
+    // clinical_attachments/{uid}/{patientId}/{uuid}.jpg  (max 10 MB)
+    match /clinical_attachments/{uid}/{patientId}/{fileName} {
+      allow get: if isApprovedDoctor(uid);
+      allow create: if isApprovedDoctor(uid)
+        && patientId.size() <= 128
+        && validFileName(fileName)
+        && validImageUpload(10 * 1024 * 1024);
+      allow delete: if isApprovedDoctor(uid);
+    }
+
+    // doctor_profiles/{uid}/{timestamp}.jpg  (max 5 MB, owner-only read)
+    // The old flat path doctor_profiles/{uid}_{timestamp}.jpg matches no
+    // rule and is denied; existing avatars there keep displaying only
+    // through their stored tokenized download URLs.
+    match /doctor_profiles/{uid}/{fileName} {
+      allow get: if isApprovedDoctor(uid);
+      allow create: if isApprovedDoctor(uid)
+        && validFileName(fileName)
+        && validImageUpload(5 * 1024 * 1024);
+      allow delete: if isApprovedDoctor(uid);
+    }
+
+    // ------------------------------------------------- default deny
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

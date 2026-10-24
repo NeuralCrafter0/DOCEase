@@ -2,13 +2,15 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:local_auth/local_auth.dart';
 import 'providers/patient_provider.dart';
 import 'providers/doctor_provider.dart';
 import 'providers/medicine_provider.dart';
 import 'providers/database_helper.dart';
+import 'providers/firestore_settings.dart';
+import 'services/session_controller.dart';
+import 'widgets/session_status_view.dart';
 import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
 
@@ -18,6 +20,7 @@ void main() async {
   bool firebaseReady = false;
   try {
     await Firebase.initializeApp();
+    configureFirestoreForEncryptedLocalStore();
     await GoogleSignIn.instance.initialize(
       serverClientId: '1014476645992-6s886d3l0h84lb277ghfq571gkg6bfi9.apps.googleusercontent.com',
     );
@@ -32,6 +35,15 @@ void main() async {
         ChangeNotifierProvider(create: (ctx) => PatientProvider()),
         ChangeNotifierProvider(create: (ctx) => DoctorProvider()),
         ChangeNotifierProvider(create: (ctx) => MedicineProvider()),
+        // Created on first read (after unlock), so no session work starts
+        // before the lock screen is passed.
+        ChangeNotifierProvider(
+          create: (ctx) => SessionController(
+            patients: ctx.read<PatientProvider>(),
+            doctor: ctx.read<DoctorProvider>(),
+            medicines: ctx.read<MedicineProvider>(),
+          ),
+        ),
       ],
       child: DOCEaseApp(ready: firebaseReady),
     ),
@@ -145,12 +157,12 @@ class _SecurityWrapperState extends State<SecurityWrapper> with WidgetsBindingOb
       );
     }
 
-    return StreamBuilder<User?>(
-      stream: FirebaseAuth.instance.authStateChanges(),
-      builder: (ctx, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) return const Scaffold(body: Center(child: CircularProgressIndicator()));
-        if (snapshot.hasData) return const HomeScreen();
-        return const LoginScreen();
+    // The session (auth, approval, local DB) sits below the unlock screen.
+    return Consumer<SessionController>(
+      builder: (ctx, session, _) => switch (session.phase) {
+        SessionPhase.ready => const HomeScreen(),
+        SessionPhase.signedOut => const LoginScreen(),
+        _ => SessionStatusView(session: session),
       },
     );
   }
