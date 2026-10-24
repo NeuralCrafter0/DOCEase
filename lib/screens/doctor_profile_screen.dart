@@ -6,6 +6,11 @@ import 'package:image_picker/image_picker.dart';
 import 'package:intl_phone_field/intl_phone_field.dart';
 import 'package:intl_phone_field/country_picker_dialog.dart';
 import 'package:intl_phone_field/countries.dart';
+import '../theme/app_theme.dart';
+import '../widgets/app_text_field.dart';
+import '../widgets/field_label.dart';
+import '../widgets/primary_button.dart';
+import '../widgets/segmented_selector.dart';
 import 'package:flutter/services.dart';
 import '../models/doctor.dart';
 import '../providers/doctor_provider.dart';
@@ -165,7 +170,7 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
             _buildModernInput(_clinicController, 'Clinic / Hospital', Icons.local_hospital_outlined),
             const SizedBox(height: 48),
             if (_isEditing)
-              _isLoading ? const Center(child: CircularProgressIndicator()) : ElevatedButton(onPressed: _saveProfile, style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF1E293B), minimumSize: const Size(double.infinity, 64), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24))), child: const Text('Save and Lock Profile', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18))),
+              _isLoading ? const Center(child: CircularProgressIndicator()) : PrimaryButton(label: 'Save and Lock Profile', onPressed: _saveProfile),
             const SizedBox(height: 40),
           ]),
         ),
@@ -173,40 +178,19 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
     );
   }
 
-  Widget _buildLabel(String text) => Padding(padding: const EdgeInsets.only(bottom: 10, left: 4), child: Text(text, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Color(0xFF475569))));
+  Widget _buildLabel(String text) => FieldLabel(text);
 
   Widget _buildModernInput(TextEditingController controller, String hint, IconData icon, {TextInputType? keyboardType, bool isAge = false}) {
-    return TextFormField(
-      controller: controller, keyboardType: keyboardType,
+    return AppTextField(
+      controller: controller, hint: hint, icon: icon, keyboardType: keyboardType,
       enabled: _isEditing,
       inputFormatters: isAge ? [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(3)] : null,
-      style: TextStyle(fontWeight: FontWeight.w700, color: _isEditing ? const Color(0xFF1E293B) : Colors.grey),
-      decoration: InputDecoration(
-        hintText: hint, prefixIcon: Icon(icon, color: const Color(0xFF6366F1), size: 20),
-        filled: true, fillColor: _isEditing ? Colors.white : const Color(0xFFF1F5F9),
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: Colors.grey.shade200)),
-      ),
+      textColor: _isEditing ? AppColors.ink : Colors.grey,
+      fillColor: _isEditing ? Colors.white : AppColors.track,
     );
   }
 
   Widget _buildHighPerfSelector(List<String> options, String selectedValue, Function(String) onSelected) {
-    final selectedIndex = options.indexOf(selectedValue);
-    return AbsorbPointer(
-      absorbing: !_isEditing,
-      child: Container(
-        height: 54, padding: const EdgeInsets.all(4),
-        decoration: BoxDecoration(color: const Color(0xFFF1F5F9), borderRadius: BorderRadius.circular(18)),
-        child: LayoutBuilder(builder: (context, constraints) {
-          final width = constraints.maxWidth / options.length;
-          return Stack(children: [
-            AnimatedPositioned(duration: const Duration(milliseconds: 250), curve: Curves.easeOutCubic, left: selectedIndex * width, top: 0, bottom: 0, width: width, child: Container(decoration: BoxDecoration(color: _isEditing ? Colors.white : Colors.grey.shade300, borderRadius: BorderRadius.circular(14), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 8)]))),
-            Row(children: options.map((opt) {
-              final isSelected = selectedValue == opt;
-              return Expanded(child: GestureDetector(onTap: () => onSelected(opt), behavior: HitTestBehavior.opaque, child: Center(child: Text(opt, style: TextStyle(fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600, color: isSelected ? const Color(0xFF6366F1) : const Color(0xFF64748B), fontSize: 13)))));
-            }).toList()),
-          ]);
-        }),
-      ),
-    );
+    return SegmentedSelector(options: options, selected: selectedValue, onSelected: onSelected, enabled: _isEditing);
   }
 }
