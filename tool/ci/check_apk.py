@@ -181,8 +181,14 @@ def main():
 
     # Size budgets.
     limits = budgets["apk"].get(a.budget_key, {}) if a.budget_key else {}
+    # What an arm64 phone gets from Play's per-ABI split: the APK minus the
+    # native libs of other ABIs (some plugins ship prebuilt libs for every ABI
+    # even with --target-platform android-arm64, e.g. SQLCipher).
+    other_abi_kib = round(sum(l["kib"] for l in libs if l["abi"] != "arm64-v8a"), 1)
+    device_arm64_kib = round(kib(total) - other_abi_kib, 1)
     measured = {
         "max_total_kib": kib(total),
+        "max_device_arm64_kib": device_arm64_kib,
         "max_libapp_kib": max(libapp_by_abi.values()) if libapp_by_abi else 0,
         "max_flutter_assets_kib": kib(cat["flutter_assets"]),
         "max_dex_kib": kib(cat["dex"]),
@@ -198,7 +204,8 @@ def main():
     report = {
         "apk": os.path.basename(a.apk), "package": pkg, "version_code": vcode,
         "version_name": vname, "min_sdk": min_sdk, "target_sdk": target_sdk,
-        "abis": abis, "total_kib": kib(total),
+        "abis": abis, "total_kib": kib(total), "device_arm64_kib": device_arm64_kib,
+        "other_abi_libs_kib": other_abi_kib,
         "compressed_kib": {k: kib(v) for k, v in cat.items()},
         "uncompressed_kib": {k: kib(v) for k, v in raw.items()},
         "libapp_kib_by_abi": libapp_by_abi, "libs": libs,
@@ -215,6 +222,7 @@ def main():
     lines = [f"### {a.title}", "",
              f"`{report['apk']}`: **{kib(total)} KiB**, package `{pkg}`, versionCode {vcode}, "
              f"minSdk {min_sdk}, targetSdk {target_sdk}, ABIs {', '.join(abis) or 'none'}", "",
+             f"Estimated arm64 phone download (APK minus {other_abi_kib} KiB of other-ABI native libs): **{device_arm64_kib} KiB**", "",
              "| Part (compressed in APK) | KiB |", "|---|---:|"]
     labels = {"libapp": "Dart code (libapp.so, all ABIs)", "libflutter": "Flutter engine (libflutter.so)",
               "native_other": "Other native libs (e.g. SQLCipher)", "dex": "Java/Kotlin (dex)",
