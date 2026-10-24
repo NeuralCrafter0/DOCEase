@@ -1,10 +1,11 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 
 import 'package:path/path.dart' as p;
 
+import 'patient_load_status.dart';
 import '../providers/database_helper.dart' show DatabaseHelper;
 import '../providers/local_database.dart';
 import 'local_photo_store.dart';
@@ -62,24 +63,34 @@ class PhotoSweepResult {
 ///    never followed or deleted. Each walked file is keyed with #10's
 ///    [AttachmentRefs.attachmentKey] (keys are never built here); only keys
 ///    starting with `attachments/` are compared, and null means "not mine,
-///    never delete". The delete itself re-checks the resolved path
-///    ([LocalPhotoStore.deleteOwnedVisitFile]).
+///    never delete". The delete itself ([LocalPhotoStore.deleteOwnedVisitFile])
+///    is entry-only: it checks that the owner folder resolves to itself and
+///    that the entry is a regular file (`followLinks: false`) with an
+///    app-generated name directly in that folder, then unlinks the entry's
+///    own path, never a resolved one.
 /// 3. Files changed in the last [grace] are kept, so a photo picked and
 ///    copied but not yet saved is not eaten. The newer of the modified and
 ///    status-change times counts (a copy can keep the source's mtime).
 /// 4. Logs carry counts and codes only, never a path or file name.
+/// 5. It never relies on the provider's patient list: rule 1's fresh scan
+///    fails closed on its own. As defence in depth it also skips when
+///    PatientProvider.loadFailed is true for the owner at the moment it runs
+///    ([PatientLoadStatus], checked at run time and again before each delete).
 class PhotoSweep {
   PhotoSweep({
     required LocalDatabase db,
     LocalPhotoStore? photos,
     this.grace = defaultGrace,
     DateTime Function()? now,
+    PatientLoadStatus? loadStatus,
   })  : _db = db,
+        _loadStatus = loadStatus,
         _photosOverride = photos,
         _now = now ?? DateTime.now;
 
   /// The app's sweep: [DatabaseHelper.instance] and [LocalPhotoStore.instance].
-  factory PhotoSweep.forApp() => PhotoSweep(db: DatabaseHelper.instance);
+  factory PhotoSweep.forApp() =>
+      PhotoSweep(db: DatabaseHelper.instance, loadStatus: PatientLoadStatus.instance);
 
   static const hookName = 'photo_sweep';
   static const defaultGrace = Duration(minutes: 10);
@@ -89,6 +100,7 @@ class PhotoSweep {
   static Future<void> startupHook() => PhotoSweep.forApp().runWhenOpen();
 
   final LocalDatabase _db;
+  final PatientLoadStatus? _loadStatus;
   final LocalPhotoStore? _photosOverride;
   LocalPhotoStore get _photos => _photosOverride ?? LocalPhotoStore.instance;
   final Duration grace;
@@ -110,19 +122,28 @@ class PhotoSweep {
     try {
       return _log(await _sweep(owner));
     } catch (e) {
-      return _log(PhotoSweepResult.skipped(errorCode(e)));
+      return _log(PhotoSweepResult.skipped(skipReason(e)));
     }
   }
 
+  /// The logged skip reason: an [AttachmentScanFailure] enum name (e.g.
+  /// `unrecognisedPath`) wherever the scan failure surfaces, else the error
+  /// type ([errorCode]). Never a path or message.
+  @visibleForTesting
+  static String skipReason(Object e) => e is AttachmentScanIncomplete ? e.reason.name : errorCode(e);
+
   Future<PhotoSweepResult> _sweep(String owner) async {
     if (_db.openUid != owner) return PhotoSweepResult.skipped(AttachmentScanFailure.noDatabase.name);
+    final status = _loadStatus;
+    if (status != null && status.isFailed(owner)) return const PhotoSweepResult.skipped('loadFailed');
     final Set<String> referenced;
     try {
       referenced = await _db.referencedAttachmentKeys();
     } on AttachmentScanIncomplete catch (e) {
-      return PhotoSweepResult.skipped(e.reason.name); // any other error: sweep() skips too
+      return PhotoSweepResult.skipped(skipReason(e)); // any other error: sweep() skips too
     }
     if (_db.openUid != owner) return const PhotoSweepResult.skipped('ownerChanged');
+    if (status != null && status.isFailed(owner)) return const PhotoSweepResult.skipped('loadFailed');
 
     await _photos.init();
     final dir = _photos.visitFolderFor(owner);
@@ -163,7 +184,7 @@ class PhotoSweep {
         recent++;
         continue;
       }
-      if (_db.openUid != owner) {
+      if (_db.openUid != owner || (status != null && status.isFailed(owner))) {
         return PhotoSweepResult(scanned: scanned, removed: removed, referenced: kept, recent: recent, other: other);
       }
       if (await _photos.deleteOwnedVisitFile(path, owner: owner)) {

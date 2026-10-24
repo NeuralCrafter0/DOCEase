@@ -5,6 +5,7 @@ import 'package:docease/models/patient.dart';
 import 'package:docease/providers/local_database.dart';
 import 'package:docease/providers/patient_provider.dart';
 import 'package:docease/services/attachments.dart';
+import 'package:docease/services/local_photo_store.dart';
 import 'package:docease/services/sync_cancel_token.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -26,6 +27,7 @@ void main() {
   late FakeStorage storage;
   late PatientProvider provider;
   late Directory tmp;
+  late LocalPhotoStore photos;
 
   setUp(() {
     db = MergeDb()..state = const DbReady('doctorA');
@@ -37,12 +39,39 @@ void main() {
         retryBaseDelay: const Duration(milliseconds: 20),
         retryMaxDelay: const Duration(milliseconds: 80));
     tmp = Directory.systemTemp.createTempSync('docease_backend_test');
+    final support = Directory('${tmp.path}/support')..createSync();
+    photos = LocalPhotoStore(supportDir: () async => support);
+    provider.dispose();
+    provider = PatientProvider(
+        db: db, firestore: remote, auth: auth, storage: storage, photos: photos,
+        retryBaseDelay: const Duration(milliseconds: 20),
+        retryMaxDelay: const Duration(milliseconds: 80));
   });
 
   tearDown(() {
     provider.dispose();
     tmp.deleteSync(recursive: true);
   });
+
+  /// Waits (bounded) until [done]: uploads, swap and scan do real file
+  /// I/O, which can take more than a few event-loop turns under load.
+  Future<void> until(bool Function() done) async {
+    for (var i = 0; i < 1000 && !done(); i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+    await flushMicrotasks();
+  }
+
+  var picks = 0;
+  /// A pick as the app makes it (PR #8 / LocalPhotoStore):
+  /// <support>/attachments/<ownerFolder>/<uuid>.<ext>. Only these are
+  /// uploaded and swapped; anything else stays local (security #16).
+  Future<String> pick(String ext) async {
+    await photos.init();
+    final dir = Directory(photos.visitFolderFor('doctorA')!)..createSync(recursive: true);
+    final id = (++picks).toRadixString(16).padLeft(12, '0');
+    return (File('${dir.path}/0000aaaa-bbbb-4ccc-addd-$id.$ext')..writeAsBytesSync(List.filled(32, 7))).path;
+  }
 
   String file(String name, {int bytes = 32}) {
     final f = File('${tmp.path}/$name')..writeAsBytesSync(List.filled(bytes, 7));
@@ -218,7 +247,7 @@ void main() {
       expect(db.applyLog, isEmpty);
       expect(db.rows['p1']!.name, 'Asha');
       expect(logs.join('\n'), isNot(contains('secret')), reason: 'only sanitized codes are logged');
-      expect(logs.join('\n'), contains('StateError'));
+      expect(logs.join('\n'), contains('DbReadException'), reason: 'the strict read failed');
     });
 
     test('without applyCloudPatient (interim) a dirty row is still skipped', () async {
@@ -323,10 +352,10 @@ void main() {
     });
 
     test('picked images upload to the per-patient folder and the visit stores Storage paths', () async {
-      final jpg = file('a.JPG');
-      final png = file('b.png');
+      final jpg = await pick('jpg');
+      final png = await pick('png');
       await provider.addRecord('p1', visit('v1', [jpg, png]));
-      await flushMicrotasks();
+      await until(() => db.dirty['p1'] == false);
 
       expect(storage.uploads.length, 2);
       final paths = storage.uploads.keys.toList();
@@ -341,16 +370,16 @@ void main() {
 
     test('a failed upload never puts the local path in Firestore and is retried', () async {
       storage.failUploads = true;
-      final jpg = file('a.jpg');
+      final jpg = await pick('jpg');
       await provider.addRecord('p1', visit('v1', [jpg]));
-      await flushMicrotasks();
+      await until(() => remote.payloads.isNotEmpty);
       expect(remote.payloads, isNotEmpty);
       expect(remote.payloads.last.history.single.attachmentPaths, isEmpty);
       expect(provider.findById('p1').history.single.attachmentPaths, [jpg]);
 
       storage.failUploads = false;
       await provider.retryDirty();
-      await flushMicrotasks();
+      await until(() => db.dirty['p1'] == false);
       expect(storage.uploads.length, 1);
       expect(remote.payloads.last.history.single.attachmentPaths, [storage.uploads.keys.single]);
     });
@@ -377,10 +406,10 @@ void main() {
       await provider.loadAndSync('doctorA');
       provider.clear();
       await provider.loadAndSync('doctorA');
-      final added = file('new.webp');
+      final added = await pick('webp');
       await provider.updateRecord(
           'p3', visit('v1', ['clinical_attachments/doctorA/p3/old.jpg', added]));
-      await flushMicrotasks();
+      await until(() => db.dirty['p3'] == false);
       expect(storage.uploads.values.single, 'image/webp');
       expect(remote.payloads.last.history.single.attachmentPaths,
           ['clinical_attachments/doctorA/p3/old.jpg', storage.uploads.keys.single]);
