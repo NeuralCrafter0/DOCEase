@@ -309,16 +309,159 @@ void main() {
       expect(r.history.first.attachmentPaths.first, storage(u1));
     });
 
-    test('SWAP-RS-41 GAP until attachment_swaps (b): a stale whole-row save AFTER the swap '
-        'restores the local path (characterization of fed74ca)', () async {
+    test('SWAP-RS-41 (flipped on 3227338) a stale whole-row save AFTER the swap keeps the '
+        'Storage path and the stale save\'s other edits', () async {
       final stale = patient(name: 'Asha Stale'); // built before the swap
       expect(await swapA(), isTrue);
       await db.updatePatient(stale);
       final r = (await db.fetchPatientsStrict()).single;
       expect(r.name, 'Asha Stale');
-      expect(r.history.first.attachmentPaths.first, localA(u1),
-          reason: 'fed74ca: a stale whole-row save brings the local path back; '
-              '(b) attachment_swaps will rewrite it to the Storage path. Flip then.');
+      expect(r.history.map((v) => v.attachmentPaths).toList(), [
+        [storage(u1), oldStorage, localA(u2)],
+        [storage(u1)],
+      ]);
+      expect(await db.referencedAttachmentKeys(), isNot(contains('attachments/$u1.jpg')));
+    });
+  });
+
+  group('3227338 attachment_swaps (real SQLCipher)', () {
+    Future<List<Map<String, Object?>>> swaps() =>
+        opener.last!.query('attachment_swaps', orderBy: 'patient_id, local_key');
+    Future<bool> hasSwapsTable() async => (await opener.last!.rawQuery(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='attachment_swaps'"))
+        .isNotEmpty;
+
+    test('SWQ-QA-01 swap records (patient, local key) -> Storage path in the same write', () async {
+      expect(await swaps(), isEmpty);
+      expect(await swapA(), isTrue);
+      final m = await swaps();
+      expect(m, hasLength(1));
+      expect(m.single['patient_id'], 'p1');
+      expect(m.single['local_key'], 'attachments/$u1.jpg');
+      expect(m.single['storage_path'], storage(u1));
+    });
+
+    test('SWQ-QA-02 failed swaps (false / ArgumentError) record no mapping', () async {
+      expect(await swapA(pid: 'p404'), isFalse);
+      await expectLater(swapA(to: storage(u1, ext: 'gif')), throwsArgumentError);
+      expect(await swaps(), isEmpty);
+    });
+
+    test('SWQ-QA-03 local insertPatient re-applies the mapping; returned version == stored row',
+        () async {
+      expect(await swapA(), isTrue);
+      final v = await db.insertPatient(patient(name: 'Re-inserted')); // stale L copy
+      final r = await row('p1');
+      expect('${r['updated_at']}', v, reason: 'returned version is the stored row');
+      final got = await pathsOf('p1');
+      expect(got.first.first, storage(u1));
+      expect(got[1], [storage(u1)]);
+      expect((await db.fetchPatientsStrict()).single.name, 'Re-inserted');
+    });
+
+    test('SWQ-QA-04 cloud apply is never rewritten (cloud copy wins on a synced row)', () async {
+      expect(await swapA(), isTrue);
+      await markClean('p1');
+      final cloud = Patient(
+          id: 'p1',
+          name: 'Cloud',
+          age: '30',
+          gender: 'Female',
+          phone: '+910000000000',
+          updatedAt: '${DateTime.now().millisecondsSinceEpoch + 100000}',
+          history: [visit('v1', [localA(u1)])]);
+      expect(await db.applyCloudPatient(cloud), isTrue, reason: 'precondition: applied');
+      expect((await pathsOf('p1')).single, [localA(u1)],
+          reason: 'cloud merges must not consult attachment_swaps');
+      expect(await swaps(), hasLength(1), reason: 'cloud apply leaves the mapping');
+    });
+
+    test('SWQ-QA-05 the mapping is per patient: same local key in another patient is kept', () async {
+      expect(await swapA(), isTrue);
+      await db.insertPatient(patient(id: 'p2', history: [visit('v1', [localA(u1)])]));
+      expect((await pathsOf('p2')).single, [localA(u1)]);
+    });
+
+    test('SWQ-QA-06 a tampered mapping (path outside this owner/patient) is ignored', () async {
+      await opener.last!.insert('attachment_swaps', {
+        'patient_id': 'p1',
+        'local_key': 'attachments/$u1.jpg',
+        'storage_path': storage(u1, uid: uidB),
+        'swapped_at': DateTime.now().millisecondsSinceEpoch,
+      });
+      await db.updatePatient(patient(name: 'Tamper'));
+      expect((await pathsOf('p1')).first.first, localA(u1));
+    });
+
+    test('SWQ-QA-07 a photo removed in the stale copy is not brought back', () async {
+      expect(await swapA(), isTrue);
+      await db.updatePatient(patient(history: [visit('v1', [oldStorage]), visit('v2', const [])]));
+      expect(await pathsOf('p1'), [
+        [oldStorage],
+        <String>[]
+      ]);
+    });
+
+    test('SWQ-QA-08 scans ignore the mapping', () async {
+      expect(await swapA(), isTrue);
+      await db.updatePatient(patient(history: [visit('v1', [localA(u2)])]));
+      final k = await db.referencedAttachmentKeys();
+      expect(k, isNot(contains('attachments/$u1.jpg')));
+      expect(k, contains('attachments/$u2.jpg'));
+      expect(await swaps(), hasLength(1));
+    });
+
+    test('SWQ-QA-09 cleared with the patient delete (tombstone)', () async {
+      expect(await swapA(), isTrue);
+      await db.markPendingDelete('p1');
+      expect(await swaps(), isEmpty);
+    });
+
+    test('SWQ-QA-10 pruned on open after 30 days (31d gone, 29d kept)', () async {
+      final now = DateTime.now();
+      for (final (k, d) in [('old', 31), ('young', 29)]) {
+        await opener.last!.insert('attachment_swaps', {
+          'patient_id': 'p1',
+          'local_key': 'attachments/$k.jpg',
+          'storage_path': 'clinical_attachments/doctorA/p1/$k.jpg',
+          'swapped_at': now.subtract(Duration(days: d)).millisecondsSinceEpoch,
+        });
+      }
+      await db.close();
+      await db.openFor(uidA);
+      expect((await swaps()).map((r) => r['local_key']), ['attachments/young.jpg']);
+    });
+
+    test('SWQ-QA-11 migration: an existing v2 DB without the table gets it on open; data intact',
+        () async {
+      await opener.last!.execute('DROP TABLE attachment_swaps'); // a fed74ca-era v2 file
+      final ver = (await opener.last!.rawQuery('PRAGMA user_version')).first.values.first;
+      await db.close();
+      await db.openFor(uidA);
+      expect(await hasSwapsTable(), isTrue);
+      expect((await opener.last!.rawQuery('PRAGMA user_version')).first.values.first, ver);
+      expect((await db.fetchPatientsStrict()).single.name, 'Asha');
+      expect(await swapA(), isTrue);
+      await db.updatePatient(patient(name: 'After migration'));
+      expect((await pathsOf('p1')).first.first, storage(u1));
+    });
+
+    test('SWQ-QA-12 migration: v1 -> v2 upgrade creates attachment_swaps', () async {
+      await db.close();
+      final dir = Directory(p.join(tmp.path, 'v1'))..createSync();
+      final k1 = MemKeys();
+      final v1 = DatabaseHelper(
+          keyStore: k1, opener: opener, databasesPath: () async => dir.path, schemaVersion: 1);
+      await v1.openFor(uidA);
+      expect(await hasSwapsTable(), isFalse, reason: 'precondition: v1 has no table');
+      await v1.close();
+      db = DatabaseHelper(keyStore: k1, opener: opener, databasesPath: () async => dir.path);
+      await db.openFor(uidA);
+      expect(await hasSwapsTable(), isTrue);
+      await db.insertPatient(patient());
+      expect(await swapA(), isTrue);
+      await db.updatePatient(patient(name: 'v1 upgraded'));
+      expect((await pathsOf('p1')).first.first, storage(u1));
     });
   });
 }
