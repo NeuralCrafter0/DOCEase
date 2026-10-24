@@ -99,6 +99,7 @@ CI cannot check real hardware, real biometrics or iOS. That's what the next list
 
 ## 5. Pre-release checklist (by hand, every release)
 
+- [ ] **BLOCKER:** No production release until PR #2's rules are finished (validMedicineItems and the metadata check), deployed, and backend has signed off.
 - [ ] **Real Android phone:** install the release-signed APK from the tag run (not a DEV build). Create a patient, force-stop the app and reopen it, and the data must still be there. On a second phone or a fresh install, confirm the database file can't be read without the app (encryption on).
 - [ ] **Biometrics:** the lock asks for fingerprint or face on launch and on return from the background. Cancel and fail both keep the data hidden. It behaves sensibly with no biometrics enrolled.
 - [ ] **iOS app-switcher cover:** on a real iPhone, open a patient, go to the app switcher, and the preview must be covered (no patient data visible). CI is Android-only, so this is always manual.
