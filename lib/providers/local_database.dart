@@ -385,6 +385,13 @@ abstract class LocalDatabase {
   /// With [fromCloud] this behaves exactly like [applyCloudPatient] (it
   /// never overwrites a dirty or deleted row) and returns the new
   /// `updated_at`, or `null` if the cloud copy was not applied.
+  ///
+  /// A local save (not [fromCloud]) keeps uploaded photos: in the same
+  /// transaction, every attachment entry that keys to a path already
+  /// swapped for this patient (see [swapAttachmentPath]) is stored as the
+  /// recorded Storage path, so a stale in-memory copy cannot put the local
+  /// path back. The returned version is for the stored row, which may then
+  /// differ from [patient]: push the stored row ([dirtyPatientsStrict]).
   Future<String?> insertPatient(Patient patient, {bool fromCloud = false});
 
   /// Applies a copy that just came from Firestore, as synced, only if the
@@ -400,6 +407,9 @@ abstract class LocalDatabase {
 
   /// Updates [patient] and marks it dirty. Returns the new `updated_at` or
   /// null. Throws [UnsyncedCounterException] like [insertPatient].
+  ///
+  /// Keeps uploaded photos exactly like a local [insertPatient] (recorded
+  /// swaps are re-applied in the same transaction).
   Future<String?> updatePatient(Patient patient);
 
   /// Rows with sync_state dirty, oldest `updated_at` first, each with
@@ -533,6 +543,14 @@ abstract class LocalDatabase {
   /// * [DbReadException] `readFailed`: the read or write failed; rolled
   ///   back (the unsynced counter may be one high, which is safe).
   /// * [UnsyncedCounterException]: the counter cannot be kept honest.
+  ///
+  /// A successful swap also records `(patientId, local key) -> storagePath`
+  /// in `attachment_swaps` in the same transaction. Local whole-row saves
+  /// ([insertPatient], [updatePatient]) re-apply it to any entry with that
+  /// key, if the path is still in this owner's and patient's folder; cloud
+  /// copies ([applyCloudPatient]) never are. Mappings go with the
+  /// patient's delete ([markPendingDelete]) and are pruned on open after
+  /// 30 days. They are not references: the attachment scans ignore them.
   Future<bool> swapAttachmentPath(
       {required String expectedOwner,
       required String patientId,

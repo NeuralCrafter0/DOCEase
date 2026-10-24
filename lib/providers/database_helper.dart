@@ -438,6 +438,7 @@ class DatabaseHelper implements LocalDatabase {
       _uid = uid;
       if (_schemaVersion >= 2) {
         await _createV2Tables(db);
+        await _pruneAttachmentSwaps(db);
         await _reconcileCounter(uid, db);
       }
       _emit(DbReady(uid));
@@ -1021,6 +1022,13 @@ class DatabaseHelper implements LocalDatabase {
     await db.execute('CREATE TABLE IF NOT EXISTS settings ('
         'key TEXT PRIMARY KEY, value TEXT NOT NULL, '
         'updated_at INTEGER NOT NULL)');
+    // local photo key -> Storage path recorded by swapAttachmentPath, so a
+    // whole-row save from a stale in-memory copy keeps the uploaded path.
+    // A mapping, not a reference: never read by the attachment scans.
+    await db.execute('CREATE TABLE IF NOT EXISTS attachment_swaps ('
+        'patient_id TEXT NOT NULL, local_key TEXT NOT NULL, '
+        'storage_path TEXT NOT NULL, swapped_at INTEGER NOT NULL, '
+        'PRIMARY KEY(patient_id, local_key))');
   }
 
   static Future<void> _onDowngrade(Database db, int from, int to) async {
@@ -1065,14 +1073,16 @@ class DatabaseHelper implements LocalDatabase {
       if (!wasDirty) await _incrementCounter(_uid!, db);
       try {
         final version = _nextVersion();
-        await db.insert(
-            'patients',
-            {
-              ..._row(patient),
-              'sync_state': SyncState.dirty,
-              'updated_at': version,
-            },
-            conflictAlgorithm: ConflictAlgorithm.replace);
+        await db.transaction((txn) async {
+          await txn.insert(
+              'patients',
+              {
+                ...await _rowKeepingSwaps(txn, patient),
+                'sync_state': SyncState.dirty,
+                'updated_at': version,
+              },
+              conflictAlgorithm: ConflictAlgorithm.replace);
+        });
         return '$version';
       } catch (e) {
         debugPrint('SQLITE insert error: ${_describe(e)}');
@@ -1135,21 +1145,65 @@ class DatabaseHelper implements LocalDatabase {
       if (!wasDirty) await _incrementCounter(_uid!, db);
       try {
         final version = _nextVersion();
-        final n = await db.update(
+        final n = await db.transaction((txn) async => txn.update(
             'patients',
             {
-              ..._row(patient),
+              ...await _rowKeepingSwaps(txn, patient),
               'sync_state': SyncState.dirty,
               'updated_at': version,
             },
             where: 'id = ?',
-            whereArgs: [patient.id]);
+            whereArgs: [patient.id]));
         return n > 0 ? '$version' : null;
       } catch (e) {
         debugPrint('SQLITE update error: ${_describe(e)}');
         return null;
       }
     });
+  }
+
+  /// [_row] for a local whole-row save, with every attachment entry that
+  /// keys to a path already swapped for this patient (`attachment_swaps`)
+  /// kept as the recorded Storage path, so a stale in-memory copy cannot
+  /// put the local path back. Read in the caller's transaction. Never used
+  /// for cloud copies ([_applyCloud]).
+  Future<Map<String, Object?>> _rowKeepingSwaps(
+      DatabaseExecutor txn, Patient patient) async {
+    final row = _row(patient);
+    final recorded = await txn.query('attachment_swaps',
+        columns: ['local_key', 'storage_path'],
+        where: 'patient_id = ?',
+        whereArgs: [patient.id]);
+    if (recorded.isEmpty) return row;
+    final (history, n) = AttachmentRefs.applySwapsToHistoryJson(
+        row['history'] as String,
+        {
+          for (final r in recorded)
+            r['local_key'] as String: r['storage_path'] as String,
+        },
+        uid: _uid!,
+        patientId: patient.id);
+    if (n == 0) return row;
+    debugPrint('SQLITE: kept $n uploaded attachment path(s) on a local save');
+    return {...row, 'history': history};
+  }
+
+  /// How long a swap mapping is kept. Pruned on open; by then no in-memory
+  /// copy from before the upload can still be saved.
+  static const Duration attachmentSwapRetention = Duration(days: 30);
+
+  /// Deletes swap mappings older than [attachmentSwapRetention]. Never
+  /// blocks the open.
+  Future<void> _pruneAttachmentSwaps(Database db) async {
+    try {
+      final cutoff = DateTime.now()
+          .subtract(attachmentSwapRetention)
+          .millisecondsSinceEpoch;
+      await db.delete('attachment_swaps',
+          where: 'swapped_at < ?', whereArgs: [cutoff]);
+    } catch (e) {
+      debugPrint('Attachment swap prune failed: ${_describe(e)}');
+    }
   }
 
   /// The open database and whether row [id] is already dirty, or
@@ -1236,6 +1290,8 @@ class DatabaseHelper implements LocalDatabase {
       try {
         await db.transaction((txn) async {
           await txn.delete('patients', where: 'id = ?', whereArgs: [id]);
+          await txn.delete('attachment_swaps',
+              where: 'patient_id = ?', whereArgs: [id]);
           await txn.insert(
               'pending_deletes',
               {
@@ -1322,6 +1378,16 @@ class DatabaseHelper implements LocalDatabase {
               where: 'id = ?',
               whereArgs: [patientId]);
           if (n != 1) throw const DbReadException(DbReadFailure.readFailed);
+          // Remember the swap so a stale whole-row save keeps storagePath.
+          await txn.insert(
+              'attachment_swaps',
+              {
+                'patient_id': patientId,
+                'local_key': key,
+                'storage_path': storagePath,
+                'swapped_at': DateTime.now().millisecondsSinceEpoch,
+              },
+              conflictAlgorithm: ConflictAlgorithm.replace);
           return true;
         });
       } on DbReadException {
