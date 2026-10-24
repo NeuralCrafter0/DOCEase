@@ -57,6 +57,7 @@ class _ShareConfirmSheetState extends State<ShareConfirmSheet> {
                 dense: true,
                 controlAffinity: ListTileControlAffinity.leading,
                 title: Text(f.label, style: const TextStyle(fontWeight: FontWeight.w600)),
+              subtitle: f.detail == null ? null : Text(f.detail!, style: const TextStyle(fontSize: 12, color: Color(0xFF64748B))),
                 value: _fields.contains(f),
                 onChanged: (on) => setState(() => on == true ? _fields.add(f) : _fields.remove(f)),
               ),
