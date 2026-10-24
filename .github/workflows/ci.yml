@@ -2,14 +2,16 @@ name: CI
 
 # Pipeline: gitleaks secret scan, flutter analyze, flutter test, Android build,
 # Firebase rules emulator tests (only when firebase/ exists), real-SQLCipher DB
-# tests (only when tool/sqlcipher_harness/run.sh exists)
+# tests (only when tool/sqlcipher_harness/run.sh exists), Android emulator
+# integration tests (only when integration_test/**/*_test.dart exists)
 # (release-mode, obfuscated APK; DEV build with DOCEASE_DEV_MODE=true on PRs and
 # branches; release-signed only on main/v* with secrets and DOCEASE_DEV_MODE=false).
 # Android only for now. Flutter is pinned to the version in .metadata.
 
 on:
   pull_request:
-    branches: [main]
+    # main, plus stacked CI PRs whose base is another ci/** branch.
+    branches: [main, "ci/**"]
   push:
     branches: [main]
     tags: ["v*"] # release tags: the only runs that upload debug symbols
@@ -613,3 +615,99 @@ jobs:
             echo "## Real SQLCipher DB tests: FAILED (harness exit $status)" >> "$GITHUB_STEP_SUMMARY"
           fi
           exit "$status"
+
+  android-integration:
+    name: Android emulator integration tests
+    # Runs every integration_test/**/*_test.dart on an API 34 x86_64 emulator
+    # (real sqflite_sqlcipher plugin and Android Keystore) through
+    # tool/ci/run_integration_tests.sh. Debug builds with the debug key; no
+    # secrets, no Firebase project access. Dev mode (DOCEASE_DEV_MODE=true) is
+    # the default; files in DEV_MODE_EXEMPT_TESTS run without the define (the
+    # DB engineer's device suite: its results do not depend on dev mode).
+    # Flavors are auto-detected like the Android build job: --flavor dev for
+    # the dev-mode group and --flavor prod for the exempt group when they exist.
+    # Skips (job passes) when there are no integration tests on this ref.
+    runs-on: ubuntu-latest # GitHub-hosted Linux runners expose /dev/kvm
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      EMULATOR_API_LEVEL: "34"
+      EMULATOR_TARGET: google_apis
+      EMULATOR_ARCH: x86_64
+      EMULATOR_OPTIONS: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+      # Space-separated, relative to the repo root. Add QA's device tests only
+      # when QA asks, and only here if they must not run in dev mode.
+      DEV_MODE_EXEMPT_TESTS: integration_test/db_encryption_migration_test.dart
+      INTEGRATION_DEVICE: emulator-5554
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Detect integration tests
+        id: detect
+        env:
+          TESTS_HASH: ${{ hashFiles('integration_test/**/*_test.dart') }}
+        run: |
+          if [ -n "$TESTS_HASH" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "## Android emulator integration tests: skipped (no integration_test/**/*_test.dart on this ref)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Enable KVM
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Set up Java ${{ env.JAVA_VERSION }}
+        if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+      - name: Set up Flutter ${{ env.FLUTTER_VERSION }}
+        if: steps.detect.outputs.present == 'true'
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: flutter pub get (lockfile enforced)
+        if: steps.detect.outputs.present == 'true'
+        run: flutter pub get --enforce-lockfile
+      - name: AVD cache
+        if: steps.detect.outputs.present == 'true'
+        id: avd-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-${{ runner.os }}-api${{ env.EMULATOR_API_LEVEL }}-${{ env.EMULATOR_TARGET }}-${{ env.EMULATOR_ARCH }}-v1
+      - name: Create AVD and snapshot for the cache
+        if: steps.detect.outputs.present == 'true' && steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: ${{ env.EMULATOR_API_LEVEL }}
+          target: ${{ env.EMULATOR_TARGET }}
+          arch: ${{ env.EMULATOR_ARCH }}
+          force-avd-creation: false
+          emulator-options: ${{ env.EMULATOR_OPTIONS }}
+          disable-animations: false
+          script: echo "Generated AVD snapshot for caching."
+      - name: Run integration tests on the emulator
+        if: steps.detect.outputs.present == 'true'
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: ${{ env.EMULATOR_API_LEVEL }}
+          target: ${{ env.EMULATOR_TARGET }}
+          arch: ${{ env.EMULATOR_ARCH }}
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save ${{ env.EMULATOR_OPTIONS }}
+          disable-animations: true
+          # One line: the action runs each script line in its own shell.
+          script: bash tool/ci/run_integration_tests.sh
