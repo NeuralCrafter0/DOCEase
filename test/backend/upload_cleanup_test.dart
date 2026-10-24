@@ -3,7 +3,10 @@
 // Storage path; never before, and only inside the owner's own folder.
 // Cloud mode against fakes only (FakeStorage, CloudFirestoreHelper); nothing
 // is deployed or contacted. Runs in both suite modes.
+import 'dart:convert';
 import 'dart:io';
+
+import 'package:crypto/crypto.dart';
 
 import 'package:docease/models/patient.dart';
 import 'package:docease/providers/local_database.dart';
@@ -41,6 +44,13 @@ class _RewriteDb extends MergeDb {
   }
 }
 
+/// App-generated name (`<uuid v4>.<ext>`) standing for [label].
+String n(String label) {
+  final h = sha256.convert(utf8.encode(label)).toString();
+  final ext = label.substring(label.lastIndexOf('.') + 1);
+  return '${h.substring(0, 8)}-${h.substring(8, 12)}-4${h.substring(13, 16)}-a${h.substring(17, 20)}-${h.substring(20, 32)}.$ext';
+}
+
 VisitRecord visit(String id, List<String> photos) => VisitRecord(
     id: id, date: DateTime(2026, 1, 2), visitType: 'Consultation', symptoms: 's',
     diagnosis: 'd', prescription: 'p', attachmentPaths: photos);
@@ -59,7 +69,7 @@ void main() {
   }
 
   /// Where PR #8's AttachmentStorage writes a pick: <support>/attachments/<ownerHash>/.
-  String pick(String name, {String owner = doctorA}) => photoIn(photos.visitFolderFor(owner)!, name);
+  String pick(String name, {String owner = doctorA}) => photoIn(photos.visitFolderFor(owner)!, n(name));
 
   List<String> rowPaths(String id) => db.rows[id]!.history.expand((r) => r.attachmentPaths).toList();
 
@@ -99,7 +109,7 @@ void main() {
     expect(remote.payloads.last.history.single.attachmentPaths, [storagePath]);
     expect(File(a).existsSync(), isFalse);
     expect(logs.where((l) => l.startsWith('Photos:')), ['Photos: removed 1 after an upload']);
-    expect(logs.join('\n'), isNot(contains('a.jpg')));
+    expect(logs.join('\n'), isNot(contains(p.basename(a))));
   });
 
   test('a failed upload keeps the file for the retry; the confirmed retry deletes it', () async {
@@ -147,9 +157,9 @@ void main() {
     await load();
     final outside = photoIn(p.join(root.path, 'cache'), 'image_picker_1.jpg');
     final theirs = pick('x.jpg', owner: 'doctorB');
-    final loose = photoIn(p.join(photos.supportPath!, 'attachments'), 'loose.jpg');
+    final loose = photoIn(p.join(photos.supportPath!, 'attachments'), n('loose.jpg'));
     final target = photoIn(p.join(root.path, 'elsewhere'), 'target.jpg');
-    final link = Link(p.join(photos.visitFolderFor(doctorA)!, 'link.jpg'))..createSync(target, recursive: true);
+    final link = Link(p.join(photos.visitFolderFor(doctorA)!, n('link.jpg')))..createSync(target, recursive: true);
 
     await provider.addRecord('p1', visit('v1', [outside, theirs, loose, link.path]));
     await flushMicrotasks();
@@ -181,7 +191,7 @@ void main() {
     final s = File('lib/providers/patient_provider.dart').readAsStringSync();
     final put = s.indexOf('.putFile(');
     final rewrite = s.indexOf('sentVersion = await _db.updatePatient(current);');
-    final del = s.indexOf("_deleteUnreferencedPhotos(uid, _confirmedUploads(current, replacements), after: 'an upload')");
+    final del = s.indexOf("_deleteUnreferencedPhotos(uid, _confirmedUploads(uid, current, replacements), after: 'an upload')");
     expect([put, rewrite, del], everyElement(greaterThan(0)));
     expect(rewrite, lessThan(del));
     expect(s.substring(rewrite, del), contains('if (sentVersion != null && uid != null) {'));

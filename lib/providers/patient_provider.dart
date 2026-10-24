@@ -441,7 +441,7 @@ class PatientProvider with ChangeNotifier {
       // failed upload or a refused rewrite never gets here with that local
       // path confirmed, so its file stays for the retry.
       if (sentVersion != null && uid != null) {
-        await _deleteUnreferencedPhotos(uid, _confirmedUploads(current, replacements), after: 'an upload');
+        await _deleteUnreferencedPhotos(uid, _confirmedUploads(uid, current, replacements), after: 'an upload');
         if (!_live(uid, token)) return false;
       }
       notifyListeners();
@@ -796,13 +796,16 @@ class PatientProvider with ChangeNotifier {
   }
 
   /// Local paths in [replacements] (local -> Storage path) whose Storage
-  /// path is on [saved], the row just written. A visit edited or deleted
-  /// while its file uploaded does not carry the Storage path and is left out.
-  static List<String> _confirmedUploads(Patient saved, Map<String, String> replacements) {
+  /// path is in [uid]'s folder for this patient and on [saved], the row just
+  /// written. A visit edited or deleted while its file uploaded does not
+  /// carry the Storage path and is left out. [_deleteUnreferencedPhotos]
+  /// re-checks each against memory and a fresh scan.
+  static List<String> _confirmedUploads(String uid, Patient saved, Map<String, String> replacements) {
     final entries = {for (final r in saved.history) ...r.attachmentPaths};
+    final folder = '${AttachmentPolicy.attachmentFolder(uid, saved.id)}/';
     return [
       for (final MapEntry(key: local, value: storagePath) in replacements.entries)
-        if (entries.contains(storagePath) && !entries.contains(local)) local,
+        if (storagePath.startsWith(folder) && entries.contains(storagePath) && !entries.contains(local)) local,
     ];
   }
 
@@ -825,7 +828,13 @@ class PatientProvider with ChangeNotifier {
   ///
   /// Fails closed: does nothing when the photo owner changed since the
   /// change started, or when any patient in memory has parse errors (its
-  /// references may be incomplete). Entries are compared by key
+  /// references may be incomplete). "Still used" is never taken from
+  /// memory alone (memory was loaded with `fetchPatients()`, which returns
+  /// an empty list on a read error): a fresh [LocalDatabase.referencedAttachmentKeys]
+  /// scan must also succeed, and any failure aborts the whole cleanup. A
+  /// still-used local entry (memory, a save in progress, a pending upload)
+  /// that cannot be keyed aborts it too ([AttachmentRefs.referencedKeys],
+  /// security #16 Low-2). Entries are compared by key
   /// ([AttachmentRefs.attachmentKey], #10): a null key (Storage path, web link, another owner's
   /// folder, `..`) is never deleted, nor is a key still referenced by any
   /// visit in memory, by a save in progress or by an upload still pending.
@@ -841,12 +850,15 @@ class PatientProvider with ChangeNotifier {
       if (list.isEmpty || _photoOwner != owner) return;
       if (_patients.any((p) => p.hasParseErrors)) return;
       final folder = LocalPhotoStore.ownerFolderName(owner);
-      final stillUsed = [
+      final stillUsed = AttachmentRefs.referencedKeys([
         for (final p in _patients)
           for (final r in p.history) ...r.attachmentPaths,
         ..._validatedPicks,
         ..._pendingUploads,
-      ].map((e) => AttachmentRefs.attachmentKey(e, ownerFolderName: folder)).whereType<String>().toSet();
+      ], ownerFolderName: folder);
+      if (_db.openUid != owner) return;
+      stillUsed.addAll(await _db.referencedAttachmentKeys());
+      if (_photoOwner != owner || _db.openUid != owner) return;
       await _photos.init();
       var removed = 0;
       for (final e in list) {
@@ -857,6 +869,9 @@ class PatientProvider with ChangeNotifier {
         if (await _photos.deleteOwnedVisitFile(path, owner: owner)) removed++;
       }
       if (removed > 0) debugPrint('Photos: removed $removed after $after');
+    } on AttachmentScanIncomplete catch (e) {
+      final reason = e.reason.name; // an AttachmentScanFailure enum name, never a path
+      debugPrint('Photos: cleanup skipped ($reason)'); // left to the sweep
     } catch (e) {
       debugPrint('Photos: cleanup failed (${errorCode(e)})');
     }

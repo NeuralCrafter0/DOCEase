@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart' show debugPrint;
 
+import 'package:path/path.dart' as p;
+
 import '../providers/database_helper.dart' show DatabaseHelper;
 import '../providers/local_database.dart';
 import 'local_photo_store.dart';
@@ -140,6 +142,10 @@ class PhotoSweep {
       final path = entity.path;
       if (await FileSystemEntity.type(path, followLinks: false) != FileSystemEntityType.file) {
         other++;
+        continue;
+      }
+      if (!LocalPhotoStore.isAppVisitFileName(p.basename(path))) {
+        other++; // not a name the app writes: never delete
         continue;
       }
       final key = AttachmentRefs.attachmentKey(path, ownerFolderName: folder);
