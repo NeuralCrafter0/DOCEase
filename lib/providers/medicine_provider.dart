@@ -54,6 +54,8 @@ class MedicineProvider with ChangeNotifier {
   /// Bumped by [clear] so a load or write started for a previous doctor
   /// never touches state after a sign-out or account switch.
   int _generation = 0;
+  bool _learnedMedicinesLoaded = false;
+  bool get learnedMedicinesLoaded => _learnedMedicinesLoaded;
 
   List<String> get frequentMedicines => _frequentMedicines;
   List<String> get dosageTemplates => _dosageTemplates;
@@ -85,6 +87,7 @@ class MedicineProvider with ChangeNotifier {
       if (gen != _generation) return;
       if (settings.exists) {
         _frequentMedicines = sanitize(settings.data()?['items']);
+        _learnedMedicinesLoaded = true;
         notifyListeners();
         return;
       }
@@ -93,6 +96,7 @@ class MedicineProvider with ChangeNotifier {
       if (gen != _generation) return;
       final legacy = sanitize(profile.data()?['frequentMedicines']);
       _frequentMedicines = legacy;
+      _learnedMedicinesLoaded = true;
       notifyListeners();
       try {
         await _settingsDoc(uid).set({'items': legacy});
@@ -112,6 +116,7 @@ class MedicineProvider with ChangeNotifier {
       final raw = await _local.getSetting(localSettingKey);
       if (gen != _generation) return;
       _frequentMedicines = raw == null ? [] : sanitize(jsonDecode(raw));
+      _learnedMedicinesLoaded = true;
       notifyListeners();
     } catch (e) {
       debugPrint('Error reading medicines: ${_code(e)}');
@@ -154,6 +159,7 @@ class MedicineProvider with ChangeNotifier {
     _uid = null;
     _loading = null;
     _frequentMedicines = [];
+    _learnedMedicinesLoaded = false;
     notifyListeners();
   }
 
@@ -178,4 +184,33 @@ class MedicineProvider with ChangeNotifier {
       s.isNotEmpty && s.length <= maxItemLength && !s.contains('\n') && !s.contains('\r');
 
   static String _code(Object e) => e is FirebaseException ? e.code : e.runtimeType.toString();
+
+  Future<void> removeLearnedMedicine(String name) async {
+    if (!_learnedMedicinesLoaded) {
+      // TODO(backend): throw the medicines SaveRefusedException here.
+      throw StateError('Learned medicines have not loaded; nothing was removed.');
+    }
+    final index = _frequentMedicines.indexOf(name);
+    if (index < 0) return;
+    final before = _frequentMedicines;
+    _frequentMedicines = [...before]..removeAt(index);
+    notifyListeners();
+    final gen = _generation;
+    try {
+      if (!_cloud) {
+        if (_uid == null) return;
+        await _local.putSetting(localSettingKey, jsonEncode(_frequentMedicines));
+        return;
+      }
+      final uid = _uid ?? _auth.currentUser?.uid;
+      if (uid == null || isLocalOwner(uid) || uid != _auth.currentUser?.uid) return;
+      await _settingsDoc(uid).set({'items': FieldValue.arrayRemove([name])}, SetOptions(merge: true));
+    } catch (e) {
+      if (gen == _generation) {
+        _frequentMedicines = before;
+        notifyListeners();
+      }
+      rethrow;
+    }
+  }
 }

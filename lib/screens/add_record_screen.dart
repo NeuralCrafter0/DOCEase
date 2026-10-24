@@ -332,13 +332,43 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
       // Match and complete only the line being typed, so every medicine line
       // gets suggestions and picking one keeps the other lines.
       suggestionsCallback: (_) => PrescriptionLines.suggestionsFor(_prescriptionController.value, medProvider.frequentMedicines),
-      itemBuilder: (context, suggestion) => ListTile(title: Text(suggestion), leading: const Icon(Icons.history, size: 16)),
+      // Long-press removes a wrongly learned entry (security review #6). A
+      // long-press-only detector, so the type-ahead's own tap still selects.
+      itemBuilder: (context, suggestion) => GestureDetector(
+        onLongPress: () => _confirmRemoveSuggestion(SuggestionsController.of<String>(context), medProvider, suggestion),
+        child: ListTile(title: Text(suggestion), leading: const Icon(Icons.history, size: 16)),
+      ),
       onSelected: (suggestion) {
         setState(() {
           _prescriptionController.value = PrescriptionLines.applySuggestion(_prescriptionController.value, suggestion);
         });
       },
     );
+  }
+
+  /// Asks before removing [name] from the learned suggestions, then removes
+  /// it from the stored list. Saved records keep their prescriptions.
+  Future<void> _confirmRemoveSuggestion(SuggestionsController<String> box, MedicineProvider medProvider, String name) async {
+    final remove = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Remove from suggestions?'),
+        content: Text('"$name" will no longer be suggested. Saved records are not changed.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Remove')),
+        ],
+      ),
+    );
+    if (remove != true || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await medProvider.removeLearnedMedicine(name);
+    } catch (_) {
+      messenger.showSnackBar(const SnackBar(content: Text("Couldn't remove it from suggestions. Try again in a moment.")));
+      return;
+    }
+    if (mounted) box.refresh();
   }
 
   Widget _buildDosageTemplates(MedicineProvider provider) {
