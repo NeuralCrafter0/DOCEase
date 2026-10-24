@@ -6,6 +6,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:docease/providers/swapped_paths_source.dart';
 import 'package:docease/models/patient.dart';
 import 'package:docease/providers/doctor_provider.dart';
 import 'package:docease/providers/firestore_helper.dart';
@@ -291,8 +292,39 @@ class CloudFirestoreHelper extends FakeFirestoreHelper {
 /// only if the local row is missing or clean and has no tombstone;
 /// markPendingDelete removes the row and writes a tombstone in one step
 /// (counted as unsynced); clearPendingDelete drops it.
-class MergeDb extends FakeLocalDatabase {
+class MergeDb extends FakeLocalDatabase implements SwappedPathsSource {
   final List<String> applyLog = [];
+
+  // ---- swappedPathsFor: stand-in for #10's announced method ----
+  /// (owner, patientId) of every swappedPathsFor call.
+  final List<(String, String)> swappedReads = [];
+
+  /// Thrown by swappedPathsFor (after the call is recorded) when set.
+  Object? swappedPathsThrows;
+
+  /// The DB engineer's final form: strict; a wrong or no open owner throws
+  /// DbReadException(notOpen); returns local key -> Storage path from
+  /// attachment_swaps, only entries passing isStoragePathFor(owner,
+  /// patientId).
+  @override
+  Future<Map<String, String>> swappedPathsFor({
+    required String expectedOwner,
+    required String patientId,
+  }) async {
+    swappedReads.add((expectedOwner, patientId));
+    final t = swappedPathsThrows;
+    if (t != null) throw t;
+    final s = state;
+    if (s is! DbReady || s.uid != expectedOwner) {
+      throw const DbReadException(DbReadFailure.notOpen);
+    }
+    return {
+      for (final MapEntry(:key, :value) in (swaps[patientId] ?? const {}).entries)
+        if (AttachmentRefs.isPatientStoragePath(value,
+            uid: expectedOwner, patientId: patientId))
+          key: value,
+    };
+  }
 
   // ---- swapAttachmentPath: #10's real fake (fed74ca) plus test hooks ----
   int swapCalls = 0;

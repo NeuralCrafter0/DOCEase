@@ -15,6 +15,7 @@ import '../services/sync_cancel_token.dart';
 import 'database_helper.dart';
 import 'firestore_helper.dart';
 import 'save_refused_exception.dart';
+import 'swapped_paths_source.dart';
 import '../services/patient_load_status.dart';
 
 export 'save_refused_exception.dart';
@@ -115,14 +116,6 @@ class PatientProvider with ChangeNotifier {
   /// with the same object instead of uploading a new one.
   final Map<String, String> _unswapped = {};
 
-  /// Attachment key ([AttachmentRefs.attachmentKey] for [_swappedOwner])
-  /// -> Storage path, for every swap the DB confirmed (returned true) this
-  /// session. A stale snapshot (an edit form opened before the swap) is
-  /// mapped through it before it is written, so it never puts back a local
-  /// path whose photo now lives in Storage. Keys, not raw paths, so
-  /// `file://` and `/data/data` vs `/data/user/0` aliases map too.
-  final Map<String, String> _swappedKeys = {};
-  String? _swappedOwner;
 
   /// Per-patient async lock (security #16 re-review): a queue keyed by
   /// patient id. The upload's swap, its strict refresh and the local
@@ -723,7 +716,6 @@ class PatientProvider with ChangeNotifier {
       }
       Patient? stored;
       if (swapped.isNotEmpty && _live(uid, token) && _openDbUid == owner) {
-        _rememberSwapped(owner, swapped);
         stored = await _refreshFromDb(owner, uid, token, patientId);
         if (stored == null) {
           // The DB holds the Storage paths; memory follows without a
@@ -801,30 +793,46 @@ class PatientProvider with ChangeNotifier {
     return row;
   }
 
-  void _rememberSwapped(String owner, Map<String, String> swapped) {
-    if (_swappedOwner != owner) {
-      _swappedKeys.clear();
-      _swappedOwner = owner;
+  /// #10's attachment_swaps for [patientId] (local key -> Storage path),
+  /// strict: throws DbReadException when it cannot read.
+  // Interim until #10 posts LocalDatabase.swappedPathsFor: then call it
+  // directly and delete swapped_paths_source.dart.
+  Future<Map<String, String>> _swappedPathsFor(String owner, String patientId) {
+    final db = _db;
+    if (db is SwappedPathsSource) {
+      return (db as SwappedPathsSource)
+          .swappedPathsFor(expectedOwner: owner, patientId: patientId);
     }
-    final folder = LocalPhotoStore.ownerFolderName(owner);
-    for (final MapEntry(key: local, value: storagePath) in swapped.entries) {
-      final key = AttachmentRefs.attachmentKey(local, ownerFolderName: folder);
-      if (key != null && key.startsWith('attachments/')) _swappedKeys[key] = storagePath;
-    }
+    return Future.value(const <String, String>{});
   }
 
-  /// Stale-snapshot mapping: an entry whose key the DB already swapped to a
-  /// Storage path this session is written as that Storage path.
-  String _mapSwappedEntry(String e, String folder) {
-    final key = AttachmentRefs.attachmentKey(e, ownerFolderName: folder);
-    return (key == null ? null : _swappedKeys[key]) ?? e;
-  }
-
-  VisitRecord _mapSwappedRecord(VisitRecord r) {
-    final owner = _swappedOwner;
-    if (_swappedKeys.isEmpty || owner == null || _photoOwner != owner) return r;
+  /// A form opened before an upload's swap still names the local path L:
+  /// each entry whose key #10 swapped is written as its Storage path S. An
+  /// entry that maps onto a path already in the list is dropped (no
+  /// duplicate reference); unmapped entries are left as they are.
+  static VisitRecord _mapSwappedRecord(
+      VisitRecord r, String owner, Map<String, String> swapped) {
+    if (swapped.isEmpty) return r;
     final folder = LocalPhotoStore.ownerFolderName(owner);
-    return _copyRecord(r, [for (final e in r.attachmentPaths) _mapSwappedEntry(e, folder)]);
+    final mapped = [
+      for (final e in r.attachmentPaths)
+        (switch (AttachmentRefs.attachmentKey(e, ownerFolderName: folder)) {
+          final String key when key.startsWith('attachments/') => swapped[key],
+          _ => null,
+        }) ?? e,
+    ];
+    // Drop an entry only when it duplicates a Storage path that came from
+    // a mapping ([L, S] or [S, L] -> [S]); other entries are untouched.
+    final fromMapping = {
+      for (var k = 0; k < mapped.length; k++)
+        if (mapped[k] != r.attachmentPaths[k]) mapped[k],
+    };
+    final out = <String>[];
+    for (final e in mapped) {
+      if (fromMapping.contains(e) && out.contains(e)) continue;
+      out.add(e);
+    }
+    return _copyRecord(r, out);
   }
 
   /// Runs [body] after every earlier holder of [patientId]'s lock finished
@@ -1340,19 +1348,43 @@ class PatientProvider with ChangeNotifier {
   Future<void> updateRecord(String patientId, VisitRecord record) {
     final copies = <String>[];
     return _mutateHistory(patientId, (current) async {
-      // A form opened before an upload's swap still names the local path.
-      record = _mapSwappedRecord(record);
-      final i = current.history.indexWhere((r) => r.id == record.id);
+      // Under the per-patient lock: the stored row and #10's swaps, both
+      // strict. Either read failing refuses the save (nothing written);
+      // never fall back to the form's paths.
+      final owner = _photoOwner;
+      final Patient? storedRow;
+      final Map<String, String> swapped;
+      try {
+        if (owner == null) throw const DbReadException(DbReadFailure.notOpen);
+        storedRow = (await _db.fetchPatientsStrict())
+            .where((p) => p.id == patientId)
+            .firstOrNull;
+        swapped = await _swappedPathsFor(owner, patientId);
+      } catch (e, st) {
+        Error.throwWithStackTrace(
+            SaveRefusedException(PatientSaveOperation.updateVisit, e), st);
+      }
+      // In memory (checked by _mutateHistory) but not in the DB: the save
+      // cannot happen, so it is refused rather than silently dropped.
+      if (storedRow == null) throw LocalSaveFailedException(patientId);
+      if (storedRow.hasParseErrors) {
+        throw SaveRefusedException(PatientSaveOperation.updateVisit,
+            const DbReadException(DbReadFailure.unreadableRow));
+      }
+      // A form opened before an upload's swap still names the local path:
+      // map swapped keys to their Storage path BEFORE the exists check, so
+      // only genuinely missing, unswapped local paths are refused.
+      record = _mapSwappedRecord(record, owner, swapped);
+      final i = storedRow.history.indexWhere((r) => r.id == record.id);
       if (i == -1) return null;
-      final stored = current.history[i].attachmentPaths.toSet();
+      final stored = storedRow.history[i].attachmentPaths.toSet();
       final added = record.attachmentPaths.where((e) => !stored.contains(e)).toList();
       final toUpload = await _validateNewAttachments(patientId, added);
       final kept = await _keepLocally(toUpload, copies);
       _validatedPicks.addAll(toUpload.map((e) => kept[e] ?? e));
-      final latest = _byId(patientId) ?? current;
-      final j = latest.history.indexWhere((r) => r.id == record.id);
-      if (j == -1) return null;
-      return [...latest.history]..[j] = _withPaths(record, kept);
+      // Built on the stored history: a photo the form removed (as L or S)
+      // is absent from the saved row, so no broken reference remains.
+      return [...storedRow.history]..[i] = _withPaths(record, kept);
     }, operation: PatientSaveOperation.updateVisit, newCopies: copies);
   }
 
@@ -1431,8 +1463,6 @@ class PatientProvider with ChangeNotifier {
     _resetRetry();
     _pendingUploads.clear();
     _unswapped.clear();
-    _swappedKeys.clear();
-    _swappedOwner = null;
     _unconfirmed.clear();
     _validatedPicks.clear();
     _resetLoadState();
