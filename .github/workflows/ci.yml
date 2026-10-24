@@ -3,7 +3,8 @@ name: CI
 # Pipeline: gitleaks secret scan, flutter analyze, flutter test, Android build,
 # Firebase rules emulator tests (only when firebase/ exists), real-SQLCipher DB
 # tests (only when tool/sqlcipher_harness/run.sh exists), Android emulator
-# integration tests (only when integration_test/**/*_test.dart exists)
+# integration tests (only when integration_test/**/*_test.dart exists),
+# asset/font/dependency budgets, and release size + Play readiness (arm64)
 # (release-mode, obfuscated APK; DEV build with DOCEASE_DEV_MODE=true on PRs and
 # branches; release-signed only on main/v* with secrets and DOCEASE_DEV_MODE=false).
 # Android only for now. Flutter is pinned to the version in .metadata.
@@ -340,46 +341,13 @@ jobs:
         run: |
           set -euo pipefail
           apk="$APK"
-          test -f "$apk"
-          # Newest stable build-tools (skip -rc). apksigner output differs by version
-          # ("Signer #1 certificate DN:" in 36, "V2 Signer: certificate DN:" in 37),
-          # so match on the field name only.
-          bt="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | grep -vE -- '-rc[0-9]*$' | sort -V | tail -1)"
-          certs="$("$bt/apksigner" verify --print-certs "$apk")"
-          dns="$(printf '%s\n' "$certs" | sed -n 's/^.*certificate DN: //p' | sort -u)"
-          shas="$(printf '%s\n' "$certs" | sed -n 's/^.*certificate SHA-256 digest: //p' | sort -u)"
-          # Fail closed: exactly one readable signer certificate is required.
-          if [ -z "$dns" ] || [ -z "$shas" ] || [ "$(printf '%s\n' "$shas" | wc -l)" -ne 1 ]; then
-            echo "::error title=Signature check::Could not read exactly one signer certificate from $apk with $(basename "$bt") apksigner."
-            exit 1
-          fi
-          cert_dn="$(printf '%s\n' "$dns" | head -1)"
-          cert_sha256="$shas"
-          # Public certificate details only (no secrets).
-          echo "APK signer (apksigner $(basename "$bt")): $cert_dn, SHA-256 $cert_sha256"
-          # Package ID: production builds must be exactly APP_ID; dev-flavor builds APP_ID.dev.
-          pkg="$("$bt/aapt2" dump packagename "$apk")"
-          echo "APK package: $pkg (flavor ${FLAVOR:-none})"
-          if [ "$DEV_MODE" = "false" ] && [ "$pkg" != "$APP_ID" ]; then
-            echo "::error title=Release guard::Production build has package '$pkg', expected '$APP_ID'."
-            exit 1
-          fi
-          if [ "$FLAVOR" = "dev" ] && [ "$pkg" != "$APP_ID.dev" ]; then
-            echo "::error title=Release guard::Dev-flavor build has package '$pkg', expected '$APP_ID.dev'."
-            exit 1
-          fi
-          debug_cert=false
-          if printf '%s' "$cert_dn" | grep -q 'CN=Android Debug'; then debug_cert=true; fi
-          # Never label a debug-key APK as release-signed.
-          if [ "$SIGNED" = "true" ] && [ "$debug_cert" = "true" ]; then
-            echo "::error title=Release signing failed::Signing secrets were provided but the APK is signed with the debug key."
-            exit 1
-          fi
-          # Third guard: a non-debug (release) certificate on a dev-mode build is never allowed.
-          if [ "$debug_cert" = "false" ] && [ "$DEV_MODE" != "false" ]; then
-            echo "::error title=Release guard::The APK carries a release certificate but was built with DOCEASE_DEV_MODE=$DEV_MODE."
-            exit 1
-          fi
+          # Shared with the split-per-ABI job: one signer certificate, package
+          # ID, debug-key vs release-signed, no release certificate in dev mode.
+          bash tool/ci/verify_apk_signature.sh "$apk" "$RUNNER_TEMP/apk-sig.txt"
+          cert_dn="$(sed -n 's/^cert_dn=//p' "$RUNNER_TEMP/apk-sig.txt")"
+          cert_sha256="$(sed -n 's/^cert_sha256=//p' "$RUNNER_TEMP/apk-sig.txt")"
+          pkg="$(sed -n 's/^pkg=//p' "$RUNNER_TEMP/apk-sig.txt")"
+          apk_sha256="$(sed -n 's/^apk_sha256=//p' "$RUNNER_TEMP/apk-sig.txt")"
           {
             echo "## Android build"
             echo ""
@@ -407,6 +375,7 @@ jobs:
             echo "| Signer cert | ${cert_dn} |"
             echo "| Signer cert SHA-256 | \`${cert_sha256}\` |"
             echo "| APK size | $(du -h "$apk" | cut -f1) |"
+            echo "| APK SHA-256 | \`${apk_sha256}\` |"
             if [ "$IS_RELEASE_TAG" = "true" ]; then
               echo "| Debug symbols | Uploaded as a separate artifact (release tag) |"
             else
@@ -414,6 +383,30 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: APK checks (size, 16 KB pages, target SDK, Firebase isolation)
+        # tool/ci/check_apk.py. Production builds (release/tag): 16 KB page
+        # support and Play's target SDK are enforced. DEV builds: report only,
+        # except that a dev-flavor build must be Firebase-isolated (PR #13 skips
+        # google-services and Analytics for dev). Without flavors (main today)
+        # the DEV APK is NOT isolated and is labelled so.
+        env:
+          DEV_MODE: ${{ steps.mode.outputs.dev_mode }}
+          FLAVOR: ${{ steps.mode.outputs.flavor }}
+          APK: ${{ steps.mode.outputs.apk }}
+        run: |
+          set -euo pipefail
+          bt="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | grep -vE -- '-rc[0-9]*$' | sort -V | tail -1)"
+          args=(--apk "$APK" --aapt2 "$bt/aapt2" --json-out "$RUNNER_TEMP/apk-report.json")
+          if [ "$DEV_MODE" = "false" ]; then
+            args+=(--title "APK checks (production)" --enforce-16kb --enforce-target-sdk)
+          elif [ "$FLAVOR" = "dev" ]; then
+            args+=(--title "APK checks (DEV, dev flavor)" --firebase forbid)
+          else
+            args+=(--title "APK checks (DEV, no flavors)" --firebase warn)
+          fi
+          status=0
+          python3 tool/ci/check_apk.py "${args[@]}" || status=$?
+          exit "$status"
       - name: Scan release build for dev-mode markers (QA REL-07)
         # Production (DOCEASE_DEV_MODE=false) builds only: the dev banner text must
         # not be compiled into libapp.so of the release APK, or of the AAB when one
@@ -442,7 +435,6 @@ jobs:
           path: ${{ steps.mode.outputs.apk }}
           retention-days: 7
           if-no-files-found: error
-
       - name: Upload AAB
         if: steps.mode.outputs.signed == 'true' && steps.mode.outputs.dev_mode == 'false'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -470,6 +462,236 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/upload-keystore.jks" android/key.properties
 
+  assets-budget:
+    name: Assets, fonts and dependencies (budgets)
+    # tool/ci/check_assets.py with limits from tool/ci/budgets.json: asset and
+    # font sizes, image pixels, font licences, banned packages; on PRs also new
+    # dependencies (listed for sign-off) and new hard-coded remote image/font
+    # URLs in lib/ (fail). No Flutter or Gradle needed.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Check assets, fonts and dependencies
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "$BASE_REF" ]; then args=(--base "origin/$BASE_REF"); fi
+          python3 tool/ci/check_assets.py "${args[@]}"
+
+  release-size:
+    name: Release size and Play readiness (arm64)
+    # Measurement build: `flutter build apk --release --target-platform
+    # android-arm64 --analyze-size` with DOCEASE_DEV_MODE=false (--flavor prod
+    # when flavors exist). Not obfuscated (--analyze-size needs symbol names),
+    # debug-key signed, never uploaded; only the size report is. Enforces the
+    # apk.release_arm64 budgets, 16 KB page support and Play's target SDK.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Java ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+      - name: Set up Flutter ${{ env.FLUTTER_VERSION }}
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: flutter pub get (lockfile enforced)
+        run: flutter pub get --enforce-lockfile
+      - name: Build release APK for arm64 with size analysis
+        id: build
+        run: |
+          set -euo pipefail
+          flavor_args=(); apk=build/app/outputs/flutter-apk/app-release.apk
+          if grep -qE '^[[:space:]]*productFlavors[[:space:]]*\{' android/app/build.gradle.kts 2>/dev/null; then
+            flavor_args=(--flavor prod); apk=build/app/outputs/flutter-apk/app-prod-release.apk
+          fi
+          flutter build apk --release "${flavor_args[@]}" --target-platform android-arm64 \
+            --analyze-size --code-size-directory=build/size-report \
+            --dart-define=DOCEASE_DEV_MODE=false
+          mkdir -p build/size-report
+          cp "$HOME"/.flutter-devtools/apk-code-size-analysis_*.json build/size-report/ 2>/dev/null || true
+          test -f "$apk"
+          echo "apk=$apk" >> "$GITHUB_OUTPUT"
+      - name: Size budgets, 16 KB pages and target SDK
+        env:
+          APK: ${{ steps.build.outputs.apk }}
+        run: |
+          set -euo pipefail
+          bt="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | grep -vE -- '-rc[0-9]*$' | sort -V | tail -1)"
+          status=0
+          python3 tool/ci/check_apk.py --apk "$APK" --aapt2 "$bt/aapt2" \
+            --budget-key release_arm64 --enforce-16kb --enforce-target-sdk \
+            --title "Release APK, arm64 only (approximates a phone's download)" \
+            --json-out build/size-report/apk-report.json || status=$?
+          python3 tool/ci/dart_size_top.py build/size-report >> "$GITHUB_STEP_SUMMARY" || true
+          exit "$status"
+      - name: Upload size report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docease-size-report-arm64
+          path: build/size-report/
+          retention-days: 14
+          if-no-files-found: warn
+
+  split-apk-size:
+    name: Split-per-ABI APK size (measurement)
+    # Measures `flutter build apk --split-per-abi`, the proposed way to build the
+    # user's final APK: the DEV config (--profile, DOCEASE_DEV_MODE=true,
+    # --flavor dev when flavors exist) and, for a like-for-like comparison with
+    # the universal release APK, the release config (DOCEASE_DEV_MODE=false,
+    # --flavor prod when flavors exist). Fails if the arm64-v8a APK lacks
+    # arm64 libsqlcipher.so or still carries other ABIs' native libs.
+    # Debug-key signed, never uploaded: no APK leaves this job.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      UNIVERSAL_RELEASE_BASELINE_KIB: "35951" # universal arm64 release APK, PR #21 run 40068366351
+      APP_ID: com.medhistory.app.medhistory
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Java ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+      - name: Set up Flutter ${{ env.FLUTTER_VERSION }}
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: flutter pub get (lockfile enforced)
+        run: flutter pub get --enforce-lockfile
+      - name: Build split-per-ABI APKs (DEV profile, then release)
+        run: |
+          set -euo pipefail
+          dev_flavor=(); rel_flavor=()
+          if grep -qE '^[[:space:]]*productFlavors[[:space:]]*\{' android/app/build.gradle.kts 2>/dev/null; then
+            dev_flavor=(--flavor dev); rel_flavor=(--flavor prod)
+          fi
+          out=build/app/outputs/flutter-apk
+          mkdir -p build/split-measure/dev build/split-measure/release
+          flutter build apk --profile --split-per-abi "${dev_flavor[@]}" \
+            --dart-define=DOCEASE_DEV_MODE=true
+          mv "$out"/app-*profile.apk build/split-measure/dev/
+          flutter build apk --release --split-per-abi "${rel_flavor[@]}" \
+            --dart-define=DOCEASE_DEV_MODE=false
+          mv "$out"/app-*release.apk build/split-measure/release/
+          ls -l build/split-measure/dev build/split-measure/release
+      - name: Verify signature and dev mode (arm64-v8a APKs)
+        # Same checks as the Android build job (tool/ci/verify_apk_signature.sh),
+        # plus the release dev-marker scan (QA REL-07) on the release split.
+        # Never release-signed here (no secrets): SIGNED=false.
+        run: |
+          set -euo pipefail
+          flavor_dev=""; flavor_rel=""
+          if grep -qE '^[[:space:]]*productFlavors[[:space:]]*\{' android/app/build.gradle.kts 2>/dev/null; then
+            flavor_dev=dev; flavor_rel=prod
+          fi
+          status=0
+          for kind in dev release; do
+            apk="$(find build/split-measure/$kind -name 'app-arm64-v8a*.apk' | head -1)"
+            if [ -z "$apk" ]; then echo "::error::no arm64-v8a APK from the $kind split build"; status=1; continue; fi
+            if [ "$kind" = dev ]; then dm=true; fl="$flavor_dev"; else dm=false; fl="$flavor_rel"; fi
+            DEV_MODE="$dm" SIGNED=false FLAVOR="$fl" \
+              bash tool/ci/verify_apk_signature.sh "$apk" "build/split-measure/$kind.sig" || status=1
+          done
+          rel="$(find build/split-measure/release -name 'app-arm64-v8a*.apk' | head -1)"
+          if [ -n "$rel" ] && bash tool/ci/check_release_markers.sh "$rel"; then
+            echo clean > build/split-measure/release.markers
+          else
+            echo FAILED > build/split-measure/release.markers; status=1
+          fi
+          exit "$status"
+      - name: Measure the arm64-v8a APKs
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          bt="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | grep -vE -- '-rc[0-9]*$' | sort -V | tail -1)"
+          fb=warn
+          if grep -qE '^[[:space:]]*productFlavors[[:space:]]*\{' android/app/build.gradle.kts 2>/dev/null; then fb=forbid; fi
+          status=0
+          for kind in dev release; do
+            apk="$(find build/split-measure/$kind -name 'app-arm64-v8a*.apk' | head -1)"
+            if [ -z "$apk" ]; then echo "::error::no arm64-v8a APK from the $kind split build"; status=1; continue; fi
+            if [ "$kind" = dev ]; then title="Split APK arm64-v8a, DEV (profile, DOCEASE_DEV_MODE=true)"; f="$fb"
+            else title="Split APK arm64-v8a, release (DOCEASE_DEV_MODE=false)"; f=ignore; fi
+            python3 tool/ci/check_apk.py --apk "$apk" --aapt2 "$bt/aapt2" --enforce-16kb \
+              --firebase "$f" --title "$title" --json-out "build/split-measure/$kind.json" || status=1
+          done
+          python3 - <<'PY' || status=1
+          import glob, json, os
+          base = float(os.environ["UNIVERSAL_RELEASE_BASELINE_KIB"])
+          rows, bad = [], []
+          for kind in ("dev", "release"):
+              p = f"build/split-measure/{kind}.json"
+              if not os.path.exists(p):
+                  bad.append(f"{kind}: no report"); continue
+              r = json.load(open(p))
+              abis = sorted({l["abi"] for l in r["libs"]})
+              sqlc = [l for l in r["libs"] if l["abi"] == "arm64-v8a" and l["lib"] == "libsqlcipher.so"]
+              if abis != ["arm64-v8a"]:
+                  bad.append(f"{kind}: native libs for {abis}, expected only arm64-v8a")
+              if not sqlc:
+                  bad.append(f"{kind}: arm64-v8a libsqlcipher.so is missing")
+              others = {os.path.basename(a): round(os.path.getsize(a) / 1024, 1)
+                        for a in glob.glob(f"build/split-measure/{kind}/*.apk") if "arm64-v8a" not in a}
+              sig = {}
+              if os.path.exists(f"build/split-measure/{kind}.sig"):
+                  sig = dict(l.rstrip("\n").split("=", 1) for l in open(f"build/split-measure/{kind}.sig") if "=" in l)
+              else:
+                  bad.append(f"{kind}: signature / dev-mode check did not pass")
+              rows.append((kind, r["apk"], r["total_kib"], r["version_code"],
+                           sqlc[0]["kib"] if sqlc else 0, others, sig))
+          out = ["### Split-per-ABI vs universal APK", "",
+                 f"Universal arm64 release APK (today): **{base:.0f} KiB**", "",
+                 "| Build | arm64-v8a APK | KiB | vs universal | versionCode | arm64 libsqlcipher.so KiB |",
+                 "|---|---|---:|---:|---:|---:|"]
+          for kind, apk, kib, vc, s, _, _ in rows:
+              out.append(f"| {kind} | `{apk}` | {kib:.0f} | {kib - base:+.0f} ({(kib - base) / base * 100:+.1f}%) | {vc} | {s:.0f} |")
+          markers = open("build/split-measure/release.markers").read().strip() if os.path.exists("build/split-measure/release.markers") else "not run"
+          out += ["", "| Build | File | SHA-256 | Package | Signer | DOCEASE_DEV_MODE | Dev-marker scan |", "|---|---|---|---|---|---|---|"]
+          for kind, apk, *_, sig in rows:
+              signer = ("debug key (not release-signed)" if sig.get("debug_cert") == "true" else sig.get("cert_dn", "?")) if sig else "check failed"
+              out.append(f"| {kind} | `{apk}` | `{sig.get('apk_sha256', '?')}` | `{sig.get('pkg', '?')}` | {signer} | "
+                         f"{'true' if kind == 'dev' else 'false'} | {'n/a (DEV contains it on purpose)' if kind == 'dev' else markers} |")
+          for kind, *_, others, _ in rows:
+              out.append("")
+              out.append(f"Other {kind} split APKs (not handed out): " + ", ".join(f"`{k}` {v:.0f} KiB" for k, v in sorted(others.items())))
+          out.append("")
+          out.append("No APK is uploaded from this job.")
+          for b in bad:
+              out.append(f"- **ERROR:** {b}")
+              print(f"::error title=Split-per-ABI check::{b}")
+          text = "\n".join(out) + "\n"
+          print(text)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write(text)
+          raise SystemExit(1 if bad else 0)
+          PY
+          exit "$status"
   firebase-rules:
     name: Firebase rules (emulator tests)
     # Runs the backend's Firestore/Storage rules tests from firebase/ against the

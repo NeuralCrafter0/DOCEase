@@ -1,0 +1,38 @@
+{
+  "_comment": "Size, asset and Play-readiness budgets for CI (tool/ci/check_assets.py, tool/ci/check_apk.py). Sizes in KiB. null = report only. apk.release_arm64 is enforced by the 'Release size and Play readiness (arm64)' job. Raise a budget only in a reviewed PR that says why.",
+  "assets": {
+    "_sizing": "Redesign plan: Figtree 400/500/600/700 (.ttf, ~160 KiB, OFL.txt alongside) + NotoSansDevanagari-Regular for PDFs (238 KiB, PR #14) = 5 font files, ~400 KiB. One spare font slot; ~600 KiB left for images.",
+    "max_total_kib": 1024,
+    "max_image_kib": 200,
+    "warn_image_kib": 100,
+    "max_image_px": 2048,
+    "warn_image_px": 1024,
+    "max_font_kib": 300,
+    "max_fonts_total_kib": 512,
+    "max_font_files": 6,
+    "max_animation_kib": 150,
+    "max_other_kib": 256
+  },
+  "packages": {
+    "banned": {
+      "google_fonts": "downloads fonts from Google at runtime (network request, offline gaps, privacy). Bundle the font files under assets/fonts/ with their licence instead.",
+      "flutter_dotenv": "runtime .env files are not allowed. Use --dart-define for non-secret build switches only; secrets never ship in the app.",
+      "envied": "embeds secrets in the app binary. Secrets never ship in the app."
+    },
+    "needs_signoff_note": "Any new direct dependency is listed in the job summary and needs DevOps + security sign-off on the PR (size, permissions, network use, licence)."
+  },
+  "apk": {
+    "release_arm64": {
+      "_baseline": "PR #21 run 40068366351 (main code + CI branches, 2026-10-24): APK 35951 KiB (incl. ~9096 KiB SQLCipher libs for armeabi-v7a/x86_64), arm64 phone estimate 26855, libapp.so 6785, flutter_assets 501, dex 2362. Budgets = baseline + headroom for the redesign (Figtree + Noto fonts ~400 KiB, new screens).",
+      "max_total_kib": 40960,
+      "max_device_arm64_kib": 30720,
+      "max_libapp_kib": 8192,
+      "max_flutter_assets_kib": 1024,
+      "max_dex_kib": 2816
+    }
+  },
+  "play": {
+    "min_target_sdk": 36,
+    "page_size_bytes": 16384
+  }
+}
