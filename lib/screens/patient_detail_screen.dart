@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:share_plus/share_plus.dart';
 import '../providers/patient_provider.dart';
+import '../utils/patient_load.dart';
 import '../providers/doctor_provider.dart';
 import '../models/patient.dart';
 import '../utils/pdf_export.dart';
@@ -94,8 +95,8 @@ class PatientDetailScreen extends StatelessWidget {
             title: Text(patient.name, style: const TextStyle(fontWeight: FontWeight.w800, color: Color(0xFF1E293B))),
             backgroundColor: Colors.transparent, elevation: 0,
             actions: [
-              IconButton(icon: const Icon(Icons.edit_outlined, color: Color(0xFF6366F1)), onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (c) => AddPatientScreen(existingPatient: patient)))),
-              IconButton(icon: const Icon(Icons.delete_outline, color: Colors.redAccent), onPressed: () => _showModernDeletePatientConfirm(context, provider, patient)),
+              if (!PatientLoad.readOnly(provider)) IconButton(icon: const Icon(Icons.edit_outlined, color: Color(0xFF6366F1)), onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (c) => AddPatientScreen(existingPatient: patient)))),
+              if (!PatientLoad.readOnly(provider)) IconButton(icon: const Icon(Icons.delete_outline, color: Colors.redAccent), onPressed: () => _showModernDeletePatientConfirm(context, provider, patient)),
               IconButton(
                 icon: const Icon(Icons.picture_as_pdf_outlined, color: Color(0xFF6366F1)), 
                 tooltip: 'Export PDF',
@@ -120,7 +121,7 @@ class PatientDetailScreen extends StatelessWidget {
               Expanded(child: patient.history.isEmpty ? const Center(child: Text('No Clinical Records Available')) : ListView.builder(padding: const EdgeInsets.only(bottom: 100), itemCount: patient.history.length, itemBuilder: (ctx, i) => _buildClinicalTimeline(context, doctor, patient, patient.history[i], i == 0, provider))),
             ]),
           ),
-          floatingActionButton: FloatingActionButton.extended(backgroundColor: const Color(0xFF6366F1), foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), icon: const Icon(Icons.add_moderator_outlined, size: 20), label: const Text('Add Clinical Note'), onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (ctx) => AddRecordScreen(patientId: patientId)))),
+          floatingActionButton: PatientLoad.readOnly(provider) ? null : FloatingActionButton.extended(backgroundColor: const Color(0xFF6366F1), foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), icon: const Icon(Icons.add_moderator_outlined, size: 20), label: const Text('Add Clinical Note'), onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (ctx) => AddRecordScreen(patientId: patientId)))),
         );
       },
     );
@@ -183,8 +184,8 @@ class PatientDetailScreen extends StatelessWidget {
         Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
           Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text("${DateFormat('EEEE, MMM dd, yyyy').format(record.date)} • ${record.visitType}", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Color(0xFF6366F1))), Text(record.diagnosis, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 24, color: Color(0xFF1E293B)))])),
           Row(children: [
-            IconButton(onPressed: () { Navigator.pop(ctx); Navigator.push(context, MaterialPageRoute(builder: (c) => AddRecordScreen(patientId: patient.id, existingRecord: record))); }, icon: const Icon(Icons.edit_outlined, color: Color(0xFF6366F1)), tooltip: 'Edit visit'),
-            IconButton(onPressed: () => _showModernDeleteRecordConfirm(context, provider, patient.id, record.id), icon: const Icon(Icons.delete_outline, color: Colors.redAccent), tooltip: 'Delete visit'),
+            if (!PatientLoad.readOnly(provider)) IconButton(onPressed: () { Navigator.pop(ctx); Navigator.push(context, MaterialPageRoute(builder: (c) => AddRecordScreen(patientId: patient.id, existingRecord: record))); }, icon: const Icon(Icons.edit_outlined, color: Color(0xFF6366F1)), tooltip: 'Edit visit'),
+            if (!PatientLoad.readOnly(provider)) IconButton(onPressed: () => _showModernDeleteRecordConfirm(context, provider, patient.id, record.id), icon: const Icon(Icons.delete_outline, color: Colors.redAccent), tooltip: 'Delete visit'),
             IconButton(onPressed: () => _shareVisitSummary(context, doctor, patient, record), icon: const Icon(Icons.share_outlined, color: Color(0xFF6366F1)), tooltip: 'Share visit'),
           ]),
         ]),
