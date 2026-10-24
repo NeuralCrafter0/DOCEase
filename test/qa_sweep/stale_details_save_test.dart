@@ -39,6 +39,12 @@ const Object? _ffSkip = _ff
     : 'failing-first (F16-R4): run with --dart-define=QA_FAILING_FIRST=true '
         'until the updatePatient details-only fix lands';
 
+const Object? _pending16 = _ff
+    ? null
+    : 'pending #16 next head: a8eaf9e never calls swapAttachmentPath, so no '
+        'attachment_swaps mapping is recorded on a confirmed upload (security, '
+        '#10 3227338 review). Run with --dart-define=QA_FAILING_FIRST=true';
+
 class _NoMeds extends MedicineProvider {
   @override
   List<String> get frequentMedicines => const [];
@@ -345,4 +351,28 @@ void main() {
         reason: 'PHOTO LOST from the visit (Storage object orphaned)');
     expect(v1.diagnosis, 'dx-new', reason: 'the doctor\'s visit edit was not saved');
   }, skip: !_ff); // reason: _ffSkip
+
+  test('STALE-06 (pending #16) a confirmed upload records the swap through the DB '
+      '(swapAttachmentPath), so a stale pre-upload whole-row save keeps S', () async {
+    await boot();
+    addTearDown(teardown);
+    storage.gate = Completer<TaskSnapshot>();
+    final local = pickJpeg();
+    await provider.addRecord('p1', _visit('v1', [local]));
+    await flushMicrotasks();
+    final preUpload = provider.findById('p1'); // holds L
+    storage.gate!.complete(FakeTaskSnapshot());
+    for (var i = 0; i < 4; i++) {
+      await flushMicrotasks();
+    }
+    // ignore: avoid_print
+    print('STALE-06 observed: swapCalls=${db.log.where((l) => l.startsWith('swap:')).toList()} '
+        'mappings=${db.swaps} row=${rowPaths()}');
+    expect(db.log.where((l) => l == 'swap:p1'), isNotEmpty,
+        reason: 'the provider never called swapAttachmentPath');
+    expect(db.swaps['p1'], isNotNull, reason: 'no attachment_swaps mapping recorded');
+    final s = rowPaths().singleWhere((e) => e.startsWith('clinical_attachments/'));
+    await db.updatePatient(preUpload); // DB-level stale whole-row save
+    expect(rowPaths(), [s], reason: 'stale pre-upload save put the local path back');
+  }, skip: _pending16);
 }

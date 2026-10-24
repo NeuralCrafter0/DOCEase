@@ -11,6 +11,12 @@ import 'qa_sweep_ffi_test.dart' show RecOpener;
 import 'sqlcipher_ffi_test.dart' show MemKeys;
 
 const uidA = 'doctorA';
+// Failing-first (security L-2 on 3227338): QA_FAILING_FIRST=true in the env.
+final bool _ff = Platform.environment['QA_FAILING_FIRST'] == 'true';
+Object? get _ffL2 => _ff
+    ? null
+    : 'failing-first (L-2 removed photo comes back): set QA_FAILING_FIRST=true until '
+        '#10 drops a mapping on a local save without its key or Storage path';
 const uidB = 'doctorB';
 const android = '/data/user/0/com.docease.app/files';
 const androidAlias = '/data/data/com.docease.app/files';
@@ -462,6 +468,151 @@ void main() {
       expect(await swapA(), isTrue);
       await db.updatePatient(patient(name: 'v1 upgraded'));
       expect((await pathsOf('p1')).first.first, storage(u1));
+    });
+  });
+
+  group('L-2 removed photo must not come back (3227338)', () {
+    Future<List<Map<String, Object?>>> swaps() =>
+        opener.last!.query('attachment_swaps', orderBy: 'patient_id, local_key');
+    List<String> flat(List<List<String>> x) => [for (final v in x) ...v];
+    // The doctor's refreshed copy after the swap, with the uploaded photo
+    // removed from every visit.
+    Patient removed() => patient(history: [
+          visit('v1', [oldStorage, localA(u2)]),
+          visit('v2', const []),
+        ]);
+
+    test('RM-01 remove uploaded photo, then a pre-upload copy is saved: photo stays removed '
+        '(and is not in the row that gets pushed)', () async {
+      final preUpload = patient(name: 'Pre-upload'); // holds L
+      expect(await swapA(), isTrue);
+      await db.updatePatient(removed());
+      expect(flat(await pathsOf('p1')), isNot(contains(storage(u1))), reason: 'precondition');
+      await db.updatePatient(preUpload);
+      final got = flat(await pathsOf('p1'));
+      // ignore: avoid_print
+      print('RM-01 observed: $got mappings=${(await swaps()).length}');
+      expect(got, isNot(contains(storage(u1))), reason: 'REMOVED PHOTO CAME BACK via mapping');
+      final pushed = (await db.dirtyPatientsStrict()).single;
+      expect([for (final v in pushed.history) ...v.attachmentPaths], isNot(contains(storage(u1))),
+          reason: 'the revived Storage reference would sync');
+    }, skip: _ffL2);
+
+    test('RM-02 the removal save drops the mapping in the same transaction', () async {
+      expect(await swapA(), isTrue);
+      await db.updatePatient(removed());
+      expect(await swaps(), isEmpty);
+    }, skip: _ffL2);
+
+    test('RM-03 same through a local insertPatient of the pre-upload copy', () async {
+      final preUpload = patient(name: 'Pre-upload');
+      expect(await swapA(), isTrue);
+      await db.insertPatient(removed());
+      await db.insertPatient(preUpload);
+      expect(flat(await pathsOf('p1')), isNot(contains(storage(u1))));
+    }, skip: _ffL2);
+
+    test('RM-04 guard: a save that still holds S keeps the mapping (stale L later rewritten)',
+        () async {
+      final preUpload = patient(name: 'Pre-upload');
+      expect(await swapA(), isTrue);
+      final refreshed = (await db.fetchPatientsStrict()).single;
+      await db.updatePatient(Patient(
+          id: 'p1', name: 'Edited', age: refreshed.age, gender: refreshed.gender,
+          phone: refreshed.phone, history: refreshed.history));
+      expect(await swaps(), hasLength(1));
+      await db.updatePatient(preUpload);
+      expect((await pathsOf('p1')).first.first, storage(u1));
+    });
+
+    test('RM-05 guard: a save that still holds L keeps the mapping and is rewritten', () async {
+      expect(await swapA(), isTrue);
+      await db.updatePatient(patient(name: 'Stale'));
+      expect(await swaps(), hasLength(1));
+      expect(flat(await pathsOf('p1')).where((e) => e == storage(u1)), hasLength(2));
+    });
+
+    test('RM-06 guard: removed from one visit only (S still in the other) keeps the mapping',
+        () async {
+      expect(await swapA(), isTrue);
+      await db.updatePatient(patient(history: [
+        visit('v1', [oldStorage, localA(u2)]),
+        visit('v2', [storage(u1)]),
+      ]));
+      expect(await swaps(), hasLength(1));
+    });
+
+    test('RM-07 guard: removing p1\'s photo leaves p2\'s mapping alone', () async {
+      await db.insertPatient(patient(id: 'p2'));
+      expect(await swapA(), isTrue);
+      expect(await swapA(pid: 'p2'), isTrue);
+      await db.updatePatient(removed());
+      expect((await swaps()).where((m) => m['patient_id'] == 'p2'), hasLength(1));
+    });
+
+    test('RM-08 guard: a cloud apply without the key never drops the mapping', () async {
+      expect(await swapA(), isTrue);
+      await markClean('p1');
+      final cloud = Patient(
+          id: 'p1', name: 'Cloud', age: '30', gender: 'Female', phone: '+910000000000',
+          updatedAt: '${DateTime.now().millisecondsSinceEpoch + 100000}',
+          history: [visit('v1', [oldStorage])]);
+      expect(await db.applyCloudPatient(cloud), isTrue);
+      expect(await swaps(), hasLength(1));
+    });
+  });
+
+  group('markSynced backstop, pinned on 3227338 (compare-and-set on updated_at + dirty)', () {
+    test('MS-01 a stale updatedAt (the pushed in-memory copy\'s) is refused; row stays dirty, '
+        'counter unchanged', () async {
+      final memCopy = (await db.fetchPatientsStrict()).single; // what the provider holds
+      expect(await swapA(), isTrue); // stored row moves on
+      final before = await counter();
+      expect(await db.markSynced('p1', memCopy.updatedAt!), isFalse);
+      expect((await row('p1'))['sync_state'], isNot(0), reason: 'must stay dirty');
+      expect((await db.dirtyPatientsStrict()).map((x) => x.id), ['p1']);
+      expect(await counter(), before);
+    });
+
+    test('MS-02 the stored updatedAt marks clean and decrements once', () async {
+      final before = await counter();
+      await markClean('p1');
+      expect(await counter(), before! - 1);
+      expect(await db.dirtyPatientsStrict(), isEmpty);
+    });
+
+    test('MS-03 already clean: refused, no second decrement', () async {
+      await markClean('p1');
+      final before = await counter();
+      expect(await db.markSynced('p1', '${(await row('p1'))['updated_at']}'), isFalse);
+      expect(await counter(), before);
+    });
+
+    test('MS-04 non-numeric / empty version refused', () async {
+      expect(await db.markSynced('p1', 'abc'), isFalse);
+      expect(await db.markSynced('p1', ''), isFalse);
+      expect((await db.dirtyPatientsStrict()).map((x) => x.id), ['p1']);
+    });
+
+    test('MS-05 missing row and tombstoned row refused', () async {
+      final v = '${(await row('p1'))['updated_at']}';
+      expect(await db.markSynced('p404', v), isFalse);
+      await db.markPendingDelete('p1');
+      expect(await db.markSynced('p1', v), isFalse);
+    });
+
+    test('MS-06 INFO today: after a rewritten save the RETURNED version is accepted even though '
+        'the caller pushed different content (DB cannot tell; backstop needs the pushed row\'s '
+        'updatedAt)', () async {
+      expect(await swapA(), isTrue);
+      final memCopy = patient(name: 'Stale'); // pushed copy holds L
+      final returned = await db.updatePatient(memCopy);
+      expect((await pathsOf('p1')).first.first, storage(u1), reason: 'stored row was rewritten');
+      // Backstop with the pushed copy's updatedAt (none/older) -> refused:
+      expect(await db.markSynced('p1', memCopy.updatedAt ?? ''), isFalse);
+      // Today: the returned version is accepted (row marked clean). Flip if
+      // #10 adopts "refuse a rewritten version until the caller re-reads".
+      expect(await db.markSynced('p1', returned!), isTrue);
     });
   });
 }
