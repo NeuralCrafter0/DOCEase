@@ -76,10 +76,10 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
     if (_formKey.currentState!.validate()) {
       setState(() => _isSaving = true);
       
-      // Medicines to remember: every line, without its dosage. Learned only
+      // Medicines to remember: drug-name lines, without their dosage. Learned only
       // once the visit is saved, so a refused save teaches nothing.
       final medProvider = Provider.of<MedicineProvider>(context, listen: false);
-      final medicines = PrescriptionLines.medicineNames(_prescriptionController.text, dosages: medProvider.dosageTemplates);
+      final medicines = PrescriptionLines.medicineNames(_prescriptionController.text, dosages: medProvider.dosageTemplates, known: medProvider.frequentMedicines);
 
       final record = VisitRecord(
         id: widget.existingRecord?.id, date: _selectedDate, visitType: _selectedVisitType,
