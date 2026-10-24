@@ -2,100 +2,111 @@ import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
 
-/// Segmented control with one sliding indicator ("Zero Jitter, shared
-/// indicator": a single [AnimatedPositioned] moves, so there is no shadow
-/// trail between options).
+/// A row of mutually exclusive options with a sliding highlight.
 ///
-/// Extracted from the three `_buildHighPerfSelector` copies. The copies had
-/// drifted, so the differences are parameters and each screen keeps its look:
-/// [fontSize] (13 on the patient and profile forms, 12 on the clinical note),
-/// [indicatorShadowOffset] (only the patient form offsets the shadow) and
-/// [enabled] (only the profile form can be locked).
-///
-/// Each option is exposed to screen readers as a button in a mutually
-/// exclusive group, with its selected state.
+/// Each option is a button with selected state for screen readers. The row
+/// grows with large text (labels wrap to two lines), so nothing clips at
+/// 2.0x. A [selected] value that is not in [options] (for example a stored
+/// visit type the form doesn't offer) leaves every option unselected.
 class SegmentedSelector extends StatelessWidget {
   const SegmentedSelector({
     super.key,
     required this.options,
     required this.selected,
     required this.onSelected,
-    this.fontSize = 13,
-    this.indicatorShadowOffset = Offset.zero,
     this.enabled = true,
+    this.keyFor,
+    this.fontSize,
+    this.indicatorShadowOffset,
   });
 
   final List<String> options;
   final String selected;
   final ValueChanged<String> onSelected;
-  final double fontSize;
-  final Offset indicatorShadowOffset;
-
-  /// When false the control ignores taps and greys out its indicator.
   final bool enabled;
+
+  /// Optional per-option key (QA locators), e.g. `QaKeys.patientFormGender`.
+  final Key Function(String option)? keyFor;
+
+  /// Unused; kept so older call sites compile until M2.
+  final double? fontSize;
+  final Offset? indicatorShadowOffset;
 
   @override
   Widget build(BuildContext context) {
-    final selectedIndex = options.indexOf(selected);
+    final c = context.ds;
+    final index = options.indexOf(selected);
+    final n = options.length;
+    final duration = Motion.of(context, Motion.standard);
+    final labelStyle = context.type.labelLarge;
+
     return AbsorbPointer(
       absorbing: !enabled,
       child: Container(
-        height: 54,
-        padding: const EdgeInsets.all(4),
-        decoration: BoxDecoration(color: AppColors.track, borderRadius: BorderRadius.circular(AppRadii.track)),
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final width = constraints.maxWidth / options.length;
-            return Stack(
-              children: [
-                // Moving indicator: one object, so no shadow trail.
-                AnimatedPositioned(
-                  duration: const Duration(milliseconds: 250),
-                  curve: Curves.easeOutCubic,
-                  left: selectedIndex * width,
-                  top: 0,
-                  bottom: 0,
-                  width: width,
-                  child: Container(
+        padding: const EdgeInsets.all(Space.xs),
+        decoration: BoxDecoration(color: c.sunken, borderRadius: Radii.control),
+        child: Stack(children: [
+          if (index >= 0)
+            Positioned.fill(
+              child: AnimatedAlign(
+                duration: duration,
+                curve: Motion.move,
+                alignment: Alignment(n == 1 ? 0 : -1 + 2 * index / (n - 1), 0),
+                child: FractionallySizedBox(
+                  widthFactor: 1 / n,
+                  heightFactor: 1,
+                  child: DecoratedBox(
                     decoration: BoxDecoration(
-                      color: enabled ? Colors.white : Colors.grey.shade300,
-                      borderRadius: BorderRadius.circular(AppRadii.thumb),
-                      boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.08), blurRadius: 8, offset: indicatorShadowOffset)],
+                      color: enabled ? c.surface : c.canvas,
+                      borderRadius: const BorderRadius.all(Radius.circular(Radii.sm)),
+                      boxShadow: enabled ? Shadows.raised(c) : null,
                     ),
                   ),
                 ),
-                // Labels layer.
-                Row(
-                  children: options.map((opt) {
-                    final isSelected = selected == opt;
-                    return Expanded(
-                      child: Semantics(
-                        button: true,
-                        selected: isSelected,
-                        enabled: enabled,
-                        inMutuallyExclusiveGroup: true,
-                        child: GestureDetector(
-                          onTap: enabled ? () => onSelected(opt) : null,
-                          behavior: HitTestBehavior.opaque,
-                          child: Center(
-                            child: Text(
-                              opt,
-                              style: TextStyle(
-                                fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600,
-                                color: isSelected ? AppColors.primary : AppColors.muted,
-                                fontSize: fontSize,
+              ),
+            ),
+          IntrinsicHeight(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (final opt in options)
+                  Expanded(
+                    child: Semantics(
+                      key: keyFor?.call(opt),
+                      button: true,
+                      selected: opt == selected,
+                      enabled: enabled,
+                      inMutuallyExclusiveGroup: true,
+                      child: InkWell(
+                        onTap: enabled ? () => onSelected(opt) : null,
+                        borderRadius: const BorderRadius.all(Radius.circular(Radii.sm)),
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(minHeight: 44),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: Space.xs, vertical: Space.sm),
+                            child: Center(
+                              child: AnimatedDefaultTextStyle(
+                                duration: duration,
+                                style: labelStyle!.copyWith(
+                                  color: !enabled
+                                      ? c.inkMuted
+                                      : opt == selected
+                                          ? c.ink
+                                          : c.inkSecondary,
+                                  fontWeight: opt == selected ? FontWeight.w700 : FontWeight.w500,
+                                ),
+                                child: Text(opt, textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis),
                               ),
                             ),
                           ),
                         ),
                       ),
-                    );
-                  }).toList(),
-                ),
+                    ),
+                  ),
               ],
-            );
-          },
-        ),
+            ),
+          ),
+        ]),
       ),
     );
   }

@@ -3,70 +3,85 @@ import 'package:flutter/services.dart';
 
 import '../theme/app_theme.dart';
 
-/// Filled white text field with an indigo prefix icon and 20px corners.
+/// Text field in the app's style.
 ///
-/// Extracted from the `_buildModernInput` helpers. The profile form uses it
-/// now; the patient and clinical-note copies switch over once the PRs that
-/// edit them (#5 validation, #7 keyboard privacy) are merged, which is why the
-/// widget already takes [validator], [inputFormatters], [textCapitalization]
-/// and [private].
+/// [private] is for clinical and personal text: it turns off keyboard
+/// learning, autocorrect, suggestions and smart punctuation (security
+/// review C12). Use it for every patient, visit and profile field.
 class AppTextField extends StatelessWidget {
   const AppTextField({
     super.key,
     required this.controller,
     required this.hint,
     required this.icon,
+    this.label,
     this.keyboardType,
     this.maxLines = 1,
+    this.minLines,
     this.enabled = true,
     this.validator,
     this.inputFormatters,
     this.textCapitalization = TextCapitalization.none,
     this.private = false,
     this.textColor,
-    this.fillColor = Colors.white,
+    this.fillColor,
+    this.textInputAction,
+    this.onFieldSubmitted,
+    this.suffixText,
+    this.focusNode,
+    this.autofocus = false,
   });
 
   final TextEditingController controller;
   final String hint;
-  final IconData icon;
+  final IconData? icon;
+  /// Floating label. When null the field shows only its hint.
+  final String? label;
   final TextInputType? keyboardType;
   final int maxLines;
+  final int? minLines;
   final bool enabled;
   final FormFieldValidator<String>? validator;
   final List<TextInputFormatter>? inputFormatters;
   final TextCapitalization textCapitalization;
-
-  /// Patient or clinical text: no keyboard learning, autocorrect, suggestions
-  /// or smart punctuation (security review C12).
   final bool private;
-
-  /// Text colour; null keeps the theme default.
   final Color? textColor;
-  final Color fillColor;
+  final Color? fillColor;
+  final TextInputAction? textInputAction;
+  final ValueChanged<String>? onFieldSubmitted;
+  final String? suffixText;
+  final FocusNode? focusNode;
+  final bool autofocus;
 
   @override
   Widget build(BuildContext context) {
+    final c = context.ds;
     return TextFormField(
       controller: controller,
+      focusNode: focusNode,
+      autofocus: autofocus,
       keyboardType: keyboardType,
       maxLines: maxLines,
+      minLines: minLines,
       enabled: enabled,
       validator: validator,
       inputFormatters: inputFormatters,
       textCapitalization: textCapitalization,
+      textInputAction: textInputAction,
+      onFieldSubmitted: onFieldSubmitted,
       enableIMEPersonalizedLearning: !private,
       autocorrect: !private,
       enableSuggestions: !private,
       smartDashesType: private ? SmartDashesType.disabled : null,
       smartQuotesType: private ? SmartQuotesType.disabled : null,
-      style: TextStyle(fontWeight: FontWeight.w700, color: textColor),
+      style: context.type.bodyLarge?.copyWith(color: textColor ?? (enabled ? c.ink : c.inkSecondary)),
       decoration: InputDecoration(
+        labelText: label,
         hintText: hint,
-        prefixIcon: Icon(icon, color: AppColors.primary, size: 20),
-        filled: true,
-        fillColor: fillColor,
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadii.field), borderSide: BorderSide(color: Colors.grey.shade200)),
+        suffixText: suffixText,
+        prefixIcon: icon == null ? null : Icon(icon, size: 20),
+        fillColor: fillColor ?? (enabled ? c.surface : c.sunken),
+        alignLabelWithHint: maxLines > 1,
       ),
     );
   }

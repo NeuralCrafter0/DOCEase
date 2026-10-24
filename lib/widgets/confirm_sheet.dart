@@ -1,21 +1,18 @@
 import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
+import '../ui/components.dart';
+import '../ui/qa_keys.dart';
 
-/// Bottom-sheet confirmation for destructive actions, copied from the
-/// patient-delete sheet: red icon in a tinted circle, bold title, centred
-/// message, Cancel and a red confirm button.
-///
-/// The patient and visit delete sheets switch over once #6 and #8, which
-/// edit their buttons, are merged; the visit sheet then gets this richer look
-/// too, so that switch is a deliberate (small) visual change.
+/// Bottom sheet asking the doctor to confirm a destructive step.
+/// Returns true only when the confirm button was tapped.
 class ConfirmSheet extends StatelessWidget {
   const ConfirmSheet({
     super.key,
     required this.title,
     required this.message,
     required this.confirmLabel,
-    this.icon = Icons.delete_forever_rounded,
+    this.icon = Icons.delete_outline_rounded,
     this.cancelLabel = 'Cancel',
   });
 
@@ -25,19 +22,17 @@ class ConfirmSheet extends StatelessWidget {
   final String cancelLabel;
   final IconData icon;
 
-  /// Shows the sheet. Completes with true only when the confirm button was
-  /// tapped (Cancel, a tap outside or back all give false).
   static Future<bool> show(
     BuildContext context, {
     required String title,
     required String message,
     required String confirmLabel,
-    IconData icon = Icons.delete_forever_rounded,
+    IconData icon = Icons.delete_outline_rounded,
   }) async {
     final ok = await showModalBottomSheet<bool>(
       context: context,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(32))),
-      backgroundColor: Colors.white,
+      isScrollControlled: true,
+      useSafeArea: true,
       builder: (_) => ConfirmSheet(title: title, message: message, confirmLabel: confirmLabel, icon: icon),
     );
     return ok ?? false;
@@ -45,34 +40,45 @@ class ConfirmSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(32.0),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(color: Colors.red.withValues(alpha: 0.1), shape: BoxShape.circle),
-            child: Icon(icon, color: Colors.redAccent, size: 40),
-          ),
-          const SizedBox(height: 24),
-          Semantics(header: true, child: Text(title, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: AppColors.ink))),
-          const SizedBox(height: 12),
-          Text(message, textAlign: TextAlign.center, style: const TextStyle(color: AppColors.muted)),
-          const SizedBox(height: 32),
-          Row(children: [
-            Expanded(child: TextButton(onPressed: () => Navigator.pop(context, false), child: Text(cancelLabel, style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.label)))),
-            const SizedBox(width: 16),
-            Expanded(
-              child: ElevatedButton(
-                onPressed: () => Navigator.pop(context, true),
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
-                child: Text(confirmLabel, style: const TextStyle(fontWeight: FontWeight.bold)),
+    final c = context.ds;
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(Space.xxl, Space.sm, Space.xxl, Space.xxl),
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        IconMedallion(icon: icon, tone: Tone.danger, size: 56),
+        const SizedBox(height: Space.lg),
+        Semantics(header: true, child: Text(title, textAlign: TextAlign.center, style: context.type.titleLarge)),
+        const SizedBox(height: Space.sm),
+        Text(message, textAlign: TextAlign.center, style: context.type.bodyMedium),
+        const SizedBox(height: Space.xxl),
+        Wrap(
+          alignment: WrapAlignment.center,
+          spacing: Space.md,
+          runSpacing: Space.md,
+          children: [
+            ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 140),
+              child: OutlinedButton(
+                key: QaKeys.confirmCancel,
+                onPressed: () => Navigator.pop(context, false),
+                child: Text(cancelLabel),
               ),
             ),
-          ]),
-        ],
-      ),
+            ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 140),
+              child: FilledButton(
+                key: QaKeys.confirmOk,
+                style: ButtonStyle(
+                  minimumSize: const WidgetStatePropertyAll(Size(64, 48)),
+                  backgroundColor: WidgetStatePropertyAll(c.danger),
+                  foregroundColor: WidgetStatePropertyAll(c.onDanger),
+                ),
+                onPressed: () => Navigator.pop(context, true),
+                child: Text(confirmLabel),
+              ),
+            ),
+          ],
+        ),
+      ]),
     );
   }
 }

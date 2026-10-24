@@ -21,6 +21,8 @@ import 'widgets/session_status_view.dart';
 import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
 import 'security/app_lock.dart';
+import 'theme/app_theme.dart';
+import 'ui/session_route_reset.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -84,7 +86,7 @@ void main() async {
   StartupHooks.runAll();
 }
 
-class DOCEaseApp extends StatelessWidget {
+class DOCEaseApp extends StatefulWidget {
   final bool ready;
   /// Dev mode as requested by main(). Only takes effect when [kDevMode] is
   /// true: in a build without the define it is ignored (see [isDevMode]).
@@ -93,6 +95,17 @@ class DOCEaseApp extends StatelessWidget {
   /// The effective value: `kDevMode && devMode` (const first, so it folds).
   bool get isDevMode => kDevMode && devMode;
   const DOCEaseApp({super.key, required this.ready, this.devMode = false});
+  @override
+  State<DOCEaseApp> createState() => _DOCEaseAppState();
+}
+
+class _DOCEaseAppState extends State<DOCEaseApp> {
+  // Root navigator, so a session end or owner change can close every
+  // pushed screen, sheet and dialog (SessionRouteReset, security S2).
+  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+
+  bool get ready => widget.ready;
+  bool get devMode => widget.devMode;
 
   @override
   Widget build(BuildContext context) {
@@ -109,11 +122,19 @@ class DOCEaseApp extends StatelessWidget {
     final app = MaterialApp(
       title: 'DOCEase',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF6366F1), surface: const Color(0xFFF8FAFC)),
-      ),
-      builder: devBanner,
+      navigatorKey: _navigatorKey,
+      // Dark theme is built but held back until every screen is on the
+      // new tokens (M2); then this becomes ThemeMode.system. Nothing is
+      // stored either way.
+      theme: AppTheme.light(),
+      darkTheme: AppTheme.dark(),
+      themeMode: ThemeMode.light,
+      // The route reset sits under the dev banner, which is chained, not
+      // replaced (S8).
+      builder: (ctx, child) {
+        final guarded = SessionRouteReset(navigatorKey: _navigatorKey, child: child ?? const SizedBox.shrink());
+        return devBanner == null ? guarded : devBanner(ctx, guarded);
+      },
       home: devHome ??
           (!ready 
           ? const Scaffold(body: Center(child: Text('Clinical Cloud Connection Error')))

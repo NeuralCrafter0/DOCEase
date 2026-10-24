@@ -1,36 +1,40 @@
 import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
+import '../ui/components.dart';
 
-/// Small white card with an icon, a big value and a caption ("Daily Pulse").
+/// One headline number with its caption ("Patients today: 4").
 ///
-/// Screen readers hear it as one item, for example "Today Visits: 3".
-/// Insights' `_buildSmallStatCard` is a separate vertical design and moves
-/// here after #11 (which edits it) is merged.
+/// Screen readers get a single item, "[label]: [value]" (QA a11y suite), so
+/// the visible caption can differ from [label] through [caption].
 class StatCard extends StatelessWidget {
-  const StatCard({super.key, required this.label, required this.value, required this.icon, required this.color});
+  const StatCard({super.key, required this.label, required this.value, required this.icon, this.tone = Tone.primary, this.caption});
 
+  /// Spoken label, and the caption unless [caption] is set.
   final String label;
   final String value;
   final IconData icon;
-  final Color color;
+  final Tone tone;
+  final String? caption;
 
   @override
   Widget build(BuildContext context) {
+    final c = context.ds;
     return Semantics(
       container: true,
       label: '$label: $value',
       excludeSemantics: true,
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(AppRadii.button), border: Border.all(color: AppColors.border)),
-        child: Row(children: [
-          Icon(icon, color: color, size: 18),
-          const SizedBox(width: 12),
-          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(value, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: AppColors.ink)),
-            Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: AppColors.muted)),
-          ]),
+      child: DsCard(
+        padding: const EdgeInsets.all(Space.lg),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+          IconMedallion(icon: icon, tone: tone, size: 40),
+          const SizedBox(width: Space.md),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+              Text(value, maxLines: 1, style: AppText.tabular(context.type.headlineSmall?.copyWith(color: c.ink))),
+              Text(caption ?? label, style: context.type.labelMedium?.copyWith(color: c.inkSecondary)),
+            ]),
+          ),
         ]),
       ),
     );

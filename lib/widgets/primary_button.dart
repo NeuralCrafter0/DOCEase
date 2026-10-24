@@ -2,27 +2,35 @@ import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
 
-/// Full-width dark call-to-action (64px tall, 24px corners, bold 18px label):
-/// "Register", "Save Clinical Record", "Save and Lock Profile".
-///
-/// The profile form uses it now; the patient and clinical-note buttons switch
-/// over once #5 and #8, which edit those lines, are merged.
+/// The screen's main action: full width, filled brand colour. While [busy]
+/// it shows a spinner and ignores taps (double-tap guard stays with the
+/// caller).
 class PrimaryButton extends StatelessWidget {
-  const PrimaryButton({super.key, required this.label, required this.onPressed});
+  const PrimaryButton({super.key, required this.label, required this.onPressed, this.icon, this.busy = false, this.busyLabel});
 
   final String label;
   final VoidCallback? onPressed;
+  final IconData? icon;
+  final bool busy;
+  /// Spoken while busy, e.g. "Saving". Defaults to [label].
+  final String? busyLabel;
 
   @override
   Widget build(BuildContext context) {
+    final c = context.ds;
+    final Widget content = busy
+        ? Semantics(
+            label: busyLabel ?? label,
+            child: SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: c.inkMuted)),
+          )
+        : Row(mainAxisSize: MainAxisSize.min, children: [
+            if (icon != null) ...[Icon(icon, size: 20), const SizedBox(width: Space.sm)],
+            Flexible(child: Text(label, textAlign: TextAlign.center)),
+          ]);
     return ElevatedButton(
-      onPressed: onPressed,
-      style: ElevatedButton.styleFrom(
-        backgroundColor: AppColors.ink,
-        minimumSize: const Size(double.infinity, 64),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadii.button)),
-      ),
-      child: Text(label, style: AppText.button),
+      onPressed: busy ? null : onPressed,
+      style: const ButtonStyle(minimumSize: WidgetStatePropertyAll(Size(double.infinity, 54))),
+      child: content,
     );
   }
 }
