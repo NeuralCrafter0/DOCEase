@@ -59,6 +59,26 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
   static Future<Directory> _profilePhotoDir() async =>
       Directory(p.join((await getTemporaryDirectory()).path, 'profile_photo'));
 
+  /// Same wording as #8's visit-photo picker.
+  static String _pickerErrorMessage(String? code, ImageSource source) {
+    switch (code) {
+      case 'camera_access_denied':
+        return 'Camera access is off for DOCEase. Turn it on in Settings to take a profile photo.';
+      case 'photo_access_denied':
+        return 'Photo access is off for DOCEase. Turn it on in Settings to choose a profile photo.';
+      case 'no_available_camera':
+        return 'No camera is available on this device.';
+      default:
+        return source == ImageSource.camera
+            ? "Couldn't open the camera. Please try again."
+            : "Couldn't open your photos. Please try again.";
+    }
+  }
+
+  void _showPhotoMessage(String text) {
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  }
+
   static Future<void> _deleteQuietly(String path) async {
     try {
       final f = File(path);
@@ -121,7 +141,16 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
     if (source == null || !mounted) return;
     // No imageQuality: the plugin's own re-compression copies EXIF (GPS,
     // camera, time) into another temp file. The processor scales instead.
-    final picked = await ImagePicker().pickImage(source: source);
+    final XFile? picked;
+    try {
+      picked = await ImagePicker().pickImage(source: source);
+    } on PlatformException catch (e) {
+      _showPhotoMessage(_pickerErrorMessage(e.code, source));
+      return;
+    } catch (_) {
+      _showPhotoMessage(_pickerErrorMessage(null, source)); // never the raw error
+      return;
+    }
     if (picked == null) return;
     if (mounted) setState(() => _isLoading = true);
     String? path;
@@ -143,7 +172,7 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
       if (path != null) _localImage = File(path);
     });
     if (path != null && previous != null) await _deleteQuietly(previous.path);
-    if (error != null && mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
+    if (error != null) _showPhotoMessage(error);
   }
 
   Future<ImageSource?> _chooseImageSource(ImageSource preferred) {

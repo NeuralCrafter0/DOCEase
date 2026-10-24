@@ -3,7 +3,6 @@
 // before it can be uploaded, so GPS, camera make/model and capture time are
 // gone, the result is a real JPEG, and the picker's own copy is deleted.
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:docease/models/doctor.dart';
 import 'package:docease/providers/doctor_provider.dart';
@@ -13,6 +12,7 @@ import 'package:docease/utils/picker_hygiene.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_core_platform_interface/test.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image_picker_platform_interface/image_picker_platform_interface.dart';
 import 'package:path/path.dart' as p;
@@ -31,11 +31,17 @@ class _FakePicker extends ImagePickerPlatform with MockPlatformInterfaceMixin {
   final queue = <String>[];
   final copies = <String>[];
   final options = <ImagePickerOptions>[];
+  Object? throwNext;
   var _n = 0;
 
   @override
   Future<XFile?> getImageFromSource({required ImageSource source, ImagePickerOptions options = const ImagePickerOptions()}) async {
     this.options.add(options);
+    final e = throwNext;
+    if (e != null) {
+      throwNext = null;
+      throw e;
+    }
     if (queue.isEmpty) return null;
     final src = queue.removeAt(0);
     final dir = Directory(p.join(root.path, '0f8fad5b-d9cb-469f-a165-70867728950${_n++}'))..createSync();
@@ -200,5 +206,39 @@ void main() {
     await t.pumpWidget(const SizedBox());
     await settle(t, () => !second.existsSync());
     expect(outFiles(), isEmpty, reason: 'nothing is left once the screen closes');
+  });
+
+  group('PW-03 picker errors show a friendly message, never the raw error', () {
+    Future<void> pickThrowing(WidgetTester t, Object error, String option) async {
+      picker.throwNext = error;
+      await t.tap(find.byIcon(Icons.camera_alt));
+      await t.pumpAndSettle();
+      await t.tap(find.text(option));
+      await t.pump();
+      await t.pump(const Duration(milliseconds: 100));
+    }
+
+    testWidgets('photo access denied', (t) async {
+      await open(t);
+      await pickThrowing(t, PlatformException(code: 'photo_access_denied', message: 'RAW-DETAIL /data/user/0/x'), 'Choose from gallery');
+      expect(find.text('Photo access is off for DOCEase. Turn it on in Settings to choose a profile photo.'), findsOneWidget);
+      expect(find.textContaining('RAW-DETAIL'), findsNothing);
+      expect(find.textContaining('PlatformException'), findsNothing);
+      expect(t.takeException(), isNull);
+      expect(find.byType(CircularProgressIndicator), findsNothing, reason: 'Save is not left spinning');
+      expect(avatarFile(t), isNull);
+    });
+
+    testWidgets('camera access denied and an unexpected error', (t) async {
+      await open(t);
+      await pickThrowing(t, PlatformException(code: 'camera_access_denied', message: 'RAW-DETAIL'), 'Take photo');
+      expect(find.text('Camera access is off for DOCEase. Turn it on in Settings to take a profile photo.'), findsOneWidget);
+      ScaffoldMessenger.of(t.element(find.byType(Scaffold).first)).removeCurrentSnackBar();
+      await t.pumpAndSettle();
+      await pickThrowing(t, StateError('RAW-BOOM'), 'Choose from gallery');
+      expect(find.text("Couldn't open your photos. Please try again."), findsOneWidget);
+      expect(find.textContaining('RAW-'), findsNothing);
+      expect(t.takeException(), isNull);
+    });
   });
 }
