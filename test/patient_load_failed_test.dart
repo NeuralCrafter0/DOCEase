@@ -24,8 +24,7 @@ final _visit = VisitRecord(id: 'v1', date: DateTime(_now.year, _now.month, _now.
 final _ravi = Patient(id: 'p1', name: 'Ravi Kumar', age: '42', gender: 'Male', phone: '+919876543210', history: [_visit]);
 final _doc = Doctor(id: 'd1', title: 'MR', name: 'John', email: 'john@clinic.test', age: '45', mobileNumber: '+919812345678', specialty: 'General Medicine', clinicName: 'City Clinic', practiceMode: 'Solo Practice');
 
-/// Fake of the #16 provider contract. The two members are declared without
-/// @override so this compiles on main (which lacks them) and after #16.
+/// Fake of the #16 provider contract (loadFailed / reload()).
 class _Patients extends PatientProvider {
   _Patients({List<Patient> list = const [], bool failed = false})
       : _list = list,
@@ -42,10 +41,10 @@ class _Patients extends PatientProvider {
   bool succeed = true;
   List<Patient> onSuccess = const [];
 
-  // ignore: annotate_overrides
+  @override
   bool get loadFailed => _failed;
 
-  // ignore: annotate_overrides
+  @override
   Future<void> reload() async {
     reloads++;
     if (gate != null) await gate!.future;
@@ -75,13 +74,6 @@ class _Patients extends PatientProvider {
   Future<void> fetchAndSetPatients() async {}
   @override
   Patient findById(String id) => _list.firstWhere((p) => p.id == id);
-}
-
-/// A provider without the #16 members, i.e. main today.
-class _PlainPatients extends PatientProvider {
-  int fetches = 0;
-  @override
-  Future<void> fetchAndSetPatients() async => fetches++;
 }
 
 class _Doctor extends DoctorProvider {
@@ -254,17 +246,6 @@ void main() {
       await openVisitSheet(t);
       expect(find.byTooltip('Edit visit'), findsOneWidget);
       expect(find.byTooltip('Delete visit'), findsOneWidget);
-    });
-  });
-
-  // Drop this group when PatientLoad switches to direct calls after #16.
-  group('PatientLoad on a provider without the #16 members', () {
-    test('reads as not failed and reloads with fetchAndSetPatients (today\'s behaviour)', () async {
-      final p = _PlainPatients();
-      expect(PatientLoad.failed(p), isFalse);
-      expect(PatientLoad.readOnly(p), isFalse);
-      await PatientLoad.reload(p);
-      expect(p.fetches, 1);
     });
   });
 }
