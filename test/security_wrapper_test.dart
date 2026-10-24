@@ -459,6 +459,41 @@ void main() {
       await t.pumpAndSettle();
       expect(find.textContaining('App misconfigured'), findsOneWidget);
     });
+
+    // Security review #4 (Info, probe FB-3): a host inside a route passed the
+    // lookup and brought back the weak layout, where a pushed route draws over
+    // the lock. Such a host is now treated as missing.
+    testWidgets('a lock host inside a route is not a lock host', (t) async {
+      fake.result = true;
+      final errors = <Object>[];
+      final prev = FlutterError.onError;
+      FlutterError.onError = (d) => errors.add(d.exception);
+      addTearDown(() => FlutterError.onError = prev);
+      final nav = GlobalKey<NavigatorState>();
+      await t.pumpWidget(MaterialApp(navigatorKey: nav, home: const AppLockHost(child: SecurityWrapper())));
+      await t.pump(const Duration(milliseconds: 100));
+      FlutterError.onError = prev;
+      expect(errors.map((e) => '$e').where((m) => m.contains('AppLockHost has a Navigator above it')), isNotEmpty,
+          reason: 'debug builds report the misplaced host');
+      expect(find.textContaining('App misconfigured'), findsOneWidget, reason: 'fails hard, as with no host');
+      expect(protectedSubtreeBuilt(), isFalse);
+      expect(fake.authCalls, 0, reason: 'a misplaced host never locks or prompts');
+      nav.currentState!.push(MaterialPageRoute<void>(builder: (_) => const Scaffold(body: Text('pushed'))));
+      await t.pumpAndSettle();
+      expect(protectedSubtreeBuilt(), isFalse);
+    });
+
+    testWidgets('a host above the MaterialApp reports nothing', (t) async {
+      final errors = <Object>[];
+      final prev = FlutterError.onError;
+      FlutterError.onError = (d) => errors.add(d.exception);
+      addTearDown(() => FlutterError.onError = prev);
+      fake.result = true;
+      await pumpWrapper(t);
+      FlutterError.onError = prev;
+      expect(errors.map((e) => '$e').where((m) => m.contains('Navigator above it')), isEmpty);
+      expect(find.textContaining('App misconfigured'), findsNothing);
+    });
   });
 }
 

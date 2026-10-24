@@ -193,8 +193,17 @@ class AppLockHost extends StatefulWidget {
 
   /// The controller of the nearest host, or null when there is none.
   /// Registers a dependency, so callers rebuild when the lock state changes.
-  static AppLockController? maybeOf(BuildContext context) =>
-      context.dependOnInheritedWidgetOfExactType<_AppLockScope>()?.notifier;
+  ///
+  /// A host with a [Navigator] above it (placed inside a route, e.g.
+  /// `MaterialApp(home: AppLockHost(...))`) is not a lock host: a pushed
+  /// route would draw over its lock. It returns null, so [SecurityWrapper]
+  /// fails hard with "App misconfigured" in every build mode, and debug
+  /// builds also report the misplacement (security review #4).
+  static AppLockController? maybeOf(BuildContext context) {
+    final scope = context.dependOnInheritedWidgetOfExactType<_AppLockScope>();
+    if (scope == null || scope.misplaced) return null;
+    return scope.notifier;
+  }
 
   @override
   State<AppLockHost> createState() => _AppLockHostState();
@@ -211,8 +220,23 @@ class _AppLockHostState extends State<AppLockHost> {
 
   @override
   Widget build(BuildContext context) {
+    final misplaced = Navigator.maybeOf(context) != null;
+    assert(() {
+      if (misplaced) {
+        FlutterError.reportError(FlutterErrorDetails(
+          exception: FlutterError(
+            'AppLockHost has a Navigator above it.\n'
+            'It must wrap the MaterialApp; inside a route, pushed routes draw over the lock. '
+            'SecurityWrapper treats this host as missing.',
+          ),
+          library: 'app_lock',
+        ));
+      }
+      return true;
+    }());
     return _AppLockScope(
       notifier: _controller,
+      misplaced: misplaced,
       child: ListenableBuilder(
         listenable: _controller,
         // The same element always holds the app, so locking never rebuilds
@@ -244,7 +268,12 @@ class _AppLockHostState extends State<AppLockHost> {
 }
 
 class _AppLockScope extends InheritedNotifier<AppLockController> {
-  const _AppLockScope({required AppLockController super.notifier, required super.child});
+  /// True when the host has a Navigator above it; such a host never locks.
+  final bool misplaced;
+  const _AppLockScope({required AppLockController super.notifier, required this.misplaced, required super.child});
+
+  @override
+  bool updateShouldNotify(_AppLockScope oldWidget) => misplaced != oldWidget.misplaced || super.updateShouldNotify(oldWidget);
 }
 
 /// The lock screen sits above MaterialApp, so it brings its own media
