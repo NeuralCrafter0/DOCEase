@@ -7,6 +7,7 @@ import 'package:docease/providers/medicine_provider.dart';
 import 'package:docease/providers/patient_provider.dart';
 import 'package:docease/screens/add_record_screen.dart';
 import 'package:docease/utils/attachment_processor.dart';
+import 'package:docease/utils/pick_registry.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_core_platform_interface/test.dart';
 import 'package:flutter/material.dart';
@@ -40,6 +41,12 @@ class FakePicker extends ImagePickerPlatform {
 
 class RecordingPatientProvider extends PatientProvider {
   VisitRecord? added;
+  /// `patientId path` per registration. On a merge with #16 this overrides
+  /// its real PatientProvider.registerPickedAttachment, so a signature
+  /// change there breaks the build instead of silently skipping the call.
+  final registered = <String>[];
+  // ignore: annotate_overrides
+  void registerPickedAttachment({required String patientId, required String localPath}) => registered.add('$patientId $localPath');
   @override
   Patient findById(String id) => Patient(id: 'p1', name: 'A', age: '1', gender: 'Male', phone: '');
   @override
@@ -218,5 +225,34 @@ void main() {
     await save(t);
     await t.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
     expect(outFiles(), hasLength(1));
+  });
+
+  group('#16 L-1: every new photo is registered before it can be saved', () {
+    testWidgets('gallery photos: each processed copy is registered for this patient, and those are what gets saved', (t) async {
+      picker.gallery = [XFile('$fx/alpha.png'), XFile('$fx/img.gif')];
+      await open(t);
+      await tapAndProcess(t, 'Gallery', expectFiles: 2);
+      final files = outFiles().map((f) => f.path).toList()..sort();
+      expect(files, hasLength(2));
+      expect([...patients.registered]..sort(), [for (final f in files) 'p1 $f']);
+      await save(t);
+      expect(patients.added, isNotNull);
+      expect([...patients.added!.attachmentPaths]..sort(), files, reason: 'every saved new photo was registered');
+    });
+    testWidgets('camera photo is registered (the only copy of it)', (t) async {
+      picker.camera = XFile('$fx/rot6.jpg');
+      await open(t);
+      await tapAndProcess(t, 'Camera', expectFiles: 1);
+      expect(patients.registered, ['p1 ${outFiles().single.path}']);
+    });
+    testWidgets('a file that fails processing registers nothing', (t) async {
+      picker.gallery = [XFile('$fx/notes.pdf')];
+      await open(t);
+      await tapAndProcess(t, 'Gallery');
+      expect(patients.registered, isEmpty);
+    });
+    test('a provider without the registry (before #16) is a no-op, not an error', () {
+      expect(() => registerPickedAttachment(PatientProvider(), patientId: 'p1', localPath: '/x/a.jpg'), returnsNormally);
+    });
   });
 }
