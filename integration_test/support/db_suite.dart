@@ -1089,13 +1089,98 @@ void runDbSuite(DbSuiteHarness h) {
         isNotNull);
     final row = (await rawRow(db, 'p1'))!;
     // Today's behaviour: the whole-row write replaces history, so the
-    // visit (and its uploaded S) is gone from the row; the mapping stays
-    // until pruned; the scan no longer references the photo.
+    // visit (and its uploaded S) is gone from the row; the save references
+    // neither L nor S, so the mapping is dropped too (SWQ-10); the scan no
+    // longer references the photo.
     expect(row['name'], 'Asha Renamed');
     expect(jsonDecode(row['history'] as String), isEmpty);
     expect(row['sync_state'], 'dirty');
-    expect(await swapRows(db), hasLength(1));
+    expect(await swapRows(db), isEmpty);
     expect(await d.referencedAttachmentKeys(), isEmpty);
+    await d.close();
+    await wipe();
+  });
+
+  h.define('SWQ-10 a save that removes the photo drops its mapping, so a '
+      'later stale pre-upload copy keeps L (no Storage reference comes '
+      'back); a save still holding S keeps it', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    final other = '$appFiles/attachments/$ownA/other.jpg';
+    await d.insertPatient(withVisits('p1', [[swpLocal, other]]));
+    await d.insertPatient(withVisits('p2', [[swpLocal]]));
+    final staleP1 = (await d.fetchPatientsStrict())
+        .singleWhere((p) => p.id == 'p1'); // pre-upload copy, holds L
+    expect(await swp(d), isTrue);
+    final s2 = 'clinical_attachments/$uidA/p2/$swpUuid.jpg';
+    expect(await swp(d, patient: 'p2', storagePath: s2), isTrue);
+    expect((await swapRows(db)).map((r) => r['patient_id']), ['p1', 'p2']);
+    // The doctor removes the photo from p1.
+    expect(await d.updatePatient(withVisits('p1', [[other]])), isNotNull);
+    expect((await swapRows(db)).map((r) => r['patient_id']), ['p2'],
+        reason: "p1's mapping dropped, p2's untouched");
+    // A stale pre-upload copy is saved later: L stays L.
+    expect(await d.updatePatient(staleP1), isNotNull);
+    final row = (await rawRow(db, 'p1'))!;
+    expect(storedPaths(row), [[swpLocal, other]]);
+    expect(row['history'], isNot(contains('clinical_attachments/')));
+    expect(await swapRows(db), hasLength(1));
+    // p2: a save that still holds S (the current row, renamed) keeps the
+    // mapping; so does insertPatient with an alias of L (rewritten to S).
+    final current = (await d.fetchPatientsStrict())
+        .singleWhere((p) => p.id == 'p2');
+    expect(current.history.single.attachmentPaths, [s2]);
+    expect(await d.updatePatient(
+        Patient.fromJson({...current.toJson(), 'name': 'Asha Renamed'})),
+        isNotNull);
+    expect((await swapRows(db)).single['storage_path'], s2);
+    expect(await d.insertPatient(withVisits('p2',
+        [['file://localhost${Uri.file(swpLocal).path}']])), isNotNull);
+    expect(storedPaths((await rawRow(db, 'p2'))!), [[s2]]);
+    expect((await swapRows(db)).single['patient_id'], 'p2');
+    // insertPatient that removes it drops it too.
+    expect(await d.insertPatient(withVisits('p2', [[]])), isNotNull);
+    expect(await swapRows(db), isEmpty);
+    await d.close();
+    await wipe();
+  });
+
+  h.define('SWQ-11 markSynced backstop: a push snapshot from '
+      'dirtyPatientsStrict is refused after a local edit or a swap; the '
+      'row stays dirty and the counter is unchanged', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    await d.insertPatient(withVisits('p1', [[swpLocal]]));
+    expect(await counterOf(uidA), '1');
+    // Snapshot for the push, then a local edit before the confirmation.
+    final snap = (await d.dirtyPatientsStrict()).single;
+    final v2 = await d.updatePatient(
+        Patient.fromJson({...snap.toJson(), 'name': 'Asha Edited'}));
+    expect(v2, isNot(snap.updatedAt));
+    expect(await d.markSynced('p1', snap.updatedAt!), isFalse);
+    var row = (await rawRow(db, 'p1'))!;
+    expect(row['sync_state'], 'dirty');
+    expect('${row['updated_at']}', v2);
+    expect(row['name'], 'Asha Edited');
+    expect(await counterOf(uidA), '1');
+    // Same after a swap that happened after the snapshot.
+    final snap2 = (await d.dirtyPatientsStrict()).single;
+    expect(await swp(d), isTrue);
+    expect(await d.markSynced('p1', snap2.updatedAt!), isFalse);
+    row = (await rawRow(db, 'p1'))!;
+    expect(row['sync_state'], 'dirty');
+    expect(storedPaths(row), [[swpStorage]]);
+    expect(await counterOf(uidA), '1');
+    expect(await d.unsyncedCount(), const UnsyncedCount.known(1));
+    // The current snapshot is accepted, exactly once.
+    final latest = (await d.dirtyPatientsStrict()).single;
+    expect(latest.history.single.attachmentPaths, [swpStorage]);
+    expect(await d.markSynced('p1', latest.updatedAt!), isTrue);
+    expect(await counterOf(uidA), '0');
+    expect(await d.markSynced('p1', latest.updatedAt!), isFalse);
+    expect(await counterOf(uidA), '0');
     await d.close();
     await wipe();
   });

@@ -405,4 +405,42 @@ abstract final class AttachmentRefs {
     }
     return rewritten == 0 ? (historyJson, 0) : (jsonEncode(out), rewritten);
   }
+
+  /// The local keys of [swaps] (`local_key` -> `storage_path`) that
+  /// [historyJson] (a local save, after [applySwapsToHistoryJson]) no
+  /// longer references: no attachment entry equals the storage path and no
+  /// entry keys (for [uid]) to the local key. The photo was removed, so the
+  /// mapping must go too, or a stale pre-upload copy would bring it back
+  /// as the Storage path. A history it cannot read gives an empty set
+  /// (every mapping kept). Never throws.
+  static Set<String> unreferencedSwapKeys(
+      String historyJson, Map<String, String> swaps,
+      {required String uid}) {
+    if (swaps.isEmpty) return const {};
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(historyJson);
+    } on FormatException {
+      return const {};
+    }
+    if (decoded is! List) return const {};
+    final owner = ownerFolderNameFor(uid);
+    final entries = <String>{};
+    final keys = <String>{};
+    for (final visit in decoded) {
+      final paths = visit is Map ? visit['attachmentPaths'] : null;
+      if (paths is! List) continue;
+      for (final e in paths) {
+        if (e is! String || e.isEmpty) continue;
+        entries.add(e);
+        if (isNonLocalRef(e)) continue;
+        final k = attachmentKey(e, ownerFolderName: owner);
+        if (k != null) keys.add(k);
+      }
+    }
+    return {
+      for (final m in swaps.entries)
+        if (!keys.contains(m.key) && !entries.contains(m.value)) m.key,
+    };
+  }
 }

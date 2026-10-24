@@ -1165,8 +1165,11 @@ class DatabaseHelper implements LocalDatabase {
   /// [_row] for a local whole-row save, with every attachment entry that
   /// keys to a path already swapped for this patient (`attachment_swaps`)
   /// kept as the recorded Storage path, so a stale in-memory copy cannot
-  /// put the local path back. Read in the caller's transaction. Never used
-  /// for cloud copies ([_applyCloud]).
+  /// put the local path back. Mappings the saved row no longer references
+  /// at all (the photo was removed) are deleted, so a later stale
+  /// pre-upload copy is not turned back into the Storage path. Runs in the
+  /// caller's transaction; other patients' mappings are untouched. Never
+  /// used for cloud copies ([_applyCloud]).
   Future<Map<String, Object?>> _rowKeepingSwaps(
       DatabaseExecutor txn, Patient patient) async {
     final row = _row(patient);
@@ -1175,14 +1178,19 @@ class DatabaseHelper implements LocalDatabase {
         where: 'patient_id = ?',
         whereArgs: [patient.id]);
     if (recorded.isEmpty) return row;
+    final swaps = {
+      for (final r in recorded)
+        r['local_key'] as String: r['storage_path'] as String,
+    };
     final (history, n) = AttachmentRefs.applySwapsToHistoryJson(
-        row['history'] as String,
-        {
-          for (final r in recorded)
-            r['local_key'] as String: r['storage_path'] as String,
-        },
-        uid: _uid!,
-        patientId: patient.id);
+        row['history'] as String, swaps,
+        uid: _uid!, patientId: patient.id);
+    for (final k
+        in AttachmentRefs.unreferencedSwapKeys(history, swaps, uid: _uid!)) {
+      await txn.delete('attachment_swaps',
+          where: 'patient_id = ? AND local_key = ?',
+          whereArgs: [patient.id, k]);
+    }
     if (n == 0) return row;
     debugPrint('SQLITE: kept $n uploaded attachment path(s) on a local save');
     return {...row, 'history': history};

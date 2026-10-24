@@ -132,6 +132,8 @@ class FakeLocalDatabase implements LocalDatabase {
     final (history, n) = AttachmentRefs.applySwapsToHistoryJson(
         jsonEncode(json['history']), recorded,
         uid: uid, patientId: patient.id);
+    final gone = AttachmentRefs.unreferencedSwapKeys(history, recorded, uid: uid);
+    recorded.removeWhere((k, _) => gone.contains(k));
     if (n == 0) return patient;
     return Patient.fromJson({...json, 'history': jsonDecode(history)},
         updatedAt: patient.updatedAt);

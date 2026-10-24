@@ -390,7 +390,9 @@ abstract class LocalDatabase {
   /// transaction, every attachment entry that keys to a path already
   /// swapped for this patient (see [swapAttachmentPath]) is stored as the
   /// recorded Storage path, so a stale in-memory copy cannot put the local
-  /// path back. The returned version is for the stored row, which may then
+  /// path back. A mapping whose photo the saved row no longer holds at all
+  /// (neither the local key nor the Storage path) is deleted in the same
+  /// transaction. The returned version is for the stored row, which may then
   /// differ from [patient]: push the stored row ([dirtyPatientsStrict]).
   Future<String?> insertPatient(Patient patient, {bool fromCloud = false});
 
@@ -429,8 +431,12 @@ abstract class LocalDatabase {
 
   /// Compare-and-set: marks [patientId] clean (and decrements the unsynced
   /// counter) only if its `updated_at` still equals [syncedUpdatedAt], the
-  /// value that was sent to Firestore. Returns false, leaving the row dirty,
-  /// if it was edited while the write was in flight.
+  /// value that was sent to Firestore. Returns false, leaving the row dirty
+  /// and the counter unchanged, if the row changed after that snapshot
+  /// (a local edit, or a swapAttachmentPath / rewritten save, all of which
+  /// bump `updated_at`), is already clean, is gone, or [syncedUpdatedAt]
+  /// is not a version. Push what [dirtyPatientsStrict] returned and pass
+  /// its [Patient.updatedAt].
   Future<bool> markSynced(String patientId, String syncedUpdatedAt);
 
   /// In one transaction, deletes row [id] and inserts a tombstone in
