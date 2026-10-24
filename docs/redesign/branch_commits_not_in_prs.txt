@@ -1,0 +1,113 @@
+# Commits on redesign/m1-wip not reachable from any open PR head or origin/main (git log HEAD, newest first)
+# HEAD at time of listing: 378e9a3
+378e9a3 DOCEase Frontend | WIP: PatientLoad.loading reads #16 hasLoaded; screenshot fake reports hasLoaded, adds loading shot
+4b80e95 DOCEase Frontend | Phone prefix without flag emoji, FAB icon-only at large text, Figtree licence per family
+4338dff DOCEase Frontend | Patient form: sections, private fields, duplicate warning, refusal keeps the form open
+36c7abf DOCEase Frontend | Home: new layout, states, sort, drawer/sidebar, sign-out via SessionController
+a75d7ce DOCEase Frontend | Redesign foundation: tokens, Figtree, theme, shared components, QA keys, route reset on owner change
+5c19470 DOCEase Frontend | base2: merge #21 f374421 (contains #15 1827d9d)
+abdca05 DOCEase Frontend | base2: merge #8 58a1e10
+1bafd74 DOCEase Frontend | base2: merge #16 7b8134a (contains #13 f9d905f, #10 4f3a8ee)
+ecbc2c0 DOCEase Frontend | base2: merge #10 4f3a8ee
+89475b0 DOCEase Frontend | integration base: drop QA-local suites (not in any PR)
+000d79d DOCEase-backend | scratch: merge #20 (resolution from trial_20_lows_qa_merged14)
+a42f0aa DOCEase-backend | scratch: merge #1
+787993f DOCEase-backend | scratch: merge #18
+99f9c4d QA | Merge branch 'pr16-h10' into qa-merged15
+70e978c QA | QA: carry #18 profile-photo and #17/#19 a11y suites onto qa-merged14
+9e6ac6f QA | QA: switch on load-failure suites (real #10/#16/#20 names, LF-07c status gate, UI-04 stale banner) + #20 Lows LOW20-1/2a/2b failing-first
+cc6b429 QA | Merge branch 'pr11-h9' into qa-merged14
+554c9b0 QA | Merge #20 4b2b897 after #16 3a695b0 (top bar per #20 description: Vitals trends unguarded first, then guarded edit/delete; imports both)
+37b59ea QA | QA: tile suite to #8 c9d4cd8 (un-gate 03a/03b, add 03c merged 2.0x, 05 cloud tile, 05g URL guard N/A, 06 Remove photo 48x48)
+65fa5bb QA | Merge #8 c9d4cd8 (resolve #8x#17 visit date per #8 comment 6379869524)
+8c23cc0 QA | Merge branch 'pr19-h7' into qa-merged13
+a5fa227 QA | Merge branch 'pr18-h7' into qa-merged13
+5814e5b QA | Merge branch 'pr17-h7' into qa-merged13
+87314cd QA | QA: #16 3a695b0 M-1 pull suite, L-1 widened race detector + RACE-04, pending registry suite, retargeted mutations
+9c31ba6 QA | QA: SWP-00 prefix match for 3a695b0 forApp; shim passes loadStatus; SWP-30a-d load-failure guard
+5119b5a QA | Merge #16 3a695b0 (photo_sweep/tests/docs: #16; medicine_provider: #16 + #6 removeLearnedMedicine, single guard; patient_provider: #16 + 
+088da43 DOCEase-backend | docs(save-refused): screens show an error, close the form, keep no partial data
+a6d9358 QA | Record #13 8dac36f (patch-identical rebase of 0e65128 onto #10 b217f46; 11/12 patches already here)
+c4c21bc QA | QA: #16 L-3 race draft (RACE-01..03, CTRL) + hoist mutation script
+c3b5f31 QA | QA: swap suite on #10 b217f46 - SWQ-QA-08 expects 0, RM-01..03 normal, SPF-01..09
+1fc657b QA | Merge #10 b217f46 into qa-merged10
+b085c3f QA | QA: gate TILE-03a 2.0x (confirmed #8 tile overflow)
+a9040bc QA | QA: photo tile suite TILE-01..06 for #8 ed77169
+8ac5072 QA | Merge #8 ed77169 into qa-merged9
+7f2ec23 QA | QA: removeLearnedMedicine suite MR-01..14 + MR-W1..W4 (MR-13/14 failing-first)
+1208b13 QA | Merge #12 987448e into qa-merged8
+3bcabe5 QA | Merge #6 1bae23c into qa-merged8 (medicine_provider per #6 merge notes 6378926272)
+d442fd2 QA | QA: L-2 removed-photo repro RM-01..08, markSynced pins MS-01..06, STALE-06 pending #16 swap wiring
+1c4f879 QA | QA: sync-catch drafts SYNC-01..04 (push stored row, markSynced version, refresh) failing-first
+8aeeba4 QA | QA: attachment_swaps real-SQLCipher cases SWQ-QA-01..12, flip SWAP-RS-41 (3227338)
+c324c32 QA | Merge #10 3227338 into qa-merged7
+1ea7ad3 QA | QA: F16-R4 stale details/visit-form repros (STALE-01..05, failing-first gated)
+6a5ce33 QA | QA: real-SQLCipher swapAttachmentPath suite (29) vs #10 fed74ca
+43acb06 QA | Merge #10 fed74ca into qa-merged6
+aee654a QA | QA: REL-LOCK release-mode check for #4 guard (release-sim tree: asserts emptied, kDebugMode=false)
+cf160ae QA | Apply #5 merge notes (comment 6378758176): narrow catch to SaveRefusedException; save-refused test uses real SaveRefusedException + State
+526ccc8 QA | Merge #11 68b4cbb into qa-merged5 (detail: keep #6 null guard + newestFirst timeline; use #11 samePhone)
+69439e6 QA | Merge #7 555a935 into qa-merged5
+8b50a32 QA | Merge #6 69c1607 into qa-merged5
+d69b6b6 QA | Merge #4 659a363 into qa-merged5
+24961eb QA | QA: DB audit A1-A5 (failing-first gated), strict-read FFI suite, run_qa copies all qa_* helpers
+9fb3365 QA | Record #13 0e65128 (= c5b0b95 rebased on #10 9a8d31b; range-diff 11/11 '=', patch-diff 0 lines)
+b7d1e24 QA | Merge #10 9a8d31b (strict reads) into qa-merged4
+bc28231 QA | QA: sweep suite on #16 a8eaf9e (single app wiring, SWP-29 log, KEY-07 hosts, F8-QA-01..07, RS-06/07)
+0e65128 DOCEase-backend | fix(dev-mode): compile dev mode out of builds without the define
+3e4324e DOCEase-backend | fix(dev-mode): only the define can turn dev mode on (security F4-R3)
+cc91615 DOCEase-backend | build(android): refuse any devRelease task; match #1's import style
+62aff87 DOCEase-backend | feat(dev-mode): iOS backup exclusion for photo folders; TEST DATA share text; #7 PDF name
+da5c90e DOCEase-backend | build(android): no devRelease variant; guard on the task graph
+21aaf5f DOCEase-backend | feat(dev-mode): StartupHooks for both start paths; SaveRefusedException
+ff3e06d DOCEase-backend | feat(dev-mode): CurrentOwner seam for code without a BuildContext
+e930a11 DOCEase-backend | fix(dev-mode): PR #13 security review (release gate, flavors, per-owner photos)
+6b65f1c DOCEase-backend | Dev mode: run the app on the phone without Firebase, login or lock
+ebb9238 DOCEase-backend | fix(logs): log error codes only; add log hygiene tests
+7614fae DOCEase-backend | feat(session): SessionController, per-uid sync, attachment paths, rollback and tombstones
+15148b6 DOCEase-backend | fix(photos): security #16 review - fresh scan, entry-only delete, app names
+eb07e84 DOCEase-backend | fix(photos): delete the local copy after a confirmed upload (security F8-R1)
+6b283ee DOCEase-backend | refactor(photos): use #10's AttachmentRefs and referencedAttachmentKeys
+294d50b DOCEase-backend | Delete photos of deleted patients/visits; startup photo sweep
+5a7fd0a QA local | QA: attachment key contract suite (KEY-01..06) against #10 4559a98
+67e51db qa | QA: KCV/SET port into #10 harness (device+host entries), drop 3 merge/QA unused imports
+f8ac6fa qa | Merge remote-tracking branch 'origin/fix/db-fail-closed-encryption' into qa-merged3
+143d149 qa | QA: add frontend trial_main_merge_test (runs in full runs, both modes; mutation-checked)
+3ce6b1c qa | QA: re-anchor source checks on #13 0d720a7 const branches; PDF-NAME-01 dev case needs the define
+ecc32f4 qa | Merge commit '0d720a7' into qa-merged3
+0d720a7 DOCEase-backend | fix(dev-mode): compile dev mode out of builds without the define
+7ed1997 qa | QA: functional pass, lock PoCs, gate/dev drafts (mode-aware skips), flipped lock characterization
+93d47a4 qa | QA: record #13 9d05a7f (rebased; content = 29f009a + #10 3d19b3c, already merged)
+8d5bc3d qa | Merge remote-tracking branch 'origin/app/dev-mode-local' into qa-merged3
+ac0da75 qa | Merge remote-tracking branch 'origin/fix/db-fail-closed-encryption' into qa-merged3
+9d05a7f DOCEase-backend | fix(dev-mode): only the define can turn dev mode on (security F4-R3)
+d05566d DOCEase-backend | build(android): refuse any devRelease task; match #1's import style
+9d25048 DOCEase-backend | feat(dev-mode): iOS backup exclusion for photo folders; TEST DATA share text; #7 PDF name
+55aede4 DOCEase-backend | build(android): no devRelease variant; guard on the task graph
+62d1a26 DOCEase-backend | feat(dev-mode): StartupHooks for both start paths; SaveRefusedException
+c781b7f DOCEase-backend | feat(dev-mode): CurrentOwner seam for code without a BuildContext
+f0037b1 DOCEase-backend | fix(dev-mode): PR #13 security review (release gate, flavors, per-owner photos)
+c2164b6 DOCEase-backend | Dev mode: run the app on the phone without Firebase, login or lock
+a33bed1 DOCEase-backend | fix(logs): log error codes only; add log hygiene tests
+21d9cd3 DOCEase-backend | feat(session): SessionController, per-uid sync, attachment paths, rollback and tombstones
+29f009a DOCEase-backend | fix(dev-mode): only the define can turn dev mode on (security F4-R3)
+4c0c35a qa | Merge remote-tracking branch 'origin/fix/qa-feature-pass' into qa-merged3
+fb40fb0 qa | Merge remote-tracking branch 'origin/feat/feature-gaps' into qa-merged3
+2cac0c4 qa | Merge remote-tracking branch 'origin/pr/9' into qa-merged3
+3dff81e qa | Merge remote-tracking branch 'origin/feat/attachment-picker' into qa-merged3
+8da7168 qa | Merge remote-tracking branch 'origin/fix/frontend-privacy' into qa-merged3
+2cb8dcb qa | Merge remote-tracking branch 'origin/fix/ui-bugs' into qa-merged3
+d327114 qa | Merge remote-tracking branch 'origin/fix/form-validation' into qa-merged3
+3f14668 qa | Merge remote-tracking branch 'origin/fix/biometric-fail-closed' into qa-merged3
+f545808 qa | Merge remote-tracking branch 'origin/pr/3' into qa-merged3
+2f3a854 qa | Merge remote-tracking branch 'origin/pr/13' into qa-merged3
+515d19b qa | Merge remote-tracking branch 'origin/pr/10' into qa-merged3
+4fd5d14 DOCEase-backend | build(android): refuse any devRelease task; match #1's import style
+c246322 DOCEase-backend | feat(dev-mode): iOS backup exclusion for photo folders; TEST DATA share text; #7 PDF name
+222dd6d DOCEase-backend | build(android): no devRelease variant; guard on the task graph
+d13ab79 DOCEase-backend | feat(dev-mode): StartupHooks for both start paths; SaveRefusedException
+7aa3ed2 DOCEase-backend | feat(dev-mode): CurrentOwner seam for code without a BuildContext
+8429324 DOCEase-backend | fix(dev-mode): PR #13 security review (release gate, flavors, per-owner photos)
+4e26551 DOCEase-backend | Dev mode: run the app on the phone without Firebase, login or lock
+0e698bf DOCEase-backend | fix(logs): log error codes only; add log hygiene tests
+7c3ee41 DOCEase-backend | feat(session): SessionController, per-uid sync, attachment paths, rollback and tombstones
