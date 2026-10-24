@@ -7,7 +7,10 @@ import 'package:share_plus/share_plus.dart';
 import '../providers/patient_provider.dart';
 import '../providers/doctor_provider.dart';
 import '../models/patient.dart';
+import '../models/doctor.dart';
+import '../utils/doctor_name.dart';
 import '../utils/pdf_export.dart';
+import '../utils/visit_order.dart';
 import 'add_patient_screen.dart';
 import 'add_record_screen.dart';
 
@@ -15,14 +18,22 @@ class PatientDetailScreen extends StatelessWidget {
   final String patientId;
   const PatientDetailScreen({super.key, required this.patientId});
 
+  Patient? _findPatient(PatientProvider provider) {
+    try {
+      return provider.findById(patientId);
+    } on StateError {
+      return null;
+    }
+  }
+
   Future<void> _makePhoneCall(String phoneNumber) async {
     final Uri launchUri = Uri(scheme: 'tel', path: phoneNumber);
     if (await canLaunchUrl(launchUri)) await launchUrl(launchUri);
   }
 
   void _shareVisitSummary(BuildContext context, dynamic doctor, Patient patient, VisitRecord record) {
-    final String docName = doctor != null ? "${doctor.title} ${doctor.name}" : "Doctor";
-    final String message = "*Visit Summary - DOCEase*\n*Patient:* ${patient.name}\n*Date:* ${DateFormat('dd MMM yyyy').format(record.date)}\n*Type:* ${record.visitType}\n\n*Vitals:* BP: ${record.bp ?? 'N/A'}, Temp: ${record.temp ?? 'N/A'}\n*Diagnosis:* ${record.diagnosis}\n*Prescription:* ${record.prescription}\n\n*Dr. $docName*";
+    final String? docName = doctorDisplayName(doctor as Doctor?);
+    final String message = "*Visit Summary - DOCEase*\n*Patient:* ${patient.name}\n*Date:* ${DateFormat('dd MMM yyyy').format(record.date)}\n*Type:* ${record.visitType}\n\n*Vitals:* BP: ${record.bp ?? 'N/A'}, Temp: ${record.temp ?? 'N/A'}\n*Diagnosis:* ${record.diagnosis}\n*Prescription:* ${record.prescription}${docName != null ? '\n\n*$docName*' : ''}";
     Share.share(message);
   }
 
@@ -45,7 +56,7 @@ class PatientDetailScreen extends StatelessWidget {
             Row(children: [
               Expanded(child: TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF475569))))),
               const SizedBox(width: 16),
-              Expanded(child: ElevatedButton(onPressed: () { provider.deletePatient(patient.id); Navigator.pop(ctx); Navigator.pop(context); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))), child: const Text('Delete All', style: TextStyle(fontWeight: FontWeight.bold)))),
+              Expanded(child: ElevatedButton(onPressed: () { Navigator.pop(ctx); Navigator.pop(context); provider.deletePatient(patient.id); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))), child: const Text('Delete All', style: TextStyle(fontWeight: FontWeight.bold)))),
             ])
           ],
         ),
@@ -84,9 +95,15 @@ class PatientDetailScreen extends StatelessWidget {
     final doctor = Provider.of<DoctorProvider>(context).currentDoctor;
     return Consumer<PatientProvider>(
       builder: (ctx, provider, _) {
-        final patient = provider.findById(patientId);
+        final patient = _findPatient(provider);
+        // The patient was just deleted: this route is on its way out, so
+        // render nothing instead of throwing from findById.
+        if (patient == null) return const Scaffold(backgroundColor: Color(0xFFF8FAFC));
         final family = provider.patients.where((p) => p.phone == patient.phone && p.id != patient.id).toList();
-        final lastVisit = patient.history.isNotEmpty ? patient.history.first : null;
+        // Timeline, "Last Visit" and the latest marker follow visit date,
+        // not insertion order (a backdated note is inserted at index 0).
+        final timeline = patient.history.newestFirst();
+        final lastVisit = timeline.isNotEmpty ? timeline.first : null;
 
         return Scaffold(
           backgroundColor: const Color(0xFFF8FAFC),
@@ -116,7 +133,7 @@ class PatientDetailScreen extends StatelessWidget {
               const SizedBox(height: 32),
               const Row(children: [Icon(Icons.history_edu_outlined, size: 20, color: Color(0xFF6366F1)), SizedBox(width: 8), Text('Clinical Timeline', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Color(0xFF1E293B)))]),
               const SizedBox(height: 16),
-              Expanded(child: patient.history.isEmpty ? const Center(child: Text('No Clinical Records Available')) : ListView.builder(padding: const EdgeInsets.only(bottom: 100), itemCount: patient.history.length, itemBuilder: (ctx, i) => _buildClinicalTimeline(context, doctor, patient, patient.history[i], i == 0, provider))),
+              Expanded(child: patient.history.isEmpty ? const Center(child: Text('No Clinical Records Available')) : ListView.builder(padding: const EdgeInsets.only(bottom: 100), itemCount: timeline.length, itemBuilder: (ctx, i) => _buildClinicalTimeline(context, doctor, patient, timeline[i], i == 0, provider))),
             ]),
           ),
           floatingActionButton: FloatingActionButton.extended(backgroundColor: const Color(0xFF6366F1), foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), icon: const Icon(Icons.add_moderator_outlined, size: 20), label: const Text('Add Clinical Note'), onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (ctx) => AddRecordScreen(patientId: patientId)))),

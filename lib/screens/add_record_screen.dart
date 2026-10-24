@@ -7,6 +7,8 @@ import 'package:flutter_typeahead/flutter_typeahead.dart';
 import '../models/patient.dart';
 import '../providers/patient_provider.dart';
 import '../providers/medicine_provider.dart';
+import '../utils/prescription_lines.dart';
+import '../utils/visit_order.dart';
 
 class AddRecordScreen extends StatefulWidget {
   final String patientId;
@@ -53,8 +55,9 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
 
   void _repeatLastVisit() {
     final patient = Provider.of<PatientProvider>(context, listen: false).findById(widget.patientId);
-    if (patient.history.isNotEmpty) {
-      final last = patient.history.first;
+    // Latest by visit date, not the most recently inserted note.
+    final last = patient.history.latestVisit;
+    if (last != null) {
       setState(() {
         _symptomsController.text = last.symptoms;
         _diagnosisController.text = last.diagnosis;
@@ -73,11 +76,10 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
     if (_formKey.currentState!.validate()) {
       setState(() => _isSaving = true);
       
-      // Save frequent medicine to list
+      // Medicines to remember: drug-name lines, without their dosage. Learned only
+      // once the visit is saved, so a refused save teaches nothing.
       final medProvider = Provider.of<MedicineProvider>(context, listen: false);
-      if (_prescriptionController.text.isNotEmpty) {
-        medProvider.addMedicineIfNew(_prescriptionController.text.split('\n').first);
-      }
+      final medicines = PrescriptionLines.medicineNames(_prescriptionController.text, dosages: medProvider.dosageTemplates, known: medProvider.frequentMedicines);
 
       final record = VisitRecord(
         id: widget.existingRecord?.id, date: _selectedDate, visitType: _selectedVisitType,
@@ -89,7 +91,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
       final provider = Provider.of<PatientProvider>(context, listen: false);
       if (widget.existingRecord == null) await provider.addRecord(widget.patientId, record);
       else await provider.updateRecord(widget.patientId, record);
-      
+      for (final m in medicines) { medProvider.addMedicineIfNew(m); }
       if (mounted) Navigator.pop(context);
     }
   }
@@ -166,19 +168,46 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
           border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: Colors.grey.shade200)),
         ),
       ),
-      suggestionsCallback: (pattern) {
-        if (pattern.isEmpty) return [];
-        return medProvider.frequentMedicines.where((m) => m.toLowerCase().contains(pattern.toLowerCase())).toList();
-      },
-      itemBuilder: (context, suggestion) => ListTile(title: Text(suggestion), leading: const Icon(Icons.history, size: 16)),
+      // Match and complete only the line being typed, so every medicine line
+      // gets suggestions and picking one keeps the other lines.
+      suggestionsCallback: (_) => PrescriptionLines.suggestionsFor(_prescriptionController.value, medProvider.frequentMedicines),
+      // Long-press removes a wrongly learned entry (security review #6). A
+      // long-press-only detector, so the type-ahead's own tap still selects.
+      itemBuilder: (context, suggestion) => GestureDetector(
+        onLongPress: () => _confirmRemoveSuggestion(SuggestionsController.of<String>(context), medProvider, suggestion),
+        child: ListTile(title: Text(suggestion), leading: const Icon(Icons.history, size: 16)),
+      ),
       onSelected: (suggestion) {
         setState(() {
-          final currentText = _prescriptionController.text;
-          // Replace partial typing with full medicine name
-          _prescriptionController.text = suggestion;
+          _prescriptionController.value = PrescriptionLines.applySuggestion(_prescriptionController.value, suggestion);
         });
       },
     );
+  }
+
+  /// Asks before removing [name] from the learned suggestions, then removes
+  /// it from the stored list. Saved records keep their prescriptions.
+  Future<void> _confirmRemoveSuggestion(SuggestionsController<String> box, MedicineProvider medProvider, String name) async {
+    final remove = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Remove from suggestions?'),
+        content: Text('"$name" will no longer be suggested. Saved records are not changed.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Remove')),
+        ],
+      ),
+    );
+    if (remove != true || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await medProvider.removeLearnedMedicine(name);
+    } catch (_) {
+      messenger.showSnackBar(const SnackBar(content: Text("Couldn't remove it from suggestions. Try again in a moment.")));
+      return;
+    }
+    if (mounted) box.refresh();
   }
 
   Widget _buildDosageTemplates(MedicineProvider provider) {
@@ -190,7 +219,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
         side: BorderSide.none,
         onPressed: () {
           setState(() {
-            _prescriptionController.text = '${_prescriptionController.text} - $t\n';
+            _prescriptionController.value = PrescriptionLines.applyDosage(_prescriptionController.text, t);
           });
         },
       )).toList(),
