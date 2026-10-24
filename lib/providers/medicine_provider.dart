@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -56,6 +57,27 @@ class MedicineProvider with ChangeNotifier {
   int _generation = 0;
 
   List<String> get frequentMedicines => _frequentMedicines;
+
+  // DB audit #5: a failed load must never let an addition save a short
+  // list over the stored one. Until a load succeeds, additions are kept in
+  // memory ([_unsaved]) and merged into the stored list once it loads.
+  //
+  // The ONE load guard (shared with #6's removeLearnedMedicine): true only
+  // after the stored list was read for the current owner this session
+  // ([_onLoaded]: cloud settings, legacy profile, local setting); never set
+  // by a failed read; reset by [clear] (sign-out / account switch), by a
+  // failed load and by [load] for a different owner. Every write checks it.
+  bool _learnedMedicinesLoaded = false;
+  bool get learnedMedicinesLoaded => _learnedMedicinesLoaded;
+  // UI status only (not a guard): the last read failed, as opposed to not
+  // having been attempted yet.
+  bool _loadFailed = false;
+  final List<String> _unsaved = [];
+
+  /// True when the stored list could not be read (until a later load
+  /// succeeds). Meanwhile new medicines are suggested from memory but not
+  /// saved; they are saved together with the stored list once it loads.
+  bool get loadFailed => _loadFailed;
   List<String> get dosageTemplates => _dosageTemplates;
 
   DocumentReference<Map<String, dynamic>> _settingsDoc(String uid) =>
@@ -65,6 +87,9 @@ class MedicineProvider with ChangeNotifier {
   /// ready; repeated calls for the same uid share one load.
   Future<void> load(String uid) {
     if (_uid == uid && _loading != null) return _loading!;
+    // Owner change without a clear(): nothing loaded for the old owner may
+    // count as loaded (or be saved) for the new one.
+    if (_uid != null && _uid != uid) clear();
     _uid = uid;
     final gen = _generation;
     return _loading = _load(uid, gen);
@@ -84,18 +109,17 @@ class MedicineProvider with ChangeNotifier {
       final settings = await _settingsDoc(uid).get();
       if (gen != _generation) return;
       if (settings.exists) {
-        _frequentMedicines = sanitize(settings.data()?['items']);
-        notifyListeners();
+        _onLoaded(sanitize(settings.data()?['items']));
         return;
       }
       // One-time migration from the legacy field on the profile document.
       final profile = await _db.collection('doctors').doc(uid).get();
       if (gen != _generation) return;
       final legacy = sanitize(profile.data()?['frequentMedicines']);
-      _frequentMedicines = legacy;
-      notifyListeners();
+      final hadUnsaved = _unsaved.isNotEmpty;
+      _onLoaded(legacy, persist: false); // the migration write below saves it
       try {
-        await _settingsDoc(uid).set({'items': legacy});
+        await _settingsDoc(uid).set({'items': hadUnsaved ? _frequentMedicines : legacy});
       } catch (e) {
         // Keep the legacy list in memory; the copy is retried on next load.
         debugPrint('Medicines migration write failed: ${_code(e)}');
@@ -103,7 +127,7 @@ class MedicineProvider with ChangeNotifier {
       }
     } catch (e) {
       debugPrint('Error fetching medicines: ${_code(e)}');
-      if (gen == _generation) _loading = null; // allow a retry
+      if (gen == _generation) _onLoadFailed(); // allows a retry
     }
   }
 
@@ -111,12 +135,34 @@ class MedicineProvider with ChangeNotifier {
     try {
       final raw = await _local.getSetting(localSettingKey);
       if (gen != _generation) return;
-      _frequentMedicines = raw == null ? [] : sanitize(jsonDecode(raw));
-      notifyListeners();
+      final Object? decoded = raw == null ? const <Object?>[] : jsonDecode(raw);
+      // Something stored that is not a list is unreadable, not "empty".
+      if (decoded is! List) throw const FormatException('not a list');
+      _onLoaded(sanitize(decoded));
     } catch (e) {
       debugPrint('Error reading medicines: ${_code(e)}');
-      if (gen == _generation) _loading = null; // allow a retry
+      if (gen == _generation) _onLoadFailed(); // allows a retry
     }
+  }
+
+  /// The stored list was read: use it, plus anything added while it was
+  /// not loaded (then saved, unless [persist] is false).
+  void _onLoaded(List<String> stored, {bool persist = true}) {
+    final extra = [for (final m in _unsaved) if (!stored.contains(m)) m];
+    _unsaved.clear();
+    final room = maxItems - stored.length;
+    _frequentMedicines = [...stored, ...extra.take(room < 0 ? 0 : room)];
+    _learnedMedicinesLoaded = true;
+    _loadFailed = false;
+    notifyListeners();
+    if (persist && extra.isNotEmpty) unawaited(_persist());
+  }
+
+  void _onLoadFailed() {
+    _loading = null;
+    _learnedMedicinesLoaded = false;
+    _loadFailed = true;
+    notifyListeners();
   }
 
   Future<void> addMedicineIfNew(String med) async {
@@ -126,7 +172,17 @@ class MedicineProvider with ChangeNotifier {
 
     _frequentMedicines = [..._frequentMedicines, cleanMed];
     notifyListeners();
+    if (!_learnedMedicinesLoaded) {
+      // Never save over a list that could not be read (DB audit #5).
+      _unsaved.add(cleanMed);
+      return;
+    }
+    await _persist();
+  }
 
+  /// Saves the whole list, only once it was loaded for this doctor.
+  Future<void> _persist() async {
+    if (!_learnedMedicinesLoaded) return;
     if (!_cloud) {
       if (_uid == null) return; // no session yet: memory only
       final gen = _generation;
@@ -153,6 +209,9 @@ class MedicineProvider with ChangeNotifier {
     _generation++;
     _uid = null;
     _loading = null;
+    _learnedMedicinesLoaded = false;
+    _loadFailed = false;
+    _unsaved.clear();
     _frequentMedicines = [];
     notifyListeners();
   }
@@ -178,4 +237,14 @@ class MedicineProvider with ChangeNotifier {
       s.isNotEmpty && s.length <= maxItemLength && !s.contains('\n') && !s.contains('\r');
 
   static String _code(Object e) => e is FirebaseException ? e.code : e.runtimeType.toString();
+}
+
+/// A learned-medicines write was refused because the stored list has not
+/// been read for the current owner this session (not loaded yet, the read
+/// failed, or the owner changed). Nothing was written. For #6's
+/// removeLearnedMedicine (its TODO(backend)).
+class LearnedMedicinesNotLoadedException implements Exception {
+  const LearnedMedicinesNotLoadedException();
+  @override
+  String toString() => 'LearnedMedicinesNotLoadedException';
 }
