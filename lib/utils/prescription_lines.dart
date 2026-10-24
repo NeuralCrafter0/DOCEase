@@ -51,8 +51,14 @@ class PrescriptionLines {
   /// with any dosage after [dosageSeparator] removed. Blank lines, lines that
   /// are only a dosage (one of [dosages], or starting with "-"), and repeats
   /// are skipped.
-  static List<String> medicineNames(String prescription, {Iterable<String> dosages = const []}) {
+  ///
+  /// The learned list is doctor-wide and synced, so only lines that
+  /// [looksLikeMedicine] are kept, plus lines that are exactly a name the
+  /// doctor already has in [known] (picked from the suggestions). Free-text
+  /// instructions such as "review with sugar report Monday" are never kept.
+  static List<String> medicineNames(String prescription, {Iterable<String> dosages = const [], Iterable<String> known = const []}) {
     final skip = {for (final d in dosages) d.trim().toLowerCase()};
+    final picked = {for (final k in known) k.trim().toLowerCase()};
     final names = <String>[];
     for (final raw in prescription.split('\n')) {
       var line = raw.trim();
@@ -60,9 +66,39 @@ class PrescriptionLines {
       final cut = line.indexOf(dosageSeparator);
       if (cut != -1) line = line.substring(0, cut).trim();
       if (line.isEmpty || skip.contains(line.toLowerCase())) continue;
+      if (!looksLikeMedicine(line) && !picked.contains(line.toLowerCase())) continue;
       if (!names.contains(line)) names.add(line);
     }
     return names;
+  }
+
+  static final _sentencePunctuation = RegExp(r'[,;:!?"]|\.$|\.\s+\p{Ll}', unicode: true);
+  static final _startsWithLetter = RegExp(r'^\p{L}', unicode: true);
+  static final _hasDigit = RegExp(r'\d');
+
+  /// Words that turn a line into an instruction or note rather than a drug
+  /// name (prepositions, follow-up and timing words).
+  static const _instructionWords = {
+    'a', 'an', 'the', 'and', 'or', 'if', 'with', 'without', 'on', 'at', 'in',
+    'to', 'for', 'of', 'from', 'by', 'after', 'before', 'then', 'when', 'until',
+    'next', 'review', 'follow', 'followup', 'follow-up', 'revisit', 'visit',
+    'report', 'reports', 'test', 'tests', 'check', 'repeat', 'continue', 'stop',
+    'avoid', 'advice', 'advised', 'come', 'call', 'please', 'today', 'tomorrow',
+    'day', 'days', 'week', 'weeks', 'month', 'months', 'monday', 'tuesday',
+    'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+  };
+
+  /// Whether [name] reads like a drug name ("Azithromycin 500mg",
+  /// "Tab. Dolo 650", "Amoxicillin-Clavulanate 625mg") rather than a note:
+  /// at most 60 characters, starts with a letter, no sentence punctuation, no
+  /// instruction words, at most 6 words (3 when there is no strength digit).
+  static bool looksLikeMedicine(String name) {
+    final n = name.trim();
+    if (n.length < 2 || n.length > 60) return false;
+    if (!_startsWithLetter.hasMatch(n) || _sentencePunctuation.hasMatch(n)) return false;
+    final words = n.split(RegExp(r'\s+'));
+    if (words.length > (_hasDigit.hasMatch(n) ? 6 : 3)) return false;
+    return !words.any((w) => _instructionWords.contains(w.toLowerCase().replaceAll('.', '')));
   }
 
   /// Applies a dosage chip to the last medicine in [text]:
