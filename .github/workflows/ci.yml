@@ -581,6 +581,111 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  split-apk-size:
+    name: Split-per-ABI APK size (measurement)
+    # Measures `flutter build apk --split-per-abi`, the proposed way to build the
+    # user's final APK: the DEV config (--profile, DOCEASE_DEV_MODE=true,
+    # --flavor dev when flavors exist) and, for a like-for-like comparison with
+    # the universal release APK, the release config (DOCEASE_DEV_MODE=false,
+    # --flavor prod when flavors exist). Fails if the arm64-v8a APK lacks
+    # arm64 libsqlcipher.so or still carries other ABIs' native libs.
+    # Debug-key signed, never uploaded: no APK leaves this job.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      UNIVERSAL_RELEASE_BASELINE_KIB: "35951" # universal arm64 release APK, PR #21 run 40068366351
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Java ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+      - name: Set up Flutter ${{ env.FLUTTER_VERSION }}
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: flutter pub get (lockfile enforced)
+        run: flutter pub get --enforce-lockfile
+      - name: Build split-per-ABI APKs (DEV profile, then release)
+        run: |
+          set -euo pipefail
+          dev_flavor=(); rel_flavor=()
+          if grep -qE '^[[:space:]]*productFlavors[[:space:]]*\{' android/app/build.gradle.kts 2>/dev/null; then
+            dev_flavor=(--flavor dev); rel_flavor=(--flavor prod)
+          fi
+          out=build/app/outputs/flutter-apk
+          mkdir -p build/split-measure/dev build/split-measure/release
+          flutter build apk --profile --split-per-abi "${dev_flavor[@]}" \
+            --dart-define=DOCEASE_DEV_MODE=true
+          mv "$out"/app-*profile.apk build/split-measure/dev/
+          flutter build apk --release --split-per-abi "${rel_flavor[@]}" \
+            --dart-define=DOCEASE_DEV_MODE=false
+          mv "$out"/app-*release.apk build/split-measure/release/
+          ls -l build/split-measure/dev build/split-measure/release
+      - name: Measure the arm64-v8a APKs
+        run: |
+          set -euo pipefail
+          bt="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | grep -vE -- '-rc[0-9]*$' | sort -V | tail -1)"
+          fb=warn
+          if grep -qE '^[[:space:]]*productFlavors[[:space:]]*\{' android/app/build.gradle.kts 2>/dev/null; then fb=forbid; fi
+          status=0
+          for kind in dev release; do
+            apk="$(find build/split-measure/$kind -name 'app-arm64-v8a*.apk' | head -1)"
+            if [ -z "$apk" ]; then echo "::error::no arm64-v8a APK from the $kind split build"; status=1; continue; fi
+            if [ "$kind" = dev ]; then title="Split APK arm64-v8a, DEV (profile, DOCEASE_DEV_MODE=true)"; f="$fb"
+            else title="Split APK arm64-v8a, release (DOCEASE_DEV_MODE=false)"; f=ignore; fi
+            python3 tool/ci/check_apk.py --apk "$apk" --aapt2 "$bt/aapt2" --enforce-16kb \
+              --firebase "$f" --title "$title" --json-out "build/split-measure/$kind.json" || status=1
+          done
+          python3 - <<'PY' || status=1
+          import glob, json, os
+          base = float(os.environ["UNIVERSAL_RELEASE_BASELINE_KIB"])
+          rows, bad = [], []
+          for kind in ("dev", "release"):
+              p = f"build/split-measure/{kind}.json"
+              if not os.path.exists(p):
+                  bad.append(f"{kind}: no report"); continue
+              r = json.load(open(p))
+              abis = sorted({l["abi"] for l in r["libs"]})
+              sqlc = [l for l in r["libs"] if l["abi"] == "arm64-v8a" and l["lib"] == "libsqlcipher.so"]
+              if abis != ["arm64-v8a"]:
+                  bad.append(f"{kind}: native libs for {abis}, expected only arm64-v8a")
+              if not sqlc:
+                  bad.append(f"{kind}: arm64-v8a libsqlcipher.so is missing")
+              others = {os.path.basename(a): round(os.path.getsize(a) / 1024, 1)
+                        for a in glob.glob(f"build/split-measure/{kind}/*.apk") if "arm64-v8a" not in a}
+              rows.append((kind, r["apk"], r["total_kib"], r["version_code"],
+                           sqlc[0]["kib"] if sqlc else 0, others))
+          out = ["### Split-per-ABI vs universal APK", "",
+                 f"Universal arm64 release APK (today): **{base:.0f} KiB**", "",
+                 "| Build | arm64-v8a APK | KiB | vs universal | versionCode | arm64 libsqlcipher.so KiB |",
+                 "|---|---|---:|---:|---:|---:|"]
+          for kind, apk, kib, vc, s, _ in rows:
+              out.append(f"| {kind} | `{apk}` | {kib:.0f} | {kib - base:+.0f} ({(kib - base) / base * 100:+.1f}%) | {vc} | {s:.0f} |")
+          for kind, *_, others in rows:
+              out.append("")
+              out.append(f"Other {kind} split APKs (not handed out): " + ", ".join(f"`{k}` {v:.0f} KiB" for k, v in sorted(others.items())))
+          out.append("")
+          out.append("No APK is uploaded from this job.")
+          for b in bad:
+              out.append(f"- **ERROR:** {b}")
+              print(f"::error title=Split-per-ABI check::{b}")
+          text = "\n".join(out) + "\n"
+          print(text)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write(text)
+          raise SystemExit(1 if bad else 0)
+          PY
+          exit "$status"
   firebase-rules:
     name: Firebase rules (emulator tests)
     # Runs the backend's Firestore/Storage rules tests from firebase/ against the
