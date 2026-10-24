@@ -5,9 +5,10 @@ import '../ui/components.dart';
 /// Shown instead of the patient list when the first read failed. Never the
 /// empty state: the records exist but couldn't be read (S6).
 class PatientLoadFailedView extends StatelessWidget {
-  const PatientLoadFailedView({super.key, required this.onRetry});
+  const PatientLoadFailedView({super.key, required this.onRetry, this.retryKey});
 
   final Future<void> Function() onRetry;
+  final Key? retryKey;
 
   @override
   Widget build(BuildContext context) {
@@ -17,16 +18,17 @@ class PatientLoadFailedView extends StatelessWidget {
       liveRegion: true,
       title: "Couldn't load records",
       message: 'Your patient records could not be read. Nothing was changed. Try again before registering anyone new.',
-      actions: [RetryButton(onRetry: onRetry, filled: true)],
+      actions: [RetryButton(key: retryKey, onRetry: onRetry, filled: true)],
     );
   }
 }
 
 /// Above a list kept from an earlier load when a reload failed.
 class PatientRefreshFailedBanner extends StatelessWidget {
-  const PatientRefreshFailedBanner({super.key, required this.onRetry});
+  const PatientRefreshFailedBanner({super.key, required this.onRetry, this.retryKey});
 
   final Future<void> Function() onRetry;
+  final Key? retryKey;
 
   @override
   Widget build(BuildContext context) {
@@ -36,7 +38,7 @@ class PatientRefreshFailedBanner extends StatelessWidget {
       liveRegion: true,
       title: "Couldn't refresh.",
       message: 'Showing the last loaded records. Editing is paused.',
-      action: RetryButton(onRetry: onRetry),
+      action: RetryButton(key: retryKey, onRetry: onRetry),
     );
   }
 }

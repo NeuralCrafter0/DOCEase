@@ -11,6 +11,7 @@ abstract final class QaKeys {
   static const homePatientList = ValueKey<String>('home.patientList');
   static ValueKey<String> homePatientTile(String id) => ValueKey<String>('home.patientTile.$id');
   static const homeRegisterPatient = ValueKey<String>('home.registerPatient');
+  static const homeLoading = ValueKey<String>('home.loading');
   static const homeEmptyState = ValueKey<String>('home.emptyState');
   static const homeNoMatches = ValueKey<String>('home.noMatches');
   static const homeLoadFailed = ValueKey<String>('home.loadFailed');
@@ -36,6 +37,8 @@ abstract final class QaKeys {
   static const patientFormRegisterAnyway = ValueKey<String>('patientForm.duplicate.registerAnyway');
 
   // Patient detail
+  /// "Couldn't open this record" state (ROWSCOPE-UI-01).
+  static const patientDetailUnreadable = ValueKey<String>('patientDetail.unreadable');
   static const patientDetailEdit = ValueKey<String>('patientDetail.edit');
   static const patientDetailDelete = ValueKey<String>('patientDetail.delete');
   static const patientDetailExportPdf = ValueKey<String>('patientDetail.exportPdf');
@@ -74,6 +77,7 @@ abstract final class QaKeys {
   static const shareConfirm = ValueKey<String>('share.confirm');
 
   // PDF export confirm (shown before the system print or share dialog)
-  static const exportConfirm = ValueKey<String>('export.confirm');
-  static const exportCancel = ValueKey<String>('export.cancel');
+  static const pdfConfirmSheet = ValueKey<String>('pdfConfirm.sheet');
+  static const pdfConfirmConfirm = ValueKey<String>('pdfConfirm.confirm');
+  static const pdfConfirmCancel = ValueKey<String>('pdfConfirm.cancel');
 }

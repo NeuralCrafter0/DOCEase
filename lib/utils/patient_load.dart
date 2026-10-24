@@ -20,6 +20,23 @@ class PatientLoad {
   /// Patient and visit writes are refused: hide add, edit and delete.
   static bool readOnly(PatientProvider p) => failed(p);
 
+  /// True while the current owner's first load hasn't finished (backend
+  /// G2). Until `PatientProvider.hasLoaded` lands in #16 there is no signal,
+  /// so this is false and Home's empty state stays neutral. When it lands
+  /// this becomes `!p.hasLoaded`; nothing else changes.
+  static bool loading(PatientProvider p) => false;
+
   /// Retries the load.
   static Future<void> reload(PatientProvider p) => p.reload();
+
+  /// One patient's stored row can't be read (backend, per-patient flag).
+  /// Set by the strict single-patient read on opening detail, or by a save
+  /// refused because of that row; cleared on clear() or an owner change.
+  /// No API yet: false until backend's commit, then it calls the real
+  /// getter. Detail shows `patientDetail.unreadable` when true.
+  static bool patientUnreadable(PatientProvider p, String id) => false;
+
+  /// Run when patient detail opens, so the strict read can set the flag.
+  /// A no-op until backend's commit names the call.
+  static Future<void> openPatient(PatientProvider p, String id) async {}
 }

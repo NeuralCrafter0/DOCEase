@@ -96,21 +96,24 @@ class SectionHeader extends StatelessWidget {
     return Padding(
       padding: padding,
       child: Row(children: [
-        Flexible(
-          child: Semantics(
-            header: true,
-            child: Text(title, style: context.type.titleMedium),
-          ),
+        Expanded(
+          child: Row(children: [
+            Flexible(
+              child: Semantics(
+                header: true,
+                child: Text(title, style: context.type.titleMedium),
+              ),
+            ),
+            if (count != null) ...[
+              const SizedBox(width: Space.sm),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: Space.sm, vertical: Space.xxs),
+                decoration: BoxDecoration(color: c.sunken, borderRadius: const BorderRadius.all(Radius.circular(Radii.pill))),
+                child: Text(count!, style: AppText.tabular(context.type.labelMedium?.copyWith(color: c.inkSecondary))),
+              ),
+            ],
+          ]),
         ),
-        if (count != null) ...[
-          const SizedBox(width: Space.sm),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: Space.sm, vertical: Space.xxs),
-            decoration: BoxDecoration(color: c.sunken, borderRadius: const BorderRadius.all(Radius.circular(Radii.pill))),
-            child: Text(count!, style: AppText.tabular(context.type.labelMedium?.copyWith(color: c.inkSecondary))),
-          ),
-        ],
-        const Spacer(),
         ?trailing,
       ]),
     );

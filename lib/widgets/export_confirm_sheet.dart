@@ -10,7 +10,7 @@ import '../ui/qa_keys.dart';
 /// what `PdfExport` really puts in the file: patient details and every visit,
 /// without photos or notes.
 class ExportConfirmSheet extends StatelessWidget {
-  const ExportConfirmSheet({super.key});
+  const ExportConfirmSheet({super.key = QaKeys.pdfConfirmSheet});
 
   static const title = 'Export full report?';
   static const intro = 'The PDF holds the whole record, so treat it like the paper file:';
@@ -62,7 +62,7 @@ class ExportConfirmSheet extends StatelessWidget {
         Row(children: [
           Expanded(
             child: OutlinedButton(
-              key: QaKeys.exportCancel,
+              key: QaKeys.pdfConfirmCancel,
               onPressed: () => Navigator.pop(context, false),
               child: const Text('Cancel'),
             ),
@@ -70,7 +70,7 @@ class ExportConfirmSheet extends StatelessWidget {
           const SizedBox(width: Space.md),
           Expanded(
             child: FilledButton(
-              key: QaKeys.exportConfirm,
+              key: QaKeys.pdfConfirmConfirm,
               style: const ButtonStyle(minimumSize: WidgetStatePropertyAll(Size(64, 48))),
               onPressed: () => Navigator.pop(context, true),
               child: const Text('Continue'),
