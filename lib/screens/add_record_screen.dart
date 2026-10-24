@@ -310,7 +310,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
         final d = await showDatePicker(context: context, initialDate: _selectedDate, firstDate: DateTime(2000), lastDate: DateTime.now());
         if (d != null) setState(() => _selectedDate = d);
       },
-      child: Container(padding: const EdgeInsets.all(18), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), border: Border.all(color: const Color(0xFFE2E8F0))), child: Row(children: [const Icon(Icons.calendar_month_outlined, color: Color(0xFF6366F1), size: 20), const SizedBox(width: 12), Text(DateFormat('EEEE, dd MMM yyyy').format(_selectedDate), style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16, color: Color(0xFF1E293B)))]))
+      child: Container(padding: const EdgeInsets.all(18), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), border: Border.all(color: const Color(0xFFE2E8F0))), child: Row(children: [const Icon(Icons.calendar_month_outlined, color: Color(0xFF6366F1), size: 20), const SizedBox(width: 12), Expanded(child: Text(DateFormat('EEEE, dd MMM yyyy').format(_selectedDate), style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16, color: Color(0xFF1E293B))))]))
     ));
   }
 
@@ -465,8 +465,39 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
 
   Widget _buildThumbnail(String path) {
     final isNetwork = path.startsWith('http');
-    return Padding(padding: const EdgeInsets.only(right: 12), child: Stack(children: [ClipRRect(borderRadius: BorderRadius.circular(16), child: isNetwork ? Image.network(path, key: ValueKey(path), width: 100, height: 120, fit: BoxFit.cover, errorBuilder: _photoUnavailableTile) : Image.file(File(path), key: ValueKey(path), width: 100, height: 120, fit: BoxFit.cover, errorBuilder: _photoUnavailableTile)), Positioned(right: 4, top: 4, child: GestureDetector(onTap: () => _removeAttachment(path), child: const CircleAvatar(radius: 12, backgroundColor: Colors.redAccent, child: Icon(Icons.close, size: 14, color: Colors.white))))]));
+    // An uploaded photo stored as a Storage path. This branch has no way to
+    // load it (the backend's loader is on #2/#13/#16, Firebase is parked),
+    // so say where it is instead of trying it as a local file.
+    final isCloud = !isNetwork && path.startsWith(_storagePrefix);
+    final Widget image = isCloud
+        ? _photoTile(Icons.cloud_done_outlined, 'Saved to cloud', const ValueKey('photo-cloud-tile'))
+        : isNetwork
+            ? Image.network(path, key: ValueKey(path), width: 100, height: 120, fit: BoxFit.cover, errorBuilder: _photoUnavailableTile)
+            : Image.file(File(path), key: ValueKey(path), width: 100, height: 120, fit: BoxFit.cover, errorBuilder: _photoUnavailableTile);
+    return Padding(padding: const EdgeInsets.only(right: 12), child: Stack(children: [
+      ClipRRect(borderRadius: BorderRadius.circular(16), child: image),
+      // 48x48 tap target; the red circle is drawn where it always was.
+      Positioned(right: 0, top: 0, child: Semantics(
+        container: true,
+        button: true,
+        label: 'Remove photo',
+        onTap: () => _removeAttachment(path),
+        excludeSemantics: true,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => _removeAttachment(path),
+          child: const SizedBox(width: 48, height: 48, child: Align(alignment: Alignment.topRight, child: Padding(
+            padding: EdgeInsets.all(4),
+            child: CircleAvatar(radius: 12, backgroundColor: Colors.redAccent, child: Icon(Icons.close, size: 14, color: Colors.white)),
+          ))),
+        ),
+      )),
+    ]));
   }
+
+  /// Top-level folder of uploaded visit photos in Storage
+  /// (`clinical_attachments/<owner>/<patient>/<file>`).
+  static const _storagePrefix = 'clinical_attachments/';
 
   /// Shown when a thumbnail cannot be drawn, for example when the visit's
   /// upload finished while this form was open and the local copy is gone
@@ -475,20 +506,33 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   /// The images are keyed by path so a removed tile's error state is never
   /// reused for the next photo (the key sits under a single-child parent,
   /// so a record listing a path twice cannot hit a duplicate-key error).
-  static Widget _photoUnavailableTile(BuildContext context, Object error, StackTrace? stackTrace) {
+  static Widget _photoUnavailableTile(BuildContext context, Object error, StackTrace? stackTrace) =>
+      _photoTile(Icons.photo_outlined, 'Photo saved', const ValueKey('photo-unavailable-tile'));
+
+  /// The thumbnail-sized stand-in tile. The label's text scale is capped and
+  /// it is limited to two lines, so it fits the fixed 100x120 tile at any
+  /// text size; the full label is always the semantics label.
+  static Widget _photoTile(IconData icon, String label, Key key) {
     return Semantics(
-      label: 'Photo saved',
+      container: true,
+      image: true,
+      label: label,
       excludeSemantics: true,
       child: Container(
-        key: const ValueKey('photo-unavailable-tile'),
+        key: key,
         width: 100,
         height: 120,
         color: const Color(0xFFF1F5F9),
         alignment: Alignment.center,
-        child: const Column(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.photo_outlined, color: Color(0xFF64748B), size: 28),
-          SizedBox(height: 6),
-          Text('Photo saved', style: TextStyle(color: Color(0xFF64748B), fontSize: 12, fontWeight: FontWeight.w600)),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, color: const Color(0xFF64748B), size: 28),
+          const SizedBox(height: 6),
+          Flexible(child: Builder(builder: (context) => MediaQuery.withClampedTextScaling(
+            maxScaleFactor: 1.3,
+            child: Text(label, textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Color(0xFF64748B), fontSize: 12, fontWeight: FontWeight.w600)),
+          ))),
         ]),
       ),
     );
