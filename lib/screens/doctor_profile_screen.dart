@@ -11,6 +11,7 @@ import '../widgets/app_text_field.dart';
 import '../widgets/field_label.dart';
 import '../widgets/primary_button.dart';
 import '../widgets/segmented_selector.dart';
+import '../utils/input_rules.dart';
 import 'package:flutter/services.dart';
 import '../models/doctor.dart';
 import '../providers/doctor_provider.dart';
@@ -72,10 +73,36 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
     _mobileController = TextEditingController(text: initialNumber);
   }
 
-  Future<void> _pickImage(ImageSource source) async {
+  /// Asks whether to take a photo or pick one from the gallery, then picks.
+  /// [preferred] is listed first (the camera button passes the camera).
+  Future<void> _pickImage(ImageSource preferred) async {
     if (!_isEditing) return;
+    final source = await _chooseImageSource(preferred);
+    if (source == null || !mounted) return;
     final picked = await ImagePicker().pickImage(source: source, imageQuality: 50);
     if (picked != null) setState(() => _localImage = File(picked.path));
+  }
+
+  Future<ImageSource?> _chooseImageSource(ImageSource preferred) {
+    final order = preferred == ImageSource.camera ? const [ImageSource.camera, ImageSource.gallery] : const [ImageSource.gallery, ImageSource.camera];
+    return showModalBottomSheet<ImageSource>(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(32))),
+      backgroundColor: Colors.white,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            for (final s in order)
+              ListTile(
+                leading: Icon(s == ImageSource.camera ? Icons.camera_alt_rounded : Icons.photo_library_rounded, color: AppColors.primary),
+                title: Text(s == ImageSource.camera ? 'Take photo' : 'Choose from gallery', style: const TextStyle(fontWeight: FontWeight.w700, color: AppColors.ink)),
+                onTap: () => Navigator.pop(ctx, s),
+              ),
+          ]),
+        ),
+      ),
+    );
   }
 
   Future<void> _saveProfile() async {
@@ -140,6 +167,10 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
               child: Stack(children: [
                 CircleAvatar(radius: 60, backgroundColor: const Color(0xFFEEF2FF), backgroundImage: _localImage != null ? FileImage(_localImage!) : avatarImageFor(_profileImageUrl)),
                 if (_isEditing) Positioned(bottom: 0, right: 0, child: GestureDetector(onTap: () => _pickImage(ImageSource.camera), child: Container(padding: const EdgeInsets.all(8), decoration: const BoxDecoration(color: Color(0xFF1E293B), shape: BoxShape.circle), child: const Icon(Icons.camera_alt, color: Colors.white, size: 20)))),
+                // No photo yet: a person icon instead of an empty circle. Kept as
+                // its own layer so the avatar line above stays as it is.
+                if (_localImage == null && _profileImageUrl == null)
+                  Positioned.fill(child: IgnorePointer(child: Semantics(label: 'No profile photo', child: Icon(Icons.person_rounded, size: 56, color: AppColors.primary.withValues(alpha: 0.35))))),
               ]),
             ),
             const SizedBox(height: 40),
@@ -150,9 +181,9 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
             _buildHighPerfSelector(['Solo Practice', 'Clinic Mode'], _selectedPracticeMode, (v) => setState(() => _selectedPracticeMode = v)),
             const SizedBox(height: 32),
             _buildLabel('Professional Details'),
-            _buildModernInput(_nameController, 'Full Name', Icons.person_outline),
+            _buildModernInput(_nameController, 'Full Name', Icons.person_outline, inputFormatters: InputRules.personName),
             const SizedBox(height: 24),
-            _buildModernInput(_emailController, 'Clinical Email', Icons.alternate_email_rounded, keyboardType: TextInputType.emailAddress),
+            _buildModernInput(_emailController, 'Clinical Email', Icons.alternate_email_rounded, keyboardType: TextInputType.emailAddress, inputFormatters: InputRules.email),
             const SizedBox(height: 24),
             Row(children: [
               Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [_buildLabel('Age'), _buildModernInput(_ageController, 'Yrs', Icons.cake_outlined, keyboardType: TextInputType.number, isAge: true)])),
@@ -179,9 +210,9 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
               ),
             ]),
             const SizedBox(height: 24),
-            _buildModernInput(_specialtyController, 'Specialty', Icons.medical_services_outlined),
+            _buildModernInput(_specialtyController, 'Specialty', Icons.medical_services_outlined, inputFormatters: InputRules.shortText),
             const SizedBox(height: 24),
-            _buildModernInput(_clinicController, 'Clinic / Hospital', Icons.local_hospital_outlined),
+            _buildModernInput(_clinicController, 'Clinic / Hospital', Icons.local_hospital_outlined, inputFormatters: InputRules.shortText),
             const SizedBox(height: 48),
             if (_isEditing)
               _isLoading ? const Center(child: CircularProgressIndicator()) : PrimaryButton(label: 'Save and Lock Profile', onPressed: _saveProfile),
@@ -194,11 +225,11 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
 
   Widget _buildLabel(String text) => FieldLabel(text);
 
-  Widget _buildModernInput(TextEditingController controller, String hint, IconData icon, {TextInputType? keyboardType, bool isAge = false}) {
+  Widget _buildModernInput(TextEditingController controller, String hint, IconData icon, {TextInputType? keyboardType, bool isAge = false, List<TextInputFormatter>? inputFormatters}) {
     return AppTextField(
       controller: controller, hint: hint, icon: icon, keyboardType: keyboardType,
       enabled: _isEditing,
-      inputFormatters: isAge ? [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(3)] : null,
+      inputFormatters: isAge ? [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(3)] : inputFormatters,
       textColor: _isEditing ? AppColors.ink : Colors.grey,
       fillColor: _isEditing ? Colors.white : AppColors.track,
     );
