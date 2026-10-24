@@ -471,6 +471,217 @@ void runDbSuite(DbSuiteHarness h) {
     await d.close();
   });
 
+  // --- attachment references (photo sweep) --------------------------------
+
+  const appFiles = '/data/user/0/com.docease.app/files';
+  final ownA = LocalDatabase.ownerFolderNameFor(uidA);
+  final ownB = LocalDatabase.ownerFolderNameFor(uidB);
+  Patient withVisits(String id, List<List<String>> visits) => Patient(
+      id: id, name: 'Asha', age: '34', gender: 'Female', phone: '+91999',
+      history: [
+        for (var i = 0; i < visits.length; i++)
+          VisitRecord(
+              id: 'v$i-$id', date: DateTime(2026, 1, 1 + i),
+              visitType: 'Routine', symptoms: 's', diagnosis: 'd',
+              prescription: 'rx', attachmentPaths: visits[i]),
+      ]);
+  Future<void> markAllSynced(DatabaseHelper d) async {
+    for (final p in await d.dirtyPatients()) {
+      expect(await d.markSynced(p.id, p.updatedAt!), isTrue);
+    }
+  }
+  Matcher scanFails(AttachmentScanFailure reason) => throwsA(
+      isA<AttachmentScanIncomplete>().having((e) => e.reason, 'reason', reason));
+
+  h.define('ATT-01 mix of patients/visits, dirty rows and the doctor photo: '
+      'exact paths, keys, read only', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    await d.insertPatient(withVisits('p1', [])); // no visits
+    await d.insertPatient(withVisits('p2', [
+      ['$appFiles/attachments/$ownA/a1.jpg',
+       'clinical_attachments/$uidA/p2/up.jpg',
+       'https://firebasestorage.googleapis.com/v0/b/x/o/clinical_attachments'
+           '%2F$uidA%2Fp2%2Fold.jpg?alt=media&token=t'],
+    ]));
+    await d.insertPatient(withVisits('p3', [
+      [], // visit without attachments
+      ['file:///data/data/com.docease.app/files/attachments/$ownA/a%20b.jpg', ''],
+    ]));
+    await markAllSynced(d);
+    // Dirty (unsynced) row: must be included.
+    await d.insertPatient(withVisits('p4', [
+      ['/data/data/com.docease.app/files/attachments/$ownA/dirty.png'],
+    ]));
+    await d.putSetting('doctor_profile', jsonEncode({
+      'name': 'Dr A',
+      'profileImageUrl': '$appFiles/profile/$ownA/avatar_1.png',
+    }));
+    await d.putSetting('medicines', '["Paracetamol"]');
+
+    final rowsBefore = await rawRows(db);
+    final settingsBefore = await db.query('settings', orderBy: 'key');
+    final counterBefore = await counterOf(uidA);
+    expect(await d.unsyncedCount(), const UnsyncedCount.known(1));
+    expect((await d.dirtyPatients()).map((p) => p.id), ['p4']);
+
+    final expectedPaths = {
+      '$appFiles/attachments/$ownA/a1.jpg',
+      'clinical_attachments/$uidA/p2/up.jpg',
+      'https://firebasestorage.googleapis.com/v0/b/x/o/clinical_attachments'
+          '%2F$uidA%2Fp2%2Fold.jpg?alt=media&token=t',
+      'file:///data/data/com.docease.app/files/attachments/$ownA/a%20b.jpg',
+      '',
+      '/data/data/com.docease.app/files/attachments/$ownA/dirty.png',
+      '$appFiles/profile/$ownA/avatar_1.png',
+    };
+    const expectedKeys = {
+      'attachments/a1.jpg',
+      'attachments/a b.jpg', // file:// parsed, percent-decoded
+      'attachments/dirty.png', // dirty row included
+      'profile/avatar_1.png',
+    };
+    expect(await d.referencedAttachmentPaths(), expectedPaths);
+    expect(await d.referencedAttachmentKeys(), expectedKeys);
+
+    // Read only: rows (sync_state, updated_at), settings, counter unchanged.
+    expect(await rawRows(db), rowsBefore);
+    expect(await db.query('settings', orderBy: 'key'), settingsBefore);
+    expect(await counterOf(uidA), counterBefore);
+    expect(await d.unsyncedCount(), const UnsyncedCount.known(1));
+
+    // Persisted: same answer after close and reopen.
+    await d.close();
+    await d.openFor(uidA);
+    expect(await d.referencedAttachmentPaths(), expectedPaths);
+    expect(await d.referencedAttachmentKeys(), expectedKeys);
+    await d.close();
+  });
+
+  h.define('ATT-02 an empty DB (and one with no attachments) gives an empty '
+      'set', () async {
+    await wipe();
+    final d = helper();
+    await d.openFor(uidA);
+    expect(await d.referencedAttachmentPaths(), isEmpty);
+    expect(await d.referencedAttachmentKeys(), isEmpty);
+    await d.insertPatient(withVisits('p1', [[], []]));
+    await d.insertPatient(patient('p2'));
+    await d.putSetting('doctor_profile', '{"name":"Dr A"}');
+    expect(await d.referencedAttachmentPaths(), isEmpty);
+    expect(await d.referencedAttachmentKeys(), isEmpty);
+    await d.close();
+  });
+
+  h.define('ATT-03 one corrupt row or attachment JSON throws; never a '
+      'partial set', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    await d.insertPatient(withVisits('p1', [['$appFiles/attachments/$ownA/1.jpg']]));
+    await d.insertPatient(withVisits('p2', [['$appFiles/attachments/$ownA/2.jpg']]));
+    await d.insertPatient(withVisits('p3', [['$appFiles/attachments/$ownA/3.jpg']]));
+    final counterBefore = await counterOf(uidA);
+
+    Future<void> corrupt(String history) =>
+        db.update('patients', {'history': history},
+            where: 'id = ?', whereArgs: ['p2']);
+
+    await corrupt(jsonEncode([
+      {'id': 'v', 'attachmentPaths': '$appFiles/attachments/$ownA/2.jpg'}
+    ]));
+    await expectLater(d.referencedAttachmentPaths(),
+        scanFails(AttachmentScanFailure.unreadableAttachmentList));
+    await expectLater(d.referencedAttachmentKeys(),
+        scanFails(AttachmentScanFailure.unreadableAttachmentList));
+
+    await corrupt(jsonEncode([
+      {'id': 'v', 'attachmentPaths': ['$appFiles/attachments/$ownA/2.jpg', 5]}
+    ]));
+    await expectLater(d.referencedAttachmentPaths(),
+        scanFails(AttachmentScanFailure.unreadableAttachmentList));
+
+    await corrupt('[{"id":"v","attachmentPaths":["x"');
+    await expectLater(d.referencedAttachmentPaths(),
+        scanFails(AttachmentScanFailure.unreadableRow));
+    await expectLater(d.referencedAttachmentKeys(),
+        scanFails(AttachmentScanFailure.unreadableRow));
+
+    await d.putSetting('doctor_profile', '{"profileImageUrl":');
+    await corrupt(jsonEncode([]));
+    await expectLater(d.referencedAttachmentPaths(),
+        scanFails(AttachmentScanFailure.unreadableDoctorProfile));
+    await d.deleteSetting('doctor_profile');
+
+    // Repaired: the full set comes back.
+    expect(await d.referencedAttachmentPaths(), {
+      '$appFiles/attachments/$ownA/1.jpg',
+      '$appFiles/attachments/$ownA/3.jpg',
+    });
+    expect(await counterOf(uidA), counterBefore);
+    await d.close();
+  });
+
+  h.define("ATT-04 keys: another owner's path or a legacy/unknown local path "
+      'throws; web links and Storage refs are skipped', () async {
+    await wipe();
+    final d = helper();
+    await d.openFor(uidA);
+    await d.insertPatient(withVisits('p1', [
+      ['$appFiles/attachments/$ownA/mine.jpg',
+       'gs://x.appspot.com/clinical_attachments/$uidA/p1/a.jpg',
+       'http://example.com/a.jpg',
+       'doctor_profiles/$uidA/1700000000.jpg'],
+    ]));
+    expect(await d.referencedAttachmentKeys(), {'attachments/mine.jpg'});
+
+    await d.insertPatient(withVisits('p2', [['$appFiles/attachments/$ownB/theirs.jpg']]));
+    expect(await d.referencedAttachmentPaths(),
+        contains('$appFiles/attachments/$ownB/theirs.jpg'));
+    await expectLater(d.referencedAttachmentKeys(),
+        scanFails(AttachmentScanFailure.unrecognisedPath));
+
+    await d.insertPatient(withVisits('p2', [
+      ['/data/user/0/com.docease.app/cache/image_picker4211.jpg'],
+    ]));
+    await expectLater(d.referencedAttachmentKeys(),
+        scanFails(AttachmentScanFailure.unrecognisedPath));
+
+    await d.insertPatient(withVisits('p2', [[]]));
+    expect(await d.referencedAttachmentKeys(), {'attachments/mine.jpg'});
+
+    // The same stored path keys differently under the other owner's DB.
+    await d.openFor(uidB);
+    await d.insertPatient(withVisits('q1', [['$appFiles/attachments/$ownB/theirs.jpg']]));
+    expect(await d.referencedAttachmentKeys(), {'attachments/theirs.jpg'});
+    await d.close();
+  });
+
+  h.define('ATT-05 scan throws when no DB is open or the open failed', () async {
+    await wipe();
+    final none = helper();
+    await expectLater(none.referencedAttachmentPaths(),
+        scanFails(AttachmentScanFailure.noDatabase));
+    await expectLater(none.referencedAttachmentKeys(),
+        scanFails(AttachmentScanFailure.noDatabase));
+    expect(File(dbPath(uidA)).existsSync(), isFalse);
+
+    final d = helper();
+    await d.openFor(uidA);
+    await d.insertPatient(withVisits('p1', [['$appFiles/attachments/$ownA/1.jpg']]));
+    await d.close();
+    await expectLater(d.referencedAttachmentPaths(),
+        scanFails(AttachmentScanFailure.noDatabase));
+
+    final failed = helper(keys: _FailingKeys(h.keys, failRead: true));
+    await expectLater(failed.openFor(uidA), throwsA(isA<DbOpenException>()));
+    await expectLater(failed.referencedAttachmentPaths(),
+        scanFails(AttachmentScanFailure.openFailed));
+    await expectLater(failed.referencedAttachmentKeys(),
+        scanFails(AttachmentScanFailure.openFailed));
+  });
+
   h.define('unsyncedCount follows dirty/synced, and markSynced is a '
       'compare-and-set (edit during flight)', () async {
     await wipe();

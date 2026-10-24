@@ -4,6 +4,10 @@ import 'package:flutter/services.dart' show PlatformException;
 import 'package:sqflite_sqlcipher/sqlite_api.dart' show DatabaseException;
 
 import '../models/patient.dart';
+import 'attachment_refs.dart';
+
+export 'attachment_refs.dart'
+    show AttachmentRefs, AttachmentScanFailure, AttachmentScanIncomplete;
 
 // ---------------------------------------------------------------------------
 // UI contract
@@ -381,4 +385,54 @@ abstract class LocalDatabase {
 
   /// Removes [key]; a no-op if it is not set.
   Future<void> deleteSetting(String key);
+
+  // --- attachment references (photo sweep) ------------------------------
+
+  /// Every attachment/photo reference stored in the open database, exactly
+  /// as stored (no normalising): each `attachmentPaths` entry of every visit
+  /// of every patient row, dirty or synced, plus `profileImageUrl` of the
+  /// `doctor_profile` setting. Read in one transaction (a consistent
+  /// snapshot); read only (never touches `sync_state`, `updated_at` or the
+  /// unsynced counter). Deleted patients (tombstoned) have no row and so no
+  /// references.
+  ///
+  /// Stored format: whatever the providers wrote, unchanged. Local photos
+  /// are ABSOLUTE paths from `LocalPhotoStore`
+  /// (`<support>/attachments/<ownerFolder>/<uuid>.<ext>`,
+  /// `<support>/profile/<ownerFolder>/avatar_<uuid>.<ext>`, `<support>` being
+  /// the app support dir as resolved when the photo was saved, so it can
+  /// differ from today's resolved path, e.g. `/data/user/0` vs
+  /// `/data/data`). The set can also hold Storage object paths
+  /// (`clinical_attachments/...`), `https://` download URLs, legacy absolute
+  /// picker paths from old builds, and empty strings. Compare files with
+  /// [referencedAttachmentKeys] / [attachmentKey], not with these strings.
+  ///
+  /// Fails closed: throws [AttachmentScanIncomplete] (never a partial set) if
+  /// no database is open, the open failed, the read fails, or any row's
+  /// `history`, any `attachmentPaths` list or the `doctor_profile` JSON
+  /// cannot be read.
+  Future<Set<String>> referencedAttachmentPaths();
+
+  /// The same snapshot as [referencedAttachmentPaths], as [attachmentKey]
+  /// keys for the open owner ([ownerFolderNameFor] of [openUid]). Skips only
+  /// empty strings and references that are explicitly not local files
+  /// ([AttachmentRefs.isNonLocalRef]: http(s) links, `gs://` URIs, Storage
+  /// paths). Every other stored path must map to a key; one that does not
+  /// (another owner's folder, a legacy picker path, `..`, an unknown format)
+  /// throws [AttachmentScanIncomplete] (`unrecognisedPath`) instead of being
+  /// dropped. Same other failure rules as [referencedAttachmentPaths].
+  Future<Set<String>> referencedAttachmentKeys();
+
+  /// Owner-relative key of a stored or on-disk photo path, or null if it is
+  /// not in [ownerFolderName]'s folders ("not mine, never delete"). Pure;
+  /// see [AttachmentRefs.attachmentKey].
+  static String? attachmentKey(String storedPath,
+          {required String ownerFolderName}) =>
+      AttachmentRefs.attachmentKey(storedPath,
+          ownerFolderName: ownerFolderName);
+
+  /// `sha256(owner)` hex, first 32 characters: the owner's photo folder
+  /// name (`LocalPhotoStore.ownerFolderName`) and DB file name hash.
+  static String ownerFolderNameFor(String owner) =>
+      AttachmentRefs.ownerFolderNameFor(owner);
 }
