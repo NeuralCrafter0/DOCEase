@@ -18,6 +18,7 @@ import 'package:docease/models/patient.dart';
 import 'package:docease/providers/local_database.dart';
 import 'package:docease/providers/patient_provider.dart';
 import 'package:docease/services/local_photo_store.dart';
+import 'package:docease/services/patient_load_status.dart';
 import 'package:docease/services/photo_sweep.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
@@ -219,8 +220,13 @@ void main() {
     final prov = File('lib/providers/patient_provider.dart').readAsStringSync();
     expect(File('lib/services/attachment_keys.dart').existsSync(), isFalse,
         reason: 'the interim stand-in file must be gone');
-    expect(sweep, contains('PhotoSweep.forApp() => PhotoSweep(db: DatabaseHelper.instance);'),
+    // 3a695b0: forApp() => PhotoSweep(db: DatabaseHelper.instance,
+    //   loadStatus: PatientLoadStatus.instance) - match the prefix only.
+    final flat = sweep.replaceAll(RegExp(r'\s+'), ' ');
+    expect(flat, contains('PhotoSweep.forApp() => PhotoSweep(db: DatabaseHelper.instance'),
         reason: 'forApp changed: update support/app_sweep_wiring.dart');
+    expect(flat, contains('loadStatus: PatientLoadStatus.instance'),
+        reason: '3a695b0 forApp passes the app load-failure guard');
     expect(sweep, contains('_db.referencedAttachmentKeys()'));
     expect(sweep, contains('AttachmentRefs.attachmentKey'));
     expect(sweep, isNot(contains('fetchPatients')),
@@ -230,6 +236,44 @@ void main() {
       expect(src, isNot(contains('interimAttachmentKey')));
       expect(src, isNot(contains('interimReferencedKeys')));
     }
+  });
+
+  group('SWP-30 load-failure guard (3a695b0 PatientLoadStatus)', () {
+    Future<PhotoSweepResult> run(PatientLoadStatus st) =>
+        appSweep(db, photos, _later, loadStatus: st).sweep(ownerA);
+    test('SWP-30a status failed for the owner -> skipped(loadFailed), nothing deleted', () async {
+      final orphan = photoIn(visitDir(ownerA), 'orphan.jpg');
+      final r = await run(PatientLoadStatus()..failed(ownerA));
+      expect((r.ran, r.reason), (false, 'loadFailed'));
+      expect(File(orphan).existsSync(), isTrue);
+    });
+    test('SWP-30b control: status loaded for the owner -> old orphan removed', () async {
+      final orphan = photoIn(visitDir(ownerA), 'orphan.jpg');
+      final r = await run(PatientLoadStatus()..loaded(ownerA));
+      expect(r.ran, isTrue);
+      expect(File(orphan).existsSync(), isFalse);
+    });
+    test('SWP-30c a failure recorded for ANOTHER owner does not block this owner', () async {
+      final orphan = photoIn(visitDir(ownerA), 'orphan.jpg');
+      final r = await run(PatientLoadStatus()..failed(ownerB));
+      expect(r.ran, isTrue);
+      expect(File(orphan).existsSync(), isFalse);
+    });
+    test('SWP-30d the real provider publishes a strict-load failure; the sweep then skips', () async {
+      final orphan = photoIn(visitDir(ownerA), 'orphan.jpg');
+      final st = PatientLoadStatus();
+      db.strictReadFailure = DbReadFailure.readFailed;
+      final pp = PatientProvider(db: db, cloudSync: false, photos: photos,
+          firestore: _TripHelper(), loadStatus: st);
+      await pp.loadAndSync(ownerA);
+      expect(st.isFailed(ownerA), isTrue, reason: 'provider must publish the failed load');
+      final r = await run(st);
+      expect((r.ran, r.reason), (false, 'loadFailed'));
+      expect(File(orphan).existsSync(), isTrue);
+      db.strictReadFailure = null;
+      await pp.reload();
+      expect(st.isLoaded(ownerA), isTrue, reason: 'a later good load clears it');
+    });
   });
 
   test('SWP-29 skip log is "Photos: sweep skipped (<reason name>)"',
