@@ -120,6 +120,23 @@ class FakeLocalDatabase implements LocalDatabase {
 
   final Set<String> tombstones = {};
 
+  /// attachment_swaps: patientId -> local key -> Storage path.
+  final Map<String, Map<String, String>> swaps = {};
+
+  /// [patient] with recorded swaps re-applied, as a local save does.
+  Patient _keepingSwaps(Patient patient) {
+    final recorded = swaps[patient.id];
+    final uid = openUid;
+    if (recorded == null || recorded.isEmpty || uid == null) return patient;
+    final json = patient.toJson();
+    final (history, n) = AttachmentRefs.applySwapsToHistoryJson(
+        jsonEncode(json['history']), recorded,
+        uid: uid, patientId: patient.id);
+    if (n == 0) return patient;
+    return Patient.fromJson({...json, 'history': jsonDecode(history)},
+        updatedAt: patient.updatedAt);
+  }
+
   @override
   Stream<DbOpenState> get states => Stream.value(state);
 
@@ -195,7 +212,7 @@ class FakeLocalDatabase implements LocalDatabase {
     }
     if (refuseWrites) throw UnsyncedCounterException('doctorA');
     log.add('insert:${patient.id}:${fromCloud ? 'synced' : 'dirty'}');
-    rows[patient.id] = patient;
+    rows[patient.id] = _keepingSwaps(patient);
     dirty[patient.id] = !fromCloud;
     return versions[patient.id] = '${++_version}';
   }
@@ -204,7 +221,7 @@ class FakeLocalDatabase implements LocalDatabase {
   Future<String?> updatePatient(Patient patient) async {
     if (patient.hasParseErrors || !rows.containsKey(patient.id)) return null;
     log.add('update:${patient.id}:dirty');
-    rows[patient.id] = patient;
+    rows[patient.id] = _keepingSwaps(patient);
     dirty[patient.id] = true;
     return versions[patient.id] = '${++_version}';
   }
@@ -244,6 +261,7 @@ class FakeLocalDatabase implements LocalDatabase {
     }
     log.add('tombstone:$id');
     rows.remove(id);
+    swaps.remove(id);
     dirty.remove(id);
     versions.remove(id);
     tombstones.add(id);
@@ -282,6 +300,7 @@ class FakeLocalDatabase implements LocalDatabase {
         storagePath: storagePath);
     if (next == null) return false;
     log.add('swap:$patientId');
+    (swaps[patientId] ??= {})[key] = storagePath;
     final version = '${++_version}';
     rows[patientId] = Patient.fromJson({...json, 'history': jsonDecode(next)},
         updatedAt: version);

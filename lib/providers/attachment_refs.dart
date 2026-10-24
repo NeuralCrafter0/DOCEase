@@ -350,4 +350,59 @@ abstract final class AttachmentRefs {
     }
     return changed ? jsonEncode(out) : null;
   }
+
+  /// Whole-row save support for `attachment_swaps`: [historyJson] (just
+  /// encoded from a possibly stale in-memory copy) with every visit
+  /// attachment entry whose [attachmentKey] for [uid] is a key of [swaps]
+  /// (`local_key` -> `storage_path` recorded by swapAttachmentPath for
+  /// [patientId]) rewritten to that storage path. A mapping is used only if
+  /// its storage path is still [isPatientStoragePath] for [uid] and
+  /// [patientId]. Entries that do not key, or key to nothing recorded, are
+  /// kept. Returns the JSON (the original string when nothing changed) and
+  /// how many entries were rewritten. Never throws: a structure it does not
+  /// expect is left exactly as it is.
+  static (String, int) applySwapsToHistoryJson(
+      String historyJson, Map<String, String> swaps,
+      {required String uid, required String patientId}) {
+    final valid = {
+      for (final e in swaps.entries)
+        if (isPatientStoragePath(e.value, uid: uid, patientId: patientId))
+          e.key: e.value,
+    };
+    if (valid.isEmpty) return (historyJson, 0);
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(historyJson);
+    } on FormatException {
+      return (historyJson, 0);
+    }
+    if (decoded is! List) return (historyJson, 0);
+    final owner = ownerFolderNameFor(uid);
+    var rewritten = 0;
+    final out = <Object?>[];
+    for (final visit in decoded) {
+      final paths = visit is Map ? visit['attachmentPaths'] : null;
+      if (paths is! List) {
+        out.add(visit);
+        continue;
+      }
+      var hit = false;
+      final next = <Object?>[];
+      for (final e in paths) {
+        final k = e is String && e.isNotEmpty && !isNonLocalRef(e)
+            ? attachmentKey(e, ownerFolderName: owner)
+            : null;
+        final to = k == null ? null : valid[k];
+        next.add(to ?? e);
+        if (to != null) {
+          hit = true;
+          rewritten++;
+        }
+      }
+      out.add(hit
+          ? (Map<String, Object?>.from(visit as Map)..['attachmentPaths'] = next)
+          : visit);
+    }
+    return rewritten == 0 ? (historyJson, 0) : (jsonEncode(out), rewritten);
+  }
 }

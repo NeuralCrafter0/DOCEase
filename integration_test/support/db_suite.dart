@@ -13,7 +13,8 @@ import 'package:docease/providers/database_helper.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
-import 'package:sqflite_sqlcipher/sqflite.dart' show Database;
+import 'package:sqflite_sqlcipher/sqflite.dart'
+    show ConflictAlgorithm, Database;
 
 abstract class DbSuiteHarness {
   /// Directory the helper keeps its databases in.
@@ -804,6 +805,298 @@ void runDbSuite(DbSuiteHarness h) {
     await expectLater(swp(dB), readFails(DbReadFailure.notOpen));
     expect(await dB.fetchPatientsStrict(), isEmpty);
     await dB.close();
+    await wipe();
+  });
+
+  // --- attachment_swaps: stale whole-row saves keep the uploaded path
+  Future<List<Map<String, Object?>>> swapRows(Database db) =>
+      db.query('attachment_swaps', orderBy: 'patient_id, local_key');
+  Patient withDiagnosis(Patient p, String diagnosis) {
+    final json = p.toJson();
+    final hist = [
+      for (final v in json['history'] as List)
+        Map<String, Object?>.from(v as Map)..['diagnosis'] = diagnosis,
+    ];
+    return Patient.fromJson({...json, 'history': hist});
+  }
+  List<List<String>> storedPaths(Map<String, Object?> row) => [
+        for (final v in jsonDecode(row['history'] as String) as List)
+          List<String>.from((v as Map)['attachmentPaths'] as List),
+      ];
+
+  h.define('SWQ-01 attachment_swaps table: fresh v2 create and v1 -> v2 '
+      'upgrade; a swap records its mapping in the same transaction',
+      () async {
+    await wipe();
+    final v1 = helper(schemaVersion: 1);
+    final db1 = await v1.openFor(uidA);
+    expect(await tableNames(db1), isNot(contains('attachment_swaps')));
+    await db1.insert('patients', v1Row(0));
+    await v1.close();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    expect(await tableNames(db), contains('attachment_swaps'));
+    expect(await rawRows(db), hasLength(1));
+    final cols = await db.rawQuery('PRAGMA table_info(attachment_swaps)');
+    expect({for (final c in cols) c['name']: (c['type'], c['notnull'], c['pk'])}, {
+      'patient_id': ('TEXT', 1, 1),
+      'local_key': ('TEXT', 1, 2),
+      'storage_path': ('TEXT', 1, 0),
+      'swapped_at': ('INTEGER', 1, 0),
+    });
+    await d.close();
+    await wipe();
+    final f = helper();
+    final fdb = await f.openFor(uidA);
+    expect(await tableNames(fdb), contains('attachment_swaps'));
+    expect(await swapRows(fdb), isEmpty);
+    await f.insertPatient(withVisits('p1', [[swpLocal]]));
+    final t0 = DateTime.now().millisecondsSinceEpoch;
+    expect(await swp(f), isTrue);
+    final rows = await swapRows(fdb);
+    expect(rows, hasLength(1));
+    expect(rows.single['patient_id'], 'p1');
+    expect(rows.single['local_key'], 'attachments/$swpUuid.jpg');
+    expect(rows.single['storage_path'], swpStorage);
+    expect(rows.single['swapped_at'] as int, greaterThanOrEqualTo(t0));
+    // A false swap records nothing.
+    expect(await swp(f, patient: 'p9',
+        storagePath: 'clinical_attachments/$uidA/p9/$swpUuid.jpg'), isFalse);
+    expect(await swapRows(fdb), hasLength(1));
+    await f.close();
+    await wipe();
+  });
+
+  h.define('SWQ-02 swap, then a stale updatePatient / insertPatient '
+      'carrying the local path (or an alias): the DB keeps the Storage '
+      'path', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    final newPhoto = '$appFiles/attachments/$ownA/new.jpg';
+    await d.insertPatient(withVisits('p1', [[swpLocal, newPhoto]]));
+    final stale = (await d.fetchPatientsStrict()).single; // the form's copy
+    expect(await swp(d), isTrue);
+    expect(await d.updatePatient(stale), isNotNull);
+    expect(storedPaths((await rawRow(db, 'p1'))!), [[swpStorage, newPhoto]]);
+    expect(await d.insertPatient(stale), isNotNull); // insert-or-replace
+    expect(storedPaths((await rawRow(db, 'p1'))!), [[swpStorage, newPhoto]]);
+    final aliased = Patient.fromJson({
+      ...stale.toJson(),
+      'history': [
+        {...stale.history.single.toJson(),
+          'attachmentPaths': ['file://localhost${Uri.file(swpLocal).path}',
+            '/data/data/com.docease.app/files/attachments/$ownA/$swpUuid.jpg',
+            newPhoto]},
+      ],
+    });
+    expect(await d.updatePatient(aliased), isNotNull);
+    expect(storedPaths((await rawRow(db, 'p1'))!),
+        [[swpStorage, swpStorage, newPhoto]]);
+    expect(await d.referencedAttachmentKeys(), {'attachments/new.jpg'});
+    await d.close();
+    await wipe();
+  });
+
+  h.define('SWQ-03 a stale save that also changed a diagnosis keeps both '
+      'the diagnosis and the Storage path; still one dirty count', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    await d.insertPatient(withVisits('p1', [[swpLocal]]));
+    await markAllSynced(d);
+    final stale = (await d.fetchPatientsStrict()).single;
+    expect(await swp(d), isTrue);
+    expect(await counterOf(uidA), '1');
+    final v = await d.updatePatient(withDiagnosis(stale, 'Dengue, revised'));
+    expect(v, isNotNull);
+    final row = (await rawRow(db, 'p1'))!;
+    expect(storedPaths(row), [[swpStorage]]);
+    final visit = (jsonDecode(row['history'] as String) as List).single as Map;
+    expect(visit['diagnosis'], 'Dengue, revised');
+    expect(row['sync_state'], 'dirty');
+    expect('${row['updated_at']}', v);
+    expect(await counterOf(uidA), '1');
+    final dirty = (await d.dirtyPatientsStrict()).single;
+    expect(dirty.history.single.attachmentPaths, [swpStorage]);
+    expect(await d.markSynced('p1', dirty.updatedAt!), isTrue);
+    await d.close();
+    await wipe();
+  });
+
+  h.define('SWQ-04 other patients are not affected; a mapping whose path '
+      'left the owner/patient folder is not applied', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    await d.insertPatient(withVisits('p1', [[swpLocal]]));
+    await d.insertPatient(withVisits('p2', [[swpLocal]])); // same local file
+    final staleP2 = (await d.fetchPatientsStrict()).singleWhere((p) => p.id == 'p2');
+    expect(await swp(d), isTrue); // p1 only
+    expect(await d.updatePatient(staleP2), isNotNull);
+    expect(storedPaths((await rawRow(db, 'p2'))!), [[swpLocal]]);
+    expect(await d.insertPatient(withVisits('p3', [[swpLocal]])), isNotNull);
+    expect(storedPaths((await rawRow(db, 'p3'))!), [[swpLocal]]);
+    // Tampered mappings for p2: other patient's / other uid's folder,
+    // traversal. None is applied.
+    for (final bad in [
+      'clinical_attachments/$uidA/p1/$swpUuid.jpg',
+      'clinical_attachments/$uidB/p2/$swpUuid.jpg',
+      'clinical_attachments/$uidA/p2/../p1/$swpUuid.jpg',
+      'https://example.com/$swpUuid.jpg',
+    ]) {
+      await db.insert('attachment_swaps', {
+        'patient_id': 'p2', 'local_key': 'attachments/$swpUuid.jpg',
+        'storage_path': bad, 'swapped_at': DateTime.now().millisecondsSinceEpoch,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+      expect(await d.updatePatient(staleP2), isNotNull);
+      expect(storedPaths((await rawRow(db, 'p2'))!), [[swpLocal]], reason: bad);
+    }
+    await d.close();
+    await wipe();
+  });
+
+  h.define('SWQ-05 deleting a patient clears its mappings in the tombstone '
+      'transaction; other patients keep theirs', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    await d.insertPatient(withVisits('p1', [[swpLocal]]));
+    await d.insertPatient(withVisits('p2', [[swpLocal]]));
+    expect(await swp(d), isTrue);
+    expect(await swp(d, patient: 'p2',
+        storagePath: 'clinical_attachments/$uidA/p2/$swpUuid.jpg'), isTrue);
+    expect((await swapRows(db)).map((r) => r['patient_id']), ['p1', 'p2']);
+    await d.markPendingDelete('p1');
+    expect((await swapRows(db)).map((r) => r['patient_id']), ['p2']);
+    expect(await d.pendingDeletesStrict(), ['p1']);
+    // A failed delete keeps the mapping (same transaction).
+    await db.execute('DROP TABLE pending_deletes');
+    await expectLater(d.markPendingDelete('p2'), throwsA(anything));
+    expect((await swapRows(db)).map((r) => r['patient_id']), ['p2']);
+    expect(await rawRow(db, 'p2'), isNotNull);
+    await d.close();
+    await wipe();
+  });
+
+  h.define('SWQ-06 mappings older than 30 days are pruned on open; newer '
+      'ones stay', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    const day = 24 * 60 * 60 * 1000;
+    expect(DatabaseHelper.attachmentSwapRetention, const Duration(days: 30));
+    for (final (pid, age) in [('old', 31 * day), ('edge', 30 * day + 60000),
+        ('recent', 29 * day), ('fresh', 0)]) {
+      await db.insert('attachment_swaps', {
+        'patient_id': pid, 'local_key': 'attachments/$pid.jpg',
+        'storage_path': 'clinical_attachments/$uidA/$pid/$pid.jpg',
+        'swapped_at': now - age,
+      });
+    }
+    await d.close();
+    final db2 = await d.openFor(uidA);
+    expect((await swapRows(db2)).map((r) => r['patient_id']).toSet(),
+        {'recent', 'fresh'});
+    await d.close();
+    await wipe();
+  });
+
+  h.define('SWQ-07 a cloud merge is never rewritten; the scans ignore '
+      'mappings', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    await d.insertPatient(withVisits('p1', [[swpLocal]]));
+    final stale = (await d.fetchPatientsStrict()).single;
+    expect(await swp(d), isTrue);
+    await markAllSynced(d);
+    expect(await d.applyCloudPatient(stale), isTrue); // clean row: applied
+    expect(storedPaths((await rawRow(db, 'p1'))!), [[swpLocal]]);
+    await markAllSynced(d);
+    expect(await d.insertPatient(stale, fromCloud: true), isNotNull);
+    expect(storedPaths((await rawRow(db, 'p1'))!), [[swpLocal]]);
+    expect((await rawRow(db, 'p1'))!['sync_state'], 'synced');
+    // Mappings are not references: a mapping for a row-less patient adds
+    // nothing to either scan.
+    await db.insert('attachment_swaps', {
+      'patient_id': 'ghost', 'local_key': 'attachments/ghost.jpg',
+      'storage_path': 'clinical_attachments/$uidA/ghost/ghost.jpg',
+      'swapped_at': DateTime.now().millisecondsSinceEpoch,
+    });
+    expect(await d.referencedAttachmentKeys(), {'attachments/$swpUuid.jpg'});
+    expect(await d.referencedAttachmentPaths(), {swpLocal});
+    await d.markPendingDelete('p1');
+    expect(await d.referencedAttachmentKeys(), isEmpty);
+    expect(await d.referencedAttachmentPaths(), isEmpty);
+    await d.close();
+    await wipe();
+  });
+
+  h.define('SWQ-08 security regression: edit-details stale copy after a '
+      'swap keeps the Storage path, the new name/phone and every visit',
+      () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    final other = '$appFiles/attachments/$ownA/other.jpg';
+    // 1. Saved patient with a visit holding local path L; the details
+    //    screen captures its copy.
+    await d.insertPatient(withVisits('p1', [[swpLocal], [other]]));
+    final stale = (await d.fetchPatientsStrict()).single;
+    // 2. The upload confirms: L -> S.
+    expect(await swp(d), isTrue);
+    // 3. Details save from the stale copy: only name and phone changed,
+    //    history exactly as captured (still holding L).
+    final edited = Patient.fromJson({
+      ...stale.toJson(),
+      'name': 'Asha Renamed',
+      'phone': '+910000000001',
+    });
+    expect(edited.history.first.attachmentPaths, [swpLocal]);
+    expect(await d.updatePatient(edited), isNotNull);
+    // 4. Stored row: S not L, new details kept, every visit present.
+    final row = (await rawRow(db, 'p1'))!;
+    expect(row['name'], 'Asha Renamed');
+    expect(row['phone'], '+910000000001');
+    expect(storedPaths(row), [[swpStorage], [other]]);
+    expect((jsonDecode(row['history'] as String) as List)
+        .map((v) => (v as Map)['id']), stale.history.map((v) => v.id));
+    expect(row['history'], isNot(contains(swpLocal)));
+    final keys = await d.referencedAttachmentKeys();
+    expect(keys, isNot(contains('attachments/$swpUuid.jpg')));
+    expect(keys, {'attachments/other.jpg'});
+    await d.close();
+    await wipe();
+  });
+
+  h.define('SWQ-09 characterization (not fixed in the DB): a stale copy '
+      'captured before the visit existed drops that visit on save', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    await d.insertPatient(withVisits('p1', []));
+    final stale = (await d.fetchPatientsStrict()).single; // no visits yet
+    // A visit with photo L is added, then its upload confirms.
+    await d.updatePatient(withVisits('p1', [[swpLocal]]));
+    expect(await swp(d), isTrue);
+    expect(storedPaths((await rawRow(db, 'p1'))!), [[swpStorage]]);
+    // Details save from the pre-visit copy.
+    expect(
+        await d.updatePatient(
+            Patient.fromJson({...stale.toJson(), 'name': 'Asha Renamed'})),
+        isNotNull);
+    final row = (await rawRow(db, 'p1'))!;
+    // Today's behaviour: the whole-row write replaces history, so the
+    // visit (and its uploaded S) is gone from the row; the mapping stays
+    // until pruned; the scan no longer references the photo.
+    expect(row['name'], 'Asha Renamed');
+    expect(jsonDecode(row['history'] as String), isEmpty);
+    expect(row['sync_state'], 'dirty');
+    expect(await swapRows(db), hasLength(1));
+    expect(await d.referencedAttachmentKeys(), isEmpty);
+    await d.close();
     await wipe();
   });
 
