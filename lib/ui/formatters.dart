@@ -46,7 +46,7 @@ abstract final class Fmt {
 
   /// "34 yrs · Female", skipping empty parts.
   static String patientMeta(Patient p) {
-    final parts = <String>[
+      ?age(p.age),
       if (age(p.age) case final a?) a,
       if (p.gender.trim().isNotEmpty) p.gender.trim(),
     ];

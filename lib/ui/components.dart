@@ -316,6 +316,7 @@ class ContentWidth extends StatelessWidget {
   Widget build(BuildContext context) {
     return Align(
       alignment: Alignment.topCenter,
+      heightFactor: 1, // as tall as the child, never the whole space
       child: ConstrainedBox(constraints: BoxConstraints(maxWidth: maxWidth), child: child),
     );
   }

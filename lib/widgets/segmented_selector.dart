@@ -95,7 +95,8 @@ class SegmentedSelector extends StatelessWidget {
                                           : c.inkSecondary,
                                   fontWeight: opt == selected ? FontWeight.w700 : FontWeight.w500,
                                 ),
-                                child: Text(opt, textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis),
+                                // One line; shrinks rather than breaking a word at large text sizes.
+                                child: FittedBox(fit: BoxFit.scaleDown, child: Text(opt, textAlign: TextAlign.center, maxLines: 1)),
                               ),
                             ),
                           ),

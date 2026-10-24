@@ -11,6 +11,7 @@ import 'package:docease/models/patient.dart';
 import 'package:docease/providers/doctor_provider.dart';
 import 'package:docease/providers/patient_provider.dart';
 import 'package:docease/screens/home_screen.dart';
+import 'package:docease/screens/add_patient_screen.dart';
 import 'package:docease/theme/app_theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -66,7 +67,7 @@ class _Doctor extends DoctorProvider {
 
 final _doc = Doctor(id: 'd1', title: 'Dr.', name: 'Anjali Mehta', email: 'a@clinic.test', age: '45', mobileNumber: '+919812345678', specialty: 'General Medicine', clinicName: 'Sunrise Clinic', practiceMode: 'Solo Practice');
 
-Future<void> _shot(WidgetTester t, String name, {required PatientProvider p, Doctor? doctor, Size size = const Size(390, 844), double text = 1, bool dark = false, Future<void> Function(WidgetTester)? act}) async {
+Future<void> _shot(WidgetTester t, String name, {required PatientProvider p, Doctor? doctor, Widget home = const HomeScreen(), Size size = const Size(390, 844), double text = 1, bool dark = false, Future<void> Function(WidgetTester)? act}) async {
   debugDisableShadows = false;
   t.view.physicalSize = size * 3;
   t.view.devicePixelRatio = 3;
@@ -84,7 +85,7 @@ Future<void> _shot(WidgetTester t, String name, {required PatientProvider p, Doc
       darkTheme: AppTheme.dark(),
       themeMode: dark ? ThemeMode.dark : ThemeMode.light,
       builder: (c, child) => MediaQuery(data: MediaQuery.of(c).copyWith(textScaler: TextScaler.linear(text)), child: child!),
-      home: const HomeScreen(),
+      home: home,
     ),
   ));
   await t.pump(const Duration(milliseconds: 50));
@@ -119,6 +120,25 @@ void main() {
       await t.drag(find.byType(CustomScrollView), const Offset(0, -300));
       await t.pump();
     });
+    debugDisableShadows = true;
+  }, skip: !enabled);
+
+  testWidgets('patient form shots', (t) async {
+    debugDisableShadows = false;
+    await _shot(t, 'form_new', p: _Patients(_patients), home: const AddPatientScreen());
+    await _shot(t, 'form_errors', p: _Patients(_patients), home: const AddPatientScreen(), act: (t) async {
+      await t.tap(find.byKey(const ValueKey('patientForm.save')));
+      await t.pump();
+    });
+    await _shot(t, 'form_edit', p: _Patients(_patients), home: AddPatientScreen(existingPatient: _patients[2]));
+    await _shot(t, 'form_dup', p: _Patients(_patients), home: const AddPatientScreen(), act: (t) async {
+      await t.enterText(find.byKey(const ValueKey('patientForm.name')), 'asha  verma');
+      await t.enterText(find.byKey(const ValueKey('patientForm.age')), '34');
+      await t.enterText(find.byKey(const ValueKey('patientForm.phone')), '9811111111');
+      await t.tap(find.byKey(const ValueKey('patientForm.save')));
+      await t.pumpAndSettle();
+    });
+    await _shot(t, 'form_text2x', p: _Patients(_patients), home: AddPatientScreen(existingPatient: _patients[2]), size: const Size(360, 780), text: 2);
     debugDisableShadows = true;
   }, skip: !enabled);
 }

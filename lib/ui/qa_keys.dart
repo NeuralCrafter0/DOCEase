@@ -32,9 +32,10 @@ abstract final class QaKeys {
   static ValueKey<String> patientFormRelation(String value) => ValueKey<String>('patientForm.relation.$value');
   static ValueKey<String> patientFormGender(String value) => ValueKey<String>('patientForm.gender.$value');
   static const patientFormSave = ValueKey<String>('patientForm.save');
-  static const patientFormDuplicate = ValueKey<String>('patientForm.duplicate');
-  static const patientFormOpenExisting = ValueKey<String>('patientForm.duplicate.openExisting');
-  static const patientFormRegisterAnyway = ValueKey<String>('patientForm.duplicate.registerAnyway');
+  static const patientFormRefused = ValueKey<String>('patientForm.refused');
+  static const patientFormDuplicate = ValueKey<String>('registerDup.sheet');
+  static const patientFormOpenExisting = ValueKey<String>('registerDup.openExisting');
+  static const patientFormRegisterAnyway = ValueKey<String>('registerDup.registerAnyway');
 
   // Patient detail
   /// "Couldn't open this record" state (ROWSCOPE-UI-01).
