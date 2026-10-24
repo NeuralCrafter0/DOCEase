@@ -516,7 +516,7 @@ void main() {
           expect(line, isNot(contains(leak)), reason: line);
         }
         expect(line, matches(RegExp(r'^Photos: (sweep removed \d+ of \d+ \(kept \d+ referenced, \d+ recent, \d+ other\)'
-            r'|sweep skipped \([A-Za-z]+\)|removed \d+ after a delete)$')));
+            r'|sweep skipped \([A-Za-z]+\)|removed \d+ after (a delete|an upload))$')));
       }
       expect(logs.where((l) => l.startsWith('Photos: removed')).length, 1);
     });

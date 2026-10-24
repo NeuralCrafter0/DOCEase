@@ -440,6 +440,14 @@ class PatientProvider with ChangeNotifier {
         sentVersion = null; // stays dirty; retried later
       }
       if (!_live(uid, token)) return false;
+      // Security F8-R1: the upload is confirmed (putFile completed) and the
+      // row now holds the Storage path, so the plain local copy can go. A
+      // failed upload or a refused rewrite never gets here with that local
+      // path confirmed, so its file stays for the retry.
+      if (sentVersion != null && uid != null) {
+        await _deleteUnreferencedPhotos(uid, _confirmedUploads(current, replacements), after: 'an upload');
+        if (!_live(uid, token)) return false;
+      }
       notifyListeners();
     }
 
@@ -791,6 +799,17 @@ class PatientProvider with ChangeNotifier {
     return out;
   }
 
+  /// Local paths in [replacements] (local -> Storage path) whose Storage
+  /// path is on [saved], the row just written. A visit edited or deleted
+  /// while its file uploaded does not carry the Storage path and is left out.
+  static List<String> _confirmedUploads(Patient saved, Map<String, String> replacements) {
+    final entries = {for (final r in saved.history) ...r.attachmentPaths};
+    return [
+      for (final MapEntry(key: local, value: storagePath) in replacements.entries)
+        if (entries.contains(storagePath) && !entries.contains(local)) local,
+    ];
+  }
+
   /// Attachment entries on [before] that are not on [after].
   static List<String> _droppedEntries(Patient before, Patient after) {
     final now = {for (final r in after.history) ...r.attachmentPaths};
@@ -803,20 +822,24 @@ class PatientProvider with ChangeNotifier {
 
   /// Deletes the files of [owner]'s visit folder that [entries] (stored
   /// attachment entries just removed from the DB) name, after the DB
-  /// change succeeded. The provider is the single owner of this cleanup
-  /// (PR #8's screen hooks become redundant).
+  /// change succeeded (a delete, an edit that dropped a photo, or a
+  /// confirmed upload whose Storage path replaced the local one). The
+  /// provider is the single owner of this cleanup (PR #8's screen hooks
+  /// become redundant).
   ///
   /// Fails closed: does nothing when the photo owner changed since the
   /// change started, or when any patient in memory has parse errors (its
   /// references may be incomplete). Entries are compared by key
   /// ([AttachmentRefs.attachmentKey], #10): a null key (Storage path, web link, another owner's
   /// folder, `..`) is never deleted, nor is a key still referenced by any
-  /// visit in memory or by a save in progress. Only regular files inside
+  /// visit in memory, by a save in progress or by an upload still pending.
+  /// Only regular files inside
   /// the owner's `attachments/` folder are deleted
   /// ([LocalPhotoStore.deleteOwnedVisitFile]); a missing file is ignored,
   /// so a second delete (e.g. #8's screen hook) is harmless. Never throws.
   /// Whatever this skips is left to the startup sweep ([PhotoSweep]).
-  Future<void> _deleteUnreferencedPhotos(String owner, Iterable<String> entries) async {
+  Future<void> _deleteUnreferencedPhotos(String owner, Iterable<String> entries,
+      {String after = 'a delete'}) async {
     try {
       final list = entries.toList();
       if (list.isEmpty || _photoOwner != owner) return;
@@ -826,6 +849,7 @@ class PatientProvider with ChangeNotifier {
         for (final p in _patients)
           for (final r in p.history) ...r.attachmentPaths,
         ..._validatedPicks,
+        ..._pendingUploads,
       ].map((e) => AttachmentRefs.attachmentKey(e, ownerFolderName: folder)).whereType<String>().toSet();
       await _photos.init();
       var removed = 0;
@@ -836,7 +860,7 @@ class PatientProvider with ChangeNotifier {
         if (path == null) continue;
         if (await _photos.deleteOwnedVisitFile(path, owner: owner)) removed++;
       }
-      if (removed > 0) debugPrint('Photos: removed $removed after a delete');
+      if (removed > 0) debugPrint('Photos: removed $removed after $after');
     } catch (e) {
       debugPrint('Photos: cleanup failed (${errorCode(e)})');
     }

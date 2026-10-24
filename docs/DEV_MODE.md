@@ -75,6 +75,12 @@ name the flavor (`--flavor prod` or `--flavor dev`).
     deleted visit or a photo removed while editing), the provider deletes the dropped photos. A
     refused delete removes nothing. A photo another visit still uses is kept; a file that is
     already gone is ignored, so a second delete is harmless.
+  - Cloud mode (parked, security F8-R1): once a photo's Storage upload is confirmed and the visit
+    row has been rewritten to the Storage path, the same provider cleanup deletes the local copy
+    (PR #8 writes picks into `attachments/<owner folder>/`). A failed upload, or a rewrite that is
+    refused or not confirmed, keeps the file for the retry; a copy another visit or a pending
+    upload still uses is kept; files outside the owner folder are never deleted. Tests:
+    `test/backend/upload_cleanup_test.dart`.
   - At startup (`StartupHooks`, both start modes) a sweep waits for the first open DB and deletes
     files in that owner's `attachments/<owner folder>/` that no row references any more (e.g.
     after a crash between the DB delete and the file delete). Rules: it skips everything unless
