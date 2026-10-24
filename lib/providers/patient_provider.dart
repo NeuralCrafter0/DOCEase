@@ -9,7 +9,6 @@ import 'package:uuid/uuid.dart';
 import '../config/dev_mode.dart';
 import '../models/patient.dart';
 import '../services/attachments.dart';
-import '../services/attachment_keys.dart';
 import '../services/local_photo_store.dart';
 import '../services/log_codes.dart';
 import '../services/sync_cancel_token.dart';
@@ -44,12 +43,9 @@ class PatientProvider with ChangeNotifier {
     Duration retryMaxDelay = const Duration(minutes: 5),
     bool cloudSync = true,
     LocalPhotoStore? photos,
-    AttachmentKeyFn? attachmentKey,
   })  : _db = db ?? DatabaseHelper.instance,
         _cloudSync = cloudSync,
         _photosOverride = photos,
-        // TODO(#10): #10's attachmentKey once it lands (one line).
-        _attachmentKey = attachmentKey ?? AttachmentKeys.interimAttachmentKey,
         _firestoreOverride = firestore,
         _authOverride = auth,
         _storageOverride = storage,
@@ -71,10 +67,6 @@ class PatientProvider with ChangeNotifier {
       _cloudSync && !isLocalOwner(_uid) && !isLocalOwner(_openDbUid);
   final LocalPhotoStore? _photosOverride;
   LocalPhotoStore get _photos => _photosOverride ?? LocalPhotoStore.instance;
-
-  /// Maps a stored attachment entry to its owner-relative key (#10's
-  /// `attachmentKey`); photo cleanup compares keys, never raw paths.
-  final AttachmentKeyFn _attachmentKey;
 
   /// Whether this provider syncs with Firebase (false in dev mode).
   bool get cloudSync => _cloudSync;
@@ -812,8 +804,8 @@ class PatientProvider with ChangeNotifier {
   ///
   /// Fails closed: does nothing when the photo owner changed since the
   /// change started, or when any patient in memory has parse errors (its
-  /// references may be incomplete). Entries are compared by key (#10's
-  /// `attachmentKey`): a null key (Storage path, web link, another owner's
+  /// references may be incomplete). Entries are compared by key
+  /// ([AttachmentRefs.attachmentKey], #10): a null key (Storage path, web link, another owner's
   /// folder, `..`) is never deleted, nor is a key still referenced by any
   /// visit in memory or by a save in progress. Only regular files inside
   /// the owner's `attachments/` folder are deleted
@@ -830,11 +822,11 @@ class PatientProvider with ChangeNotifier {
         for (final p in _patients)
           for (final r in p.history) ...r.attachmentPaths,
         ..._validatedPicks,
-      ].map((e) => _attachmentKey(e, ownerFolderName: folder)).whereType<String>().toSet();
+      ].map((e) => AttachmentRefs.attachmentKey(e, ownerFolderName: folder)).whereType<String>().toSet();
       await _photos.init();
       var removed = 0;
       for (final e in list) {
-        final key = _attachmentKey(e, ownerFolderName: folder);
+        final key = AttachmentRefs.attachmentKey(e, ownerFolderName: folder);
         if (key == null || stillUsed.contains(key)) continue;
         final path = _photos.visitPathForKey(owner, key);
         if (path == null) continue;
