@@ -184,6 +184,27 @@ class FakeLocalDatabase implements LocalDatabase {
       });
 
   @override
+  Future<Patient?> fetchPatientStrict(
+      {required String expectedOwner, required String patientId}) async {
+    if (expectedOwner.isEmpty) {
+      throw ArgumentError.value('', 'expectedOwner', 'must not be empty');
+    }
+    if (patientId.isEmpty) {
+      throw ArgumentError.value('', 'patientId', 'must not be empty');
+    }
+    return _strict(() {
+      if (openUid != expectedOwner) {
+        throw const DbReadException(DbReadFailure.notOpen);
+      }
+      if (tombstones.contains(patientId)) return null;
+      final p = rows[patientId];
+      if (p != null && p.hasParseErrors) {
+        throw const DbReadException(DbReadFailure.unreadableRow);
+      }
+      return p;
+    });
+  }
+  @override
   Future<List<Patient>> dirtyPatientsStrict() async {
     final list = await _strict(() => [
           for (final e in rows.entries) if (dirty[e.key] == true) e.value
