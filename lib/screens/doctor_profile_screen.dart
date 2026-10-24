@@ -126,6 +126,10 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
               child: Stack(children: [
                 CircleAvatar(radius: 60, backgroundColor: const Color(0xFFEEF2FF), backgroundImage: _localImage != null ? FileImage(_localImage!) : (_profileImageUrl != null ? NetworkImage(_profileImageUrl!) : null) as ImageProvider?),
                 if (_isEditing) Positioned(bottom: 0, right: 0, child: GestureDetector(onTap: () => _pickImage(ImageSource.camera), child: Container(padding: const EdgeInsets.all(8), decoration: const BoxDecoration(color: Color(0xFF1E293B), shape: BoxShape.circle), child: const Icon(Icons.camera_alt, color: Colors.white, size: 20)))),
+                // No photo yet: a person icon instead of an empty circle. Kept as
+                // its own layer so the avatar line above stays as it is.
+                if (_localImage == null && _profileImageUrl == null)
+                  Positioned.fill(child: IgnorePointer(child: Semantics(label: 'No profile photo', child: Icon(Icons.person_rounded, size: 56, color: AppColors.primary.withValues(alpha: 0.35))))),
               ]),
             ),
             const SizedBox(height: 40),
