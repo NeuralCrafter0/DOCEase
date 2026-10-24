@@ -50,15 +50,17 @@ class _OfflineClient implements HttpClient {
 }
 
 const tileKey = ValueKey('photo-unavailable-tile');
-const _ff = bool.fromEnvironment('QA_FAILING_FIRST');
+const cloudKey = ValueKey('photo-cloud-tile');
 
 /// Line of the tile's Column in add_record_screen.dart, found from source so
 /// the test does not hard-code it.
 final int? _tileLine = () {
   final lines = File('lib/screens/add_record_screen.dart').readAsLinesSync();
-  final k = lines.indexWhere((l) => l.contains("ValueKey('photo-unavailable-tile')"));
+  // c9d4cd8: both stand-in tiles are built by _photoTile; its Column is the tile.
+  var k = lines.indexWhere((l) => l.contains('Widget _photoTile('));
+  if (k < 0) k = lines.indexWhere((l) => l.contains("ValueKey('photo-unavailable-tile')"));
   if (k < 0) return null;
-  for (var i = k; i < k + 10 && i < lines.length; i++) {
+  for (var i = k; i < k + 25 && i < lines.length; i++) {
     if (lines[i].contains('Column(')) return i + 1;
   }
   return null;
@@ -219,7 +221,8 @@ void main() {
     return out;
   }
 
-  bool isTile(String k) => k.startsWith('Column') && find.byKey(tileKey).evaluate().isNotEmpty &&
+  bool isTile(String k) => k.startsWith('Column') &&
+      (find.byKey(tileKey).evaluate().isNotEmpty || find.byKey(cloudKey).evaluate().isNotEmpty) &&
       _tileLine != null && k.endsWith(':$_tileLine');
 
   for (final scale in [1.3, 2.0]) {
@@ -229,14 +232,53 @@ void main() {
       final tile = o.entries.where((e) => isTile(e.key)).toList();
       expect(tile, isEmpty, reason: 'tile overflow: $tile');
       expect(find.byKey(tileKey), findsOneWidget);
-    }, skip: scale >= 2.0 && !_ff); // CONFIRMED #8: fixed 100x120 tile overflows 50px at 2.0x; QA_FAILING_FIRST=true
+    }); // was CONFIRMED on ed77169 (50px at 2.0x); fixed claim on c9d4cd8
     testWidgets('TILE-03b small screen (320x568) at ${scale}x text: rest of the visit form '
         '(pre-existing, not #8) does not overflow', (t) async {
       final o = await overflowsAt(t, scale);
       final rest = o.entries.where((e) => !isTile(e.key)).toList();
       expect(rest, isEmpty, reason: 'form overflow: $rest');
-    }, skip: !_ff); // failing-first: pre-existing date Row overflow (not #8); QA_FAILING_FIRST=true
+    }); // was failing-first (date Row); #8 c9d4cd8 Expanded date text, merged under #17's Semantics wrapper
   }
+
+  testWidgets('TILE-03c merged layout (#8 x #17) 320x568 at 2.0x: the "Saved to cloud" tile, its '
+      'label and "Remove photo" fit; no overflow anywhere in the form', (t) async {
+    final errors = <FlutterErrorDetails>[];
+    final prev = FlutterError.onError;
+    FlutterError.onError = errors.add;
+    final h = t.ensureSemantics();
+    try {
+      await open(t, visitWith([storagePath, present]),
+          tiles: 0, size: const Size(640, 1136), dpr: 2.0, scale: 2.0);
+      await t.dragUntilVisible(find.byKey(cloudKey), find.byType(Scrollable).first, const Offset(0, -200));
+      await t.pumpAndSettle();
+    } finally {
+      FlutterError.onError = prev;
+    }
+    final over = errors.where((e) => e.exceptionAsString().contains('overflowed')).map((e) => e.exceptionAsString().split('\n').first).toList();
+    // ignore: avoid_print
+    print('TILE-03c observed overflows=$over');
+    expect(over, isEmpty);
+    final tile = t.getRect(find.byKey(cloudKey));
+    expect(tile.size, const Size(100, 120));
+    final text = find.descendant(of: find.byKey(cloudKey), matching: find.byType(Text));
+    final tr = t.getRect(text);
+    expect(tile.contains(tr.topLeft) && tile.contains(tr.bottomRight - const Offset(0.01, 0.01)), isTrue,
+        reason: 'label $tr inside tile $tile');
+    // Visit date text stays inside its field (#8 Expanded under #17 Semantics).
+    // Widget-level: the field is scrolled off (semantics-culled) by now.
+    final dateSem = find.byWidgetPredicate((w) => w is Semantics && w.properties.label == 'Visit date');
+    expect(dateSem, findsOneWidget, reason: "#17's Semantics wrapper kept in the merge");
+    final field = t.getRect(find.descendant(of: dateSem, matching: find.byType(Container)).first);
+    final dateText = find.descendant(of: dateSem, matching: find.byWidgetPredicate(
+        (w) => w is Text && RegExp(r'\d{4}').hasMatch(w.data ?? '')));
+    expect(dateText, findsOneWidget);
+    final dr = t.getRect(dateText);
+    expect(dr.left >= field.left && dr.right <= field.right + 0.01, isTrue, reason: 'date $dr in field $field');
+    expect(find.ancestor(of: dateText, matching: find.byType(Expanded)), findsOneWidget,
+        reason: "#8's Expanded date text kept in the merge");
+    h.dispose();
+  });
 
   testWidgets('TILE-04 network thumbnail OFFLINE (SocketException) shows the tile, no '
       'error text in widgets or semantics', (t) async {
@@ -259,20 +301,40 @@ void main() {
       'no path; remove drops it from the save', (t) async {
     final h = t.ensureSemantics();
     await open(t, visitWith([storagePath, present]), tiles: 1);
-    expect(find.byKey(tileKey), findsOneWidget,
-        reason: 'INFO: Storage paths are drawn with Image.file, never downloaded in the form');
-    expectNothingLeaks(t, semanticsStrings(t));
-    await t.tap(xOnTile());
+    expect(find.byKey(cloudKey), findsOneWidget, reason: 'c9d4cd8: a Storage path shows "Saved to cloud"');
+    final strings = semanticsStrings(t);
+    expect(strings.where((x) => x == 'Saved to cloud'), hasLength(1), reason: '$strings');
+    expectNothingLeaks(t, strings, extra: ['clinical_attachments', 'u1/p1', 'token=', 'alt=media', 'googleapis']);
+    await t.tap(find.descendant(
+        of: find.ancestor(of: find.byKey(cloudKey), matching: find.byType(Stack)).first,
+        matching: find.byIcon(Icons.close)));
     await t.pump();
+    expect(find.byKey(cloudKey), findsNothing);
     await t.tap(find.text('Save Clinical Record'));
     await settle(t, () => patients.updated != null && find.byType(AddRecordScreen).evaluate().isEmpty);
     expect(patients.updated!.attachmentPaths, [present]);
+    expect(patients.updated!.attachmentPaths, isNot(contains(storagePath)));
     expect(t.takeException(), isNull);
     h.dispose();
   });
 
-  testWidgets('TILE-06 INFO: the remove (x) has no semantics label or button role '
-      '(screen-reader users cannot find or name it)', (t) async {
+  testWidgets('TILE-05g download-URL guard (N/A today, recorded): a Storage path is never loaded '
+      'in the form - no Image.network / Image.file for it, no HTTP attempt', (t) async {
+    final client = _OfflineClient();
+    debugNetworkImageHttpClientProvider = () => client;
+    await open(t, visitWith([storagePath]), tiles: 0);
+    await t.pumpAndSettle();
+    expect(find.byKey(cloudKey), findsOneWidget);
+    expect(find.byKey(const ValueKey(storagePath)), findsNothing, reason: 'no Image widget keyed by the Storage path');
+    expect(find.byType(Image), findsNothing, reason: 'nothing tries to draw the Storage object');
+    expect(client.attempts, 0, reason: 'no download URL / network fetch for a Storage path');
+    debugNetworkImageHttpClientProvider = null;
+    // ignore: avoid_print
+    print('TILE-05g N/A: Storage image not loadable in the form until Firebase returns (AttachmentImage swap later)');
+  });
+
+  testWidgets('TILE-06 the remove (x) is a "Remove photo" button with a tap action and a '
+      '>=48x48 target; a tap at the target corner (outside the circle) removes it', (t) async {
     final h = t.ensureSemantics();
     await open(t, visitWith([missing]), tiles: 1);
     final x = t.getSemantics(xOnTile());
@@ -281,7 +343,21 @@ void main() {
     print('TILE-06 observed: label="${d.label}" tooltip="${d.tooltip}" '
         'button=${d.hasFlag(SemanticsFlag.isButton)} tap=${d.hasAction(SemanticsAction.tap)} '
         'size=${t.getSize(xOnTile())}');
-    expect(d.hasAction(SemanticsAction.tap) || d.label.isEmpty, isTrue); // characterization only
+    final node = t.getSemantics(find.bySemanticsLabel('Remove photo'));
+    final nd = node.getSemanticsData();
+    expect(nd.label, 'Remove photo');
+    expect(nd.hasFlag(SemanticsFlag.isButton), isTrue);
+    expect(nd.hasAction(SemanticsAction.tap), isTrue);
+    final target = find.ancestor(of: xOnTile(), matching: find.byWidgetPredicate(
+        (w) => w is SizedBox && w.width == 48 && w.height == 48)).first;
+    final r = t.getRect(target);
+    expect(r.width >= 48 && r.height >= 48, isTrue, reason: 'target $r');
+    final circle = t.getRect(find.ancestor(of: xOnTile(), matching: find.byType(CircleAvatar)).first);
+    final corner = r.bottomLeft + const Offset(3, -3);
+    expect(circle.contains(corner), isFalse, reason: 'corner tap point must be outside the circle');
+    await t.tapAt(corner);
+    await t.pump();
+    expect(find.byKey(tileKey), findsNothing, reason: 'tap at the 48x48 corner removed the photo');
     h.dispose();
   });
 }
