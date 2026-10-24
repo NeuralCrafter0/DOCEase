@@ -74,12 +74,17 @@ name the flavor (`--flavor prod` or `--flavor dev`).
   - After a local delete succeeds (`markPendingDelete` for a patient, the visit save for a
     deleted visit or a photo removed while editing), the provider deletes the dropped photos. A
     refused delete removes nothing. A photo another visit still uses is kept; a file that is
-    already gone is ignored, so a second delete is harmless.
+    already gone is ignored, so a second delete is harmless. "Still used" is never taken from the
+    in-memory list alone (it was loaded with `fetchPatients()`, which returns `[]` on a read
+    error): a fresh `referencedAttachmentKeys()` scan after the DB change must succeed, and a
+    still-used local entry that cannot be keyed aborts the cleanup too (left to the sweep; log
+    `Photos: cleanup skipped (<reason>)`).
   - Cloud mode (parked, security F8-R1): once a photo's Storage upload is confirmed and the visit
     row has been rewritten to the Storage path, the same provider cleanup deletes the local copy
     (PR #8 writes picks into `attachments/<owner folder>/`). A failed upload, or a rewrite that is
     refused or not confirmed, keeps the file for the retry; a copy another visit or a pending
-    upload still uses is kept; files outside the owner folder are never deleted. Tests:
+    upload still uses is kept; files outside the owner folder are never deleted, and the Storage
+    path must be in the signed-in owner's folder for that patient. Tests:
     `test/backend/upload_cleanup_test.dart`.
   - At startup (`StartupHooks`, both start modes) a sweep waits for the first open DB and deletes
     files in that owner's `attachments/<owner folder>/` that no row references any more (e.g.
@@ -90,6 +95,11 @@ name the flavor (`--flavor prod` or `--flavor dev`).
     Unsynced rows count as referenced; only regular files directly in that folder, never
     symlinks, directories, `profile/` or another owner's folder; files changed in the last 10
     minutes are kept; logs carry counts only. It runs once per start, so a skip is logged once.
+  - Deletes (both paths) go through `LocalPhotoStore.deleteOwnedVisitFile`: only names the app
+    generates (`<uuid v4>.<jpg|png|webp>`, lower case), only directly in the owner folder, the
+    folder must resolve to itself, and the entry is re-checked as a regular file (no-follow) right
+    before `File(entry).delete()`. The delete target is always the entry's own path, never a
+    resolved one, so a last-moment symlink swap can at worst unlink that link.
   - Both compare #10's owner-relative keys (`AttachmentRefs.attachmentKey`: `attachments/<file>`
     or `profile/<file>`), never raw paths, so `/data/user/0/...` and `/data/data/...` name the
     same photo; the sweep only looks at `attachments/` keys. The owner folder is #10's
@@ -99,7 +109,7 @@ name the flavor (`--flavor prod` or `--flavor dev`).
     so the two never disagree; the sweep never touches `profile/`.
   - Known limitation: a visit that still holds an old image_picker cache path makes the scan fail
     with `unrecognisedPath`, so that phone is never swept (safe; clinical records are not
-    migrated). Deletes through the provider still work there. A leftover avatar after a crash is
+    migrated). Provider cleanup is skipped there as well (the fresh scan fails the same way). A leftover avatar after a crash is
     not swept either. Tests: `test/backend/photo_cleanup_test.dart`.
 - iOS: each owner photo folder is excluded from iCloud and computer backups when it is first used
   in a run, through #10's `PlatformBackupExcluder` (the existing `docease/backup_exclusion`
