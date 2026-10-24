@@ -355,64 +355,72 @@ class PatientProvider with ChangeNotifier {
     // Never read or merge cloud data unless the local DB is open for uid,
     // nor into a stale list (loadFailed).
     if (!_dbReadyFor(uid) || _loadFailed) return;
+    // Saves after this point are newer than the fetched snapshot.
+    final fetchedAfter = _saveSeq;
     final cloudPatients = await _firestore.fetchAllPatients();
     if (!_live(uid, token) || cloudPatients.isEmpty) return;
     // Never overwrite a local change Firestore has not confirmed yet. If
     // the dirty rows can't be read, don't merge at all.
     final dirtyIds = await _dirtyIds();
     if (dirtyIds == null || !_live(uid, token)) return;
-    final mergedMap = {for (final p in _patients) p.id: p};
     var hasChanges = false;
     var skippedDirty = false;
     for (final cp in cloudPatients) {
       // A doc that failed to parse is skipped: never stored or re-synced.
-      // Likewise never overwrite a local row that failed to parse.
-      if (cp.hasParseErrors || (mergedMap[cp.id]?.hasParseErrors ?? false)) {
+      if (cp.hasParseErrors) {
         debugPrint('Sync: skipping unparsed patient ${cp.id}');
         continue;
       }
       // Dirty rows and tombstones are refused atomically by the DB's
-      // conditional write (applyCloudPatient); the in-memory checks below
-      // then keep the local copy.
+      // conditional write (applyCloudPatient); the local copy is kept.
       if (dirtyIds.contains(cp.id)) skippedDirty = true;
-      final local = mergedMap[cp.id];
-      // Unchanged heuristic (known issue, follow-up): cloud wins only for
-      // new patients or when it has more visits.
-      if (local == null || cp.history.length > local.history.length) {
-        if (!_live(uid, token) || !_dbReadyFor(uid)) return;
-        final applied = await _applyCloud(cp);
-        if (!_live(uid, token)) return;
-        if (!applied || _unconfirmed.contains(cp.id)) {
+      if (!_live(uid, token) || !_dbReadyFor(uid)) return;
+      final result = await _applyCloud(cp, uid, token, fetchedAfter);
+      if (!_live(uid, token)) return;
+      switch (result) {
+        case _Pulled.applied:
+          hasChanges = true;
+        case _Pulled.keptLocal:
           // Edited locally while the pull ran: not an error, keep local.
           skippedDirty = true;
-          continue;
-        }
-        // Don't replace an in-memory edit made while the write ran.
-        if (!identical(_byId(cp.id), local)) {
-          skippedDirty = true;
-          continue;
-        }
-        mergedMap[cp.id] = cp;
-        hasChanges = true;
+        case _Pulled.unchanged:
+          break;
       }
     }
-    if (hasChanges && _live(uid, token)) {
-      final current = {for (final p in _patients) p.id: p};
-      _patients = [
-        for (final p in current.values) mergedMap[p.id] ?? p,
-        for (final p in mergedMap.values) if (!current.containsKey(p.id)) p,
-      ];
-      notifyListeners();
-    }
+    if (hasChanges && _live(uid, token)) notifyListeners();
     if (skippedDirty) _scheduleRetry(uid, token);
   }
 
-  /// Stores a cloud copy as synced only if the local row is missing or
-  /// clean. False = skipped because the row is dirty (or nothing written).
-  /// Under the per-patient lock, like every local save: a pulled copy can
-  /// never land between a save's strict read and its write.
-  Future<bool> _applyCloud(Patient cp) =>
-      _underPatientLock(cp.id, () => _db.applyCloudPatient(cp));
+  /// One patient of the pull, entirely under [cp]'s per-patient lock (the
+  /// lock every local save takes, security #16 M-1): the merge decision,
+  /// the conditional write ([LocalDatabase.applyCloudPatient]: stored as
+  /// synced only if the local row is missing or clean) and the in-memory
+  /// update. So memory never lags a pulled row while a later save of the
+  /// same patient runs, and no end-of-pull overwrite can undo a save made
+  /// after this patient was applied.
+  ///
+  /// A patient saved locally after the fetch started ([fetchedAfter]) is
+  /// kept and retried with a fresh snapshot, even if its push already made
+  /// the row clean: the fetched copy predates that save.
+  Future<_Pulled> _applyCloud(Patient cp, String uid, SyncCancelToken token, int fetchedAfter) =>
+      _underPatientLock(cp.id, () async {
+        if (!_live(uid, token) || !_dbReadyFor(uid)) return _Pulled.unchanged;
+        if ((_lastSave[cp.id] ?? 0) > fetchedAfter) return _Pulled.keptLocal;
+        final local = _byId(cp.id);
+        // Never overwrite a local row that failed to parse.
+        if (local?.hasParseErrors ?? false) {
+          debugPrint('Sync: skipping unparsed patient ${cp.id}');
+          return _Pulled.unchanged;
+        }
+        // Unchanged heuristic (known issue, follow-up): cloud wins only for
+        // new patients or when it has more visits.
+        if (local != null && cp.history.length <= local.history.length) return _Pulled.unchanged;
+        final applied = await _db.applyCloudPatient(cp);
+        if (!applied || _unconfirmed.contains(cp.id)) return _Pulled.keptLocal;
+        if (!_live(uid, token)) return _Pulled.unchanged;
+        _showInMemory(cp); // the row just stored, inside the same lock
+        return _Pulled.applied;
+      });
 
   /// Ids of dirty local rows; null if they can't be read (strict read: an
   /// error is never mistaken for "no dirty rows").
@@ -735,6 +743,8 @@ class PatientProvider with ChangeNotifier {
           }
           _unswapped.remove(local);
           _pendingUploads.remove(local);
+          final key = _visitKey(local, owner);
+          if (key != null && owner == _sessionPicksOwner) _sessionPicks[patientId]?.remove(key);
         } catch (e) {
           failed++;
           if (failed == 1) debugPrint('Upload: swap failed (${errorCode(e)}); retried later');
@@ -945,6 +955,23 @@ class PatientProvider with ChangeNotifier {
     if (i != -1) _patients[i] = p;
   }
 
+  /// Local save sequence: [_saveSeq] counts successful local row writes;
+  /// [_lastSave] is the latest per patient. The cloud pull never applies a
+  /// snapshot fetched before a patient's latest local save.
+  int _saveSeq = 0;
+  final Map<String, int> _lastSave = {};
+  void _noteLocalSave(String patientId) => _lastSave[patientId] = ++_saveSeq;
+
+  /// Shows [p] (a row just stored) in memory: replaces it, or adds it.
+  void _showInMemory(Patient p) {
+    final i = _patients.indexWhere((x) => x.id == p.id);
+    if (i != -1) {
+      _patients[i] = p;
+    } else {
+      _patients.add(p);
+    }
+  }
+
   /// Patients with unreadable records are read-only: saving them would
   /// overwrite the stored data with placeholders.
   void _ensureWritable(Patient patient) {
@@ -1021,19 +1048,19 @@ class PatientProvider with ChangeNotifier {
     } catch (e, st) {
       Error.throwWithStackTrace(SaveRefusedException(PatientSaveOperation.add, e), st);
     }
-    _patients.add(patient);
-    notifyListeners();
-    // Same per-patient lock as every other local save.
+    // Same per-patient lock as every other local save; memory shows the
+    // patient only once the insert succeeded, inside that lock.
     final version = await _underPatientLock(patient.id, () async {
       final String? version;
       try {
         version = await _db.insertPatient(patient);
+        _noteLocalSave(patient.id);
       } catch (e, st) {
-        // Save refused: don't show it as saved, don't sync.
-        _patients.removeWhere((p) => identical(p, patient));
-        notifyListeners();
+        // Save refused: never shown as saved, not synced.
         Error.throwWithStackTrace(SaveRefusedException(PatientSaveOperation.add, e), st);
       }
+      _showInMemory(patient);
+      notifyListeners();
       await _refreshSaved(patient.id);
       return version;
     });
@@ -1083,13 +1110,11 @@ class PatientProvider with ChangeNotifier {
     await _underPatientLock(patientId, () async {
       final refusedNow = _loadRefusal(PatientSaveOperation.update);
       if (refusedNow != null) throw refusedNow;
-      final shown = _byId(patientId);
-      if (shown == null) return;
+      if (_byId(patientId) == null) return; // not loaded: nothing to save
       Never refuse(Object e, StackTrace st) =>
           Error.throwWithStackTrace(SaveRefusedException(PatientSaveOperation.update, e), st);
       final Patient stored;
       try {
-        _ensureWritable(shown);
         final row = (await _db.fetchPatientsStrict()).where((p) => p.id == patientId).firstOrNull;
         if (row == null) throw StoredPatientMissingException(patientId);
         _ensureWritable(row);
@@ -1110,6 +1135,7 @@ class PatientProvider with ChangeNotifier {
       final String? version;
       try {
         version = await _db.insertPatient(updated);
+        _noteLocalSave(patientId);
       } catch (e, st) {
         refuse(e, st);
       }
@@ -1140,11 +1166,19 @@ class PatientProvider with ChangeNotifier {
     final token = _token;
     final owner = _photoOwner;
     await _underPatientLock(id, () async {
-      final removed = _byId(id);
+      // The photo list comes from the stored row (strict), never memory.
+      // Unreadable: the delete still runs; its photos are left to the sweep.
+      Patient? stored;
+      try {
+        stored = (await _db.fetchPatientsStrict()).where((p) => p.id == id).firstOrNull;
+      } catch (e) {
+        debugPrint('Photos: cleanup after a delete skipped (${errorCode(e)})');
+      }
       await _db.markPendingDelete(id); // throws: nothing changed, no photo removed
       _forget(id);
-      if (removed != null && owner != null) {
-        await _deleteUnreferencedPhotos(owner, [for (final r in removed.history) ...r.attachmentPaths]);
+      _sessionPicks.remove(id);
+      if (stored != null && !stored.hasParseErrors && owner != null) {
+        await _deleteUnreferencedPhotos(owner, [for (final r in stored.history) ...r.attachmentPaths]);
       }
     });
     if (!_cloud) return; // dev mode: the tombstone stays; no cloud delete
@@ -1175,7 +1209,7 @@ class PatientProvider with ChangeNotifier {
   /// the local write is done, so an offline push never blocks later saves.
   Future<void> _mutateHistory(
     String patientId,
-    Future<List<VisitRecord>?> Function(Patient current) change, {
+    Future<List<VisitRecord>?> Function(Patient stored) change, {
     required PatientSaveOperation operation,
     bool awaitPush = false,
     List<String>? newCopies,
@@ -1183,22 +1217,26 @@ class PatientProvider with ChangeNotifier {
     final run = _historyChain.then<(Future<void>,)?>((_) => _underPatientLock(patientId, () async {
       final refused = _loadRefusal(operation);
       if (refused != null) throw refused;
-      final current = _byId(patientId);
-      if (current == null) return null;
-      _ensureWritable(current);
+      if (_byId(patientId) == null) return null; // not loaded (or deleted)
       final uid = _uid;
       final token = _token;
       final owner = _photoOwner;
-      final history = await change(current);
+      // Security #16 M-1: the row is built from the stored row read
+      // strictly HERE, inside the per-patient lock (shared with the cloud
+      // pull, the upload swap and every other save), never from memory,
+      // which can lag a row the pull or a swap just wrote.
+      final stored = await _storedRowFor(patientId, operation);
+      _ensureWritable(stored);
+      final history = await change(stored);
       if (history == null) return null;
-      final latest = _byId(patientId);
-      if (latest == null || !_live(uid, token)) return null; // deleted or session ended
-      final updated = _withHistory(latest, history);
+      if (_byId(patientId) == null || !_live(uid, token)) return null; // deleted or session ended
+      final updated = _withHistory(stored, history);
       final refusedNow = _loadRefusal(operation); // a reload failed meanwhile
       if (refusedNow != null) throw refusedNow;
       final String? version;
       try {
         version = await _db.updatePatient(updated);
+        _noteLocalSave(patientId);
       } catch (e) {
         notifyListeners();
         rethrow;
@@ -1214,12 +1252,15 @@ class PatientProvider with ChangeNotifier {
       // Show the row as stored: #10 may have kept a Storage path S where
       // [updated] still had the local path L (attachment_swaps).
       final saved = await _refreshSaved(patientId) ?? updated;
-      final fresh = _newLocalFiles(latest, saved);
+      final fresh = _newLocalFiles(stored, saved);
       if (_cloud) _pendingUploads.addAll(fresh);
+      // L-1: once stored (or dropped) the stored row is the source of
+      // truth; the "picked this session" entry is gone.
+      if (owner != null) _consumePicks(owner, patientId, [stored, saved]);
       notifyListeners();
       // Saved: photos the change dropped (a deleted visit, or a photo
       // removed while editing) are no longer referenced.
-      if (owner != null) await _deleteUnreferencedPhotos(owner, _droppedEntries(latest, saved));
+      if (owner != null) await _deleteUnreferencedPhotos(owner, _droppedEntries(stored, saved));
       return (_afterLocalWrite(patientId, version),); // a record: not awaited here
     }));
     _historyChain = run.then((_) {}, onError: (_) {});
@@ -1242,6 +1283,127 @@ class PatientProvider with ChangeNotifier {
   }
 
   Future<void> _historyChain = Future.value();
+
+  /// [patientId]'s stored row, read strictly. Throws [SaveRefusedException]
+  /// when the read fails or the row is unreadable, and
+  /// [LocalSaveFailedException] when it is gone (nothing is written).
+  Future<Patient> _storedRowFor(String patientId, PatientSaveOperation operation) async {
+    final Patient? row;
+    try {
+      row = (await _db.fetchPatientsStrict()).where((p) => p.id == patientId).firstOrNull;
+    } catch (e, st) {
+      Error.throwWithStackTrace(SaveRefusedException(operation, e), st);
+    }
+    if (row == null) throw LocalSaveFailedException(patientId);
+    if (row.hasParseErrors) {
+      throw SaveRefusedException(operation, const DbReadException(DbReadFailure.unreadableRow));
+    }
+    return row;
+  }
+
+  // ------------------------------------------- photos picked this session
+
+  /// Security #16 L-1: app-owned visit photos (`attachments/<file>` keys)
+  /// the picker copied for a patient in this session, per patient, for
+  /// [_sessionPicksOwner] only. A save accepts a local app photo that is
+  /// not in the stored row only if it is registered here for that patient;
+  /// anything else (e.g. a photo a stale form still names after a newer
+  /// save removed it) is dropped. An entry goes as soon as a save stores
+  /// or drops it, a swap replaces it, its patient is deleted, or the
+  /// session or owner changes.
+  final Map<String, Set<String>> _sessionPicks = {};
+  String? _sessionPicksOwner;
+
+  /// Call once the picker has copied a photo for [patientId]'s visit form
+  /// into the app's photo folder (`attachments/<owner>/`), with the copy's
+  /// path. Only that patient's saves, under the current owner, accept it
+  /// as new. Paths outside the current owner's visit folder, and calls
+  /// with no session loaded, are ignored. Never throws; logs nothing.
+  void registerPickedAttachment({required String patientId, required String localPath}) {
+    // Only for a loaded session (not just an open DB): a late callback from
+    // an ended session registers nothing.
+    final owner = _uid;
+    if (owner == null || patientId.isEmpty) return;
+    if (_sessionPicksOwner != owner) {
+      _sessionPicks.clear();
+      _sessionPicksOwner = owner;
+    }
+    final key = _visitKey(localPath, owner);
+    if (key == null) return;
+    _sessionPicks.putIfAbsent(patientId, () => <String>{}).add(key);
+  }
+
+  /// Whether [localPath] is registered for [patientId] (tests and the UI).
+  @visibleForTesting
+  bool isRegisteredPickForTesting(String patientId, String localPath) {
+    final owner = _photoOwner;
+    if (owner == null || owner != _sessionPicksOwner) return false;
+    final key = _visitKey(localPath, owner);
+    return key != null && (_sessionPicks[patientId]?.contains(key) ?? false);
+  }
+
+  /// The `attachments/<file>` key of [path] in [owner]'s visit folder, else
+  /// null (#10's [AttachmentRefs.attachmentKey]; never built here).
+  static String? _visitKey(String path, String owner) {
+    final key = AttachmentRefs.attachmentKey(path, ownerFolderName: LocalPhotoStore.ownerFolderName(owner));
+    return key != null && key.startsWith('${AttachmentRefs.attachmentsFolder}/') ? key : null;
+  }
+
+  /// Removes from [patientId]'s registry every key that [rows] reference.
+  void _consumePicks(String owner, String patientId, Iterable<Patient> rows) {
+    if (owner != _sessionPicksOwner) return;
+    final picks = _sessionPicks[patientId];
+    if (picks == null) return;
+    for (final row in rows) {
+      for (final r in row.history) {
+        for (final e in r.attachmentPaths) {
+          final key = _visitKey(e, owner);
+          if (key != null) picks.remove(key);
+        }
+      }
+    }
+    if (picks.isEmpty) _sessionPicks.remove(patientId);
+  }
+
+  /// L-1: [record] without the local app photos a save must not introduce:
+  /// an entry not in [stored] (by text or #10 key) that lies in the app's
+  /// photo folders is kept only if it is registered for [patientId] under
+  /// [owner] ([registerPickedAttachment]). Another owner's photo is never
+  /// accepted. Entries outside the app's folders (the picker's own output
+  /// before #8 copies picks into `attachments/`), Storage paths and links
+  /// are left to the other checks. Dropped files stay on disk for the
+  /// sweep; only a count is logged.
+  Future<VisitRecord> _withoutUnpickedPhotos(
+      VisitRecord record, Patient stored, String? owner, String patientId) async {
+    final inRow = {for (final r in stored.history) ...r.attachmentPaths};
+    final rowKeys = owner == null
+        ? const <String>{}
+        : {for (final e in inRow) ?_visitKey(e, owner)};
+    final picks = owner != null && owner == _sessionPicksOwner
+        ? (_sessionPicks[patientId] ?? const <String>{})
+        : const <String>{};
+    await _photos.init();
+    final kept = <String>[];
+    var dropped = 0;
+    for (final e in record.attachmentPaths) {
+      if (inRow.contains(e)) {
+        kept.add(e);
+        continue;
+      }
+      final key = owner == null ? null : _visitKey(e, owner);
+      final mine = key != null || (owner != null && _photos.isAppPhoto(e, owner: owner));
+      if (key != null && (rowKeys.contains(key) || picks.contains(key))) {
+        kept.add(e);
+      } else if (mine || _photos.isAppPhoto(e)) {
+        dropped++; // an app photo the row no longer has, or another owner's
+      } else {
+        kept.add(e);
+      }
+    }
+    if (dropped == 0) return record;
+    debugPrint('Photos: $dropped photo(s) not picked this session left out of a save');
+    return _copyRecord(record, kept);
+  }
 
   /// Local files on [after] that were not on [before] and were validated
   /// as fresh picks (recorded in [_validatedPicks]).
@@ -1349,12 +1511,12 @@ class PatientProvider with ChangeNotifier {
   /// that path.
   Future<void> addRecord(String patientId, VisitRecord record) {
     final copies = <String>[];
-    return _mutateHistory(patientId, (current) async {
-      final toUpload = await _validateNewAttachments(patientId, record.attachmentPaths);
+    return _mutateHistory(patientId, (stored) async {
+      final picked = await _withoutUnpickedPhotos(record, stored, _photoOwner, patientId);
+      final toUpload = await _validateNewAttachments(patientId, picked.attachmentPaths);
       final kept = await _keepLocally(toUpload, copies);
       _validatedPicks.addAll(toUpload.map((e) => kept[e] ?? e));
-      final latest = _byId(patientId) ?? current;
-      return [_withPaths(record, kept), ...latest.history];
+      return [_withPaths(picked, kept), ...stored.history];
     }, operation: PatientSaveOperation.addVisit, newCopies: copies);
   }
 
@@ -1364,29 +1526,19 @@ class PatientProvider with ChangeNotifier {
   /// save leaves the old visit in memory.
   Future<void> updateRecord(String patientId, VisitRecord record) {
     final copies = <String>[];
-    return _mutateHistory(patientId, (current) async {
-      // Under the per-patient lock: the stored row and #10's swaps, both
-      // strict. Either read failing refuses the save (nothing written);
-      // never fall back to the form's paths.
+    return _mutateHistory(patientId, (storedRow) async {
+      // Under the per-patient lock: the stored row (read strictly by
+      // _mutateHistory) and #10's swaps, read strictly here. A failing read
+      // refuses the save (nothing written); never fall back to the form's
+      // paths.
       final owner = _photoOwner;
-      final Patient? storedRow;
       final Map<String, String> swapped;
       try {
         if (owner == null) throw const DbReadException(DbReadFailure.notOpen);
-        storedRow = (await _db.fetchPatientsStrict())
-            .where((p) => p.id == patientId)
-            .firstOrNull;
         swapped = await _db.swappedPathsFor(expectedOwner: owner, patientId: patientId);
       } catch (e, st) {
         Error.throwWithStackTrace(
             SaveRefusedException(PatientSaveOperation.updateVisit, e), st);
-      }
-      // In memory (checked by _mutateHistory) but not in the DB: the save
-      // cannot happen, so it is refused rather than silently dropped.
-      if (storedRow == null) throw LocalSaveFailedException(patientId);
-      if (storedRow.hasParseErrors) {
-        throw SaveRefusedException(PatientSaveOperation.updateVisit,
-            const DbReadException(DbReadFailure.unreadableRow));
       }
       // A form opened before an upload's swap still names the local path:
       // map swapped keys to their Storage path BEFORE the exists check, so
@@ -1407,6 +1559,8 @@ class PatientProvider with ChangeNotifier {
         record = _copyRecord(record,
             [for (final e in record.attachmentPaths) if (!resurrected.contains(e)) e]);
       }
+      // L-1: nor re-introduce a local app photo the row no longer has.
+      record = await _withoutUnpickedPhotos(record, storedRow, owner, patientId);
       final added = record.attachmentPaths.where((e) => !stored.contains(e)).toList();
       final toUpload = await _validateNewAttachments(patientId, added);
       final kept = await _keepLocally(toUpload, copies);
@@ -1463,9 +1617,9 @@ class PatientProvider with ChangeNotifier {
 
   /// Deletes a visit; a refused save keeps it in memory.
   Future<void> deleteRecord(String patientId, String recordId) =>
-      _mutateHistory(patientId, (current) async {
-        if (!current.history.any((r) => r.id == recordId)) return null;
-        return current.history.where((r) => r.id != recordId).toList();
+      _mutateHistory(patientId, (stored) async {
+        if (!stored.history.any((r) => r.id == recordId)) return null;
+        return stored.history.where((r) => r.id != recordId).toList();
       }, operation: PatientSaveOperation.deleteVisit, awaitPush: true);
 
   Patient findById(String id) => _patients.firstWhere((p) => p.id == id);
@@ -1522,6 +1676,9 @@ class PatientProvider with ChangeNotifier {
     _unswapped.clear();
     _unconfirmed.clear();
     _validatedPicks.clear();
+    _sessionPicks.clear();
+    _sessionPicksOwner = null;
+    _lastSave.clear();
     _resetLoadState();
     _searchQuery = '';
     _isSyncing = false;
@@ -1558,3 +1715,6 @@ class LocalSaveFailedException implements Exception {
 /// but markSynced's compare-and-set returned false (the row changed after
 /// that snapshot) or could not run; the row stays dirty, retry later.
 enum _Push { failed, done, notConfirmed }
+
+/// Outcome of one patient of the cloud pull ([PatientProvider._applyCloud]).
+enum _Pulled { applied, keptLocal, unchanged }
