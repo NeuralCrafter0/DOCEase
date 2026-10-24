@@ -1550,6 +1550,31 @@ class DatabaseHelper implements LocalDatabase {
       (db) async => patientsFromRowsStrict(await db.query('patients')));
 
   @override
+  Future<Patient?> fetchPatientStrict(
+      {required String expectedOwner, required String patientId}) async {
+    if (expectedOwner.isEmpty) {
+      throw ArgumentError.value('', 'expectedOwner', 'must not be empty');
+    }
+    if (patientId.isEmpty) {
+      throw ArgumentError.value('', 'patientId', 'must not be empty');
+    }
+    return _strictRead('patient', (db) async {
+      // _strictRead re-checks after the read that the same DB is open.
+      if (_uid != expectedOwner) {
+        throw const DbReadException(DbReadFailure.notOpen);
+      }
+      final rows = await db.rawQuery(singlePatientSql, [patientId, patientId]);
+      if (rows.isEmpty) return null;
+      return patientsFromRowsStrict(rows).single;
+    });
+  }
+  /// The single-row read: a primary-key lookup of `patients`, and none if
+  /// the id has a tombstone. One statement, so one snapshot.
+  @visibleForTesting
+  static const singlePatientSql = 'SELECT * FROM patients WHERE id = ? '
+      'AND NOT EXISTS (SELECT 1 FROM pending_deletes WHERE patient_id = ?) '
+      'LIMIT 1';
+  @override
   Future<List<Patient>> dirtyPatientsStrict() => _strictRead(
       'dirty',
       (db) async => patientsFromRowsStrict(await db.query('patients',

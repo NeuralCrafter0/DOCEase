@@ -376,6 +376,25 @@ abstract class LocalDatabase {
   /// [fetchPatients]. Read only.
   Future<List<Patient>> fetchPatientsStrict();
 
+  /// One patient, read and decoded on its own: a primary-key lookup of row
+  /// [patientId], never a scan of the table. Decoded exactly as
+  /// [fetchPatientsStrict] decodes it, so the same [Patient] (visits,
+  /// attachments, [Patient.updatedAt]).
+  ///
+  /// Returns null if there is no such row, or if [patientId] has a delete
+  /// tombstone (pending delete), even if a later local save recreated the
+  /// row; [fetchPatientsStrict] still lists such a row. The row and the
+  /// tombstone are checked in one statement, so one consistent snapshot.
+  ///
+  /// Throws [DbReadException] `notOpen` if no DB is open, its open failed,
+  /// or the open DB's owner is not [expectedOwner] (nothing is returned);
+  /// `readFailed` if the query fails; `unreadableRow` if this row cannot be
+  /// decoded completely (other patients are not read, so they do not
+  /// affect it). [ArgumentError] for an empty [expectedOwner] or
+  /// [patientId]. Read only.
+  Future<Patient?> fetchPatientStrict(
+      {required String expectedOwner, required String patientId});
+
   /// Inserts or replaces [patient] as a local edit (dirty). Returns the
   /// row's new `updated_at` (pass it to [markSynced] once Firestore
   /// confirms), or `null` if nothing was written (including patients with

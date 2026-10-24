@@ -1248,6 +1248,130 @@ void runDbSuite(DbSuiteHarness h) {
     await wipe();
   });
 
+  // --- fetchPatientStrict: one row, by primary key, decoded like the list
+  String fpsSnap(Patient p) => jsonEncode(
+      {'p': p.toJson(), 'v': p.updatedAt, 'bad': p.hasParseErrors});
+  Future<Patient?> fps(DatabaseHelper d, String id, {String owner = uidA}) =>
+      d.fetchPatientStrict(expectedOwner: owner, patientId: id);
+
+  h.define('FPS-01 fetchPatientStrict: found / not found / tombstoned; a '
+      'primary-key lookup; equals fetchPatientsStrict for every row', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    expect(await fps(d, 'p1'), isNull, reason: 'empty DB');
+    // A mix: local and Storage attachments, several visits, no visits,
+    // dirty and clean (cloud) rows.
+    await d.insertPatient(withVisits('p1', [[swpLocal], [], [swpStorage]]));
+    await d.insertPatient(withVisits('p2', [[]]));
+    await d.insertPatient(withVisits('p3', []));
+    expect(await d.applyCloudPatient(withVisits('c1', [[
+      'clinical_attachments/$uidA/c1/x.jpg']])), isTrue);
+    expect(await swp(d), isTrue);
+    final all = await d.fetchPatientsStrict();
+    expect(all.map((p) => p.id).toSet(), {'p1', 'p2', 'p3', 'c1'});
+    for (final p in all) {
+      final one = await fps(d, p.id);
+      expect(one, isNotNull, reason: p.id);
+      expect(fpsSnap(one!), fpsSnap(p), reason: p.id);
+    }
+    final p1 = (await fps(d, 'p1'))!;
+    expect(p1.history.map((v) => v.attachmentPaths).toList(), [
+      [swpStorage], <String>[], [swpStorage],
+    ]);
+    expect(await fps(d, 'nope'), isNull);
+    // Primary-key search, never a scan of patients.
+    final plan = (await db.rawQuery(
+            'EXPLAIN QUERY PLAN ${DatabaseHelper.singlePatientSql}',
+            ['p1', 'p1']))
+        .map((r) => '${r['detail']}')
+        .toList();
+    expect(plan.any((s) => s.startsWith('SEARCH patients USING INDEX')),
+        isTrue, reason: '$plan');
+    expect(plan.any((s) => s.startsWith('SCAN patients')), isFalse,
+        reason: '$plan');
+    // Read only.
+    final c = await counterOf(uidA);
+    final r1 = await rawRow(db, 'p1');
+    await fps(d, 'p1');
+    expect(await counterOf(uidA), c);
+    expect(await rawRow(db, 'p1'), r1);
+    // Tombstoned: null, like the list (the row is gone).
+    await d.markPendingDelete('p2');
+    expect(await fps(d, 'p2'), isNull);
+    expect((await d.fetchPatientsStrict()).map((p) => p.id), isNot(contains('p2')));
+    // A local save recreating a tombstoned id: the list still shows the
+    // row, the single read does not (pinned; see the API doc).
+    await d.insertPatient(withVisits('p2', [[]]));
+    expect((await d.fetchPatientsStrict()).map((p) => p.id), contains('p2'));
+    expect(await fps(d, 'p2'), isNull);
+    await d.close();
+    await wipe();
+  });
+
+  h.define('FPS-02 fetchPatientStrict: one corrupt row throws unreadableRow '
+      'for that patient only; others still read', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    await d.insertPatient(withVisits('p1', [[swpLocal]]));
+    await d.insertPatient(withVisits('p2', [[]]));
+    await d.insertPatient(withVisits('p3', []));
+    final good1 = fpsSnap((await fps(d, 'p1'))!);
+    await db.update('patients', {'history': 'not json $strMarker'},
+        where: 'id = ?', whereArgs: ['p2']);
+    final before = await rawRow(db, 'p2');
+    Object? err;
+    try {
+      await fps(d, 'p2');
+    } catch (e) {
+      err = e;
+    }
+    expect(err, isA<DbReadException>()
+        .having((e) => e.reason, 'reason', DbReadFailure.unreadableRow));
+    expect('$err', isNot(contains(strMarker)));
+    expect(await rawRow(db, 'p2'), before, reason: 'read only');
+    expect(fpsSnap((await fps(d, 'p1'))!), good1);
+    expect(await fps(d, 'p3'), isNotNull);
+    await expectLater(
+        d.fetchPatientsStrict(), readFails(DbReadFailure.unreadableRow));
+    // Wrong type in a column (not text history) also counts as unreadable.
+    await db.update('patients', {'history': 42},
+        where: 'id = ?', whereArgs: ['p3']);
+    await expectLater(fps(d, 'p3'), readFails(DbReadFailure.unreadableRow));
+    await d.close();
+    await wipe();
+  });
+
+  h.define('FPS-03 fetchPatientStrict: wrong owner / closed / failed open / '
+      'failed read throw; empty ids rejected', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    await d.insertPatient(withVisits('p1', [[]]));
+    await expectLater(
+        fps(d, 'p1', owner: uidB), readFails(DbReadFailure.notOpen));
+    await expectLater(
+        fps(d, 'p1', owner: uidOther), readFails(DbReadFailure.notOpen));
+    expect(() => d.fetchPatientStrict(expectedOwner: uidA, patientId: ''),
+        throwsArgumentError);
+    expect(() => d.fetchPatientStrict(expectedOwner: '', patientId: 'p1'),
+        throwsArgumentError);
+    // Owner B's DB open: A's id is notOpen, B reads its own rows.
+    await d.openFor(uidB);
+    await expectLater(fps(d, 'p1'), readFails(DbReadFailure.notOpen));
+    expect(await fps(d, 'p1', owner: uidB), isNull);
+    final dbA = await d.openFor(uidA);
+    expect(await fps(d, 'p1'), isNotNull);
+    expect(identical(db, dbA), isFalse);
+    // Table gone while the DB counts as open: readFailed, not null.
+    await dbA.execute('DROP TABLE pending_deletes');
+    await expectLater(fps(d, 'p1'), readFails(DbReadFailure.readFailed));
+    await d.close();
+    await expectLater(fps(d, 'p1'), readFails(DbReadFailure.notOpen));
+    await wipe();
+  });
+
   h.define('STR-01 healthy DB: strict reads equal the lenient ones; an '
       'empty DB gives empty, not an error', () async {
     await wipe();
