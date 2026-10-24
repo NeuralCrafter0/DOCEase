@@ -939,10 +939,10 @@ class PatientProvider with ChangeNotifier {
     );
   }
 
-  static VisitRecord _copyRecord(VisitRecord r, List<String> attachments) => VisitRecord(
+  static VisitRecord _copyRecord(VisitRecord r, List<String> attachments, {String? notes}) => VisitRecord(
         id: r.id, date: r.date, visitType: r.visitType,
         symptoms: r.symptoms, diagnosis: r.diagnosis, prescription: r.prescription,
-        notes: r.notes, bp: r.bp, temp: r.temp, pulse: r.pulse, weight: r.weight, sugar: r.sugar,
+        notes: notes ?? r.notes, bp: r.bp, temp: r.temp, pulse: r.pulse, weight: r.weight, sugar: r.sugar,
         attachmentPaths: attachments,
       );
 
@@ -1573,6 +1573,13 @@ class PatientProvider with ChangeNotifier {
       record = _mapSwappedRecord(record, owner, swapped);
       final i = storedRow.history.indexWhere((r) => r.id == record.id);
       if (i == -1) return null;
+      // Contract B2/G9: the visit form neither loads nor sends `notes`.
+      // Null means "not provided": keep the stored notes (from the row read
+      // strictly under this lock). An explicit '' clears them.
+      final storedNotes = storedRow.history[i].notes;
+      if (record.notes == null && storedNotes != null) {
+        record = _copyRecord(record, record.attachmentPaths, notes: storedNotes);
+      }
       final stored = storedRow.history[i].attachmentPaths.toSet();
       // A form can keep a cloud reference, never introduce one: a Storage
       // path (or legacy URL) the stored row no longer holds was removed by
