@@ -543,8 +543,15 @@ class PatientProvider with ChangeNotifier {
   /// cloud while markSynced marks the row (holding S) synced. markSynced
   /// gets that pushed row's own `updatedAt` (compare-and-set: a newer
   /// edit meanwhile stays dirty and is pushed by the next round).
+  ///
+  /// [savedVersion] (the version the triggering save returned) is used
+  /// only if the stored row carries no `updatedAt`. The real DB always
+  /// sets it; #10's shared FakeLocalDatabase returns the caller's copy.
+  /// Safe either way: the row was read after that save, so markSynced's
+  /// compare-and-set succeeds only while the stored row is still that
+  /// version, i.e. the row that was pushed.
   Future<bool> _syncOne(String? uid, SyncCancelToken token, String patientId,
-      {Patient? stored}) async {
+      {Patient? stored, String? savedVersion}) async {
     if (!_live(uid, token)) return false;
     // Hard guard: the dev owner's data is never pushed.
     if (!_cloud || isLocalOwner(uid ?? _openDbUid)) return false;
@@ -564,7 +571,7 @@ class PatientProvider with ChangeNotifier {
     }
     if (current == null) return true; // synced or deleted meanwhile
     if (current.hasParseErrors) return true; // read-only; never synced
-    var sentVersion = current.updatedAt;
+    var sentVersion = current.updatedAt ?? savedVersion;
 
     // The owner whose database the upload starts on (security #16): the
     // swap is checked against it, and nothing is swapped or deleted if a
@@ -609,12 +616,12 @@ class PatientProvider with ChangeNotifier {
 
   /// After a local write: push now. On failure schedule a retry; on success
   /// flush anything else that was waiting (connectivity is back).
-  Future<void> _afterLocalWrite(String patientId) async {
+  Future<void> _afterLocalWrite(String patientId, String? savedVersion) async {
     if (!_cloud) return; // dev mode: the row stays dirty; nothing is pushed
     final uid = _uid;
     final token = _token;
     _unconfirmed.add(patientId);
-    final ok = await _syncOne(uid, token, patientId);
+    final ok = await _syncOne(uid, token, patientId, savedVersion: savedVersion);
     if (!_live(uid, token)) return;
     final p = _byId(patientId);
     if (!ok || (p != null && _hasPendingUploads(p))) {
@@ -995,8 +1002,9 @@ class PatientProvider with ChangeNotifier {
     }
     _patients.add(patient);
     notifyListeners();
+    final String? version;
     try {
-      await _db.insertPatient(patient);
+      version = await _db.insertPatient(patient);
     } catch (e, st) {
       // Save refused: don't show it as saved, don't sync.
       _patients.removeWhere((p) => identical(p, patient));
@@ -1004,7 +1012,7 @@ class PatientProvider with ChangeNotifier {
       Error.throwWithStackTrace(SaveRefusedException(PatientSaveOperation.add, e), st);
     }
     await _refreshSaved(patient.id);
-    unawaited(_afterLocalWrite(patient.id));
+    unawaited(_afterLocalWrite(patient.id, version));
   }
 
   /// The patient-details save (security F16-R4). Applies ONLY [patient]'s
@@ -1074,8 +1082,9 @@ class PatientProvider with ChangeNotifier {
         history: stored.history, // never the caller's
         updatedAt: stored.updatedAt,
       );
+      final String? version;
       try {
-        await _db.insertPatient(updated);
+        version = await _db.insertPatient(updated);
       } catch (e, st) {
         refuse(e, st);
       }
@@ -1084,7 +1093,7 @@ class PatientProvider with ChangeNotifier {
         notifyListeners();
       }
       await _refreshSaved(patientId); // shows the row as stored (S, not L)
-      unawaited(_afterLocalWrite(patientId));
+      unawaited(_afterLocalWrite(patientId, version));
     });
   }
 
@@ -1186,7 +1195,7 @@ class PatientProvider with ChangeNotifier {
       // Saved: photos the change dropped (a deleted visit, or a photo
       // removed while editing) are no longer referenced.
       if (owner != null) await _deleteUnreferencedPhotos(owner, _droppedEntries(latest, saved));
-      return (_afterLocalWrite(patientId),); // a record: not awaited here
+      return (_afterLocalWrite(patientId, version),); // a record: not awaited here
     }));
     _historyChain = run.then((_) {}, onError: (_) {});
     if (newCopies != null) {

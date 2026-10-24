@@ -311,7 +311,7 @@ class MergeDb extends FakeLocalDatabase {
   /// the DB engineer's contract: true = swapped (row dirty, new version);
   /// false = no row, tombstoned or no entry with that key (nothing written);
   /// ArgumentError for bad arguments (storage path not exactly
-  /// clinical_attachments/<owner>/<patientId>/<file>, local path not a
+  /// `clinical_attachments/<owner>/<patientId>/<file>`, local path not a
   /// visit photo in the owner's attachments folder); DbReadException
   /// notOpen (also an owner mismatch) / unreadableRow.
   @override

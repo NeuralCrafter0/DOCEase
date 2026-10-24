@@ -12,14 +12,12 @@
 //   strict scan shows nothing references it.
 // Cloud mode against fakes only (FakeStorage, CloudFirestoreHelper); nothing
 // is deployed or contacted. Runs in both suite modes.
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 
 import 'package:docease/models/patient.dart';
-import 'package:docease/providers/attachment_refs.dart';
 import 'package:docease/providers/local_database.dart';
 import 'package:docease/providers/patient_provider.dart';
 import 'package:docease/services/local_photo_store.dart';
@@ -230,7 +228,7 @@ void main() {
   test('swap returned false and the strict scan fails: nothing is deleted, only the reason is logged', () async {
     await load();
     final a = pick('a.jpg');
-    db.beforeSwap = (_, __) => db.rows['p1'] = testPatient('p1');
+    db.beforeSwap = (_, _) => db.rows['p1'] = testPatient('p1');
     db.scanThrows = const AttachmentScanIncomplete(AttachmentScanFailure.readFailed);
     final logs = <String>[];
     await captureLogs(logs, () async {
@@ -382,7 +380,7 @@ void main() {
       var staleDone = false;
       bool? staleDoneAtScan;
       List<String>? rowAtScan;
-      db.beforeSwap = (_, __) {
+      db.beforeSwap = (_, _) {
         db.beforeSwap = null;
         // Issued while the swap holds p1's lock.
         staleSave = provider.updatePatient(Patient(
@@ -462,7 +460,7 @@ void main() {
       await load();
       final a = pick('a.jpg');
       final broken = Patient(id: 'p1', name: 'x', age: '1', gender: 'Female', phone: '+91', parseErrors: const ['name']);
-      db.beforeSwap = (_, __) {
+      db.beforeSwap = (_, _) {
         db.beforeSwap = null;
         db.rows['p1'] = broken;
       };
@@ -520,6 +518,14 @@ void main() {
   });
 
   group("#10's attachment_swaps: the stored row is what is pushed and shown", () {
+    /// Bounded wait for the outcome (real file I/O under suite load).
+    Future<void> until(bool Function() done) async {
+      for (var i = 0; i < 1000 && !done(); i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 2));
+      }
+      await flushMicrotasks();
+    }
+
     /// Sets up the DB engineer's case: the DB recorded the swap L -> S for
     /// p1's visit v1, while this provider's memory still holds L.
     ({String local, String storage}) memoryHoldsLocal() {
@@ -538,12 +544,12 @@ void main() {
       await load();
       final a = pick('a.jpg');
       await provider.addRecord('p1', visit('v1', [a]));
-      await flushMicrotasks();
+      await until(() => db.dirty['p1'] == false);
       final storagePath = storage.uploads.keys.single;
       expect(rowPaths('p1'), [storagePath]);
       // An edit from a pre-swap copy of the visit (local path L).
       await provider.updateRecord('p1', visit('v1', [a], diagnosis: 'edited'));
-      await flushMicrotasks();
+      await until(() => db.dirty['p1'] == false);
       final v1 = db.rows['p1']!.history.single;
       expect(v1.diagnosis, 'edited');
       expect(v1.attachmentPaths, [storagePath]);
@@ -564,7 +570,7 @@ void main() {
       remote.payloads.clear();
 
       await provider.addRecord('p1', visit('v2', []));
-      await flushMicrotasks();
+      await until(() => db.dirty['p1'] == false && !File(paths.local).existsSync());
 
       final stored = {for (final r in db.rows['p1']!.history) r.id: r.attachmentPaths};
       expect(stored, {'v1': [paths.storage], 'v2': <String>[]}, reason: 'the DB re-applied the swap');
@@ -594,7 +600,7 @@ void main() {
       remote.payloads.clear();
 
       await provider.retryDirty();
-      await flushMicrotasks();
+      await until(() => db.dirty['p1'] == false);
 
       expect(remote.payloads.single.history.single.attachmentPaths, [paths.storage]);
       expect(sentPaths(), isNot(contains(paths.local)));
@@ -607,7 +613,7 @@ void main() {
       final sync = s.substring(s.indexOf('Future<bool> _syncOne('), s.indexOf('Future<void> _afterLocalWrite('));
       expect(sync, isNot(contains('_byId(patientId)')));
       expect(sync, contains('await _db.dirtyPatientsStrict()'));
-      expect(sync, contains('var sentVersion = current.updatedAt;'));
+      expect(sync, contains('var sentVersion = current.updatedAt ?? savedVersion;'));
     });
   });
 

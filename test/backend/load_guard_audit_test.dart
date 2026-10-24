@@ -15,7 +15,6 @@ import 'package:docease/providers/medicine_provider.dart';
 import 'package:docease/providers/patient_provider.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import '../support/db_fakes.dart';
 import 'fakes.dart';
 
 class _SettingsDb extends FakeLocalDatabase {

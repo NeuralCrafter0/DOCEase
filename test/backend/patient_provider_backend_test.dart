@@ -53,6 +53,15 @@ void main() {
     tmp.deleteSync(recursive: true);
   });
 
+  /// Waits (bounded) until [done]: uploads, swap and scan do real file
+  /// I/O, which can take more than a few event-loop turns under load.
+  Future<void> until(bool Function() done) async {
+    for (var i = 0; i < 1000 && !done(); i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+    await flushMicrotasks();
+  }
+
   var picks = 0;
   /// A pick as the app makes it (PR #8 / LocalPhotoStore):
   /// <support>/attachments/<ownerFolder>/<uuid>.<ext>. Only these are
@@ -346,7 +355,7 @@ void main() {
       final jpg = await pick('jpg');
       final png = await pick('png');
       await provider.addRecord('p1', visit('v1', [jpg, png]));
-      await flushMicrotasks();
+      await until(() => db.dirty['p1'] == false);
 
       expect(storage.uploads.length, 2);
       final paths = storage.uploads.keys.toList();
@@ -363,14 +372,14 @@ void main() {
       storage.failUploads = true;
       final jpg = await pick('jpg');
       await provider.addRecord('p1', visit('v1', [jpg]));
-      await flushMicrotasks();
+      await until(() => remote.payloads.isNotEmpty);
       expect(remote.payloads, isNotEmpty);
       expect(remote.payloads.last.history.single.attachmentPaths, isEmpty);
       expect(provider.findById('p1').history.single.attachmentPaths, [jpg]);
 
       storage.failUploads = false;
       await provider.retryDirty();
-      await flushMicrotasks();
+      await until(() => db.dirty['p1'] == false);
       expect(storage.uploads.length, 1);
       expect(remote.payloads.last.history.single.attachmentPaths, [storage.uploads.keys.single]);
     });
@@ -400,7 +409,7 @@ void main() {
       final added = await pick('webp');
       await provider.updateRecord(
           'p3', visit('v1', ['clinical_attachments/doctorA/p3/old.jpg', added]));
-      await flushMicrotasks();
+      await until(() => db.dirty['p3'] == false);
       expect(storage.uploads.values.single, 'image/webp');
       expect(remote.payloads.last.history.single.attachmentPaths,
           ['clinical_attachments/doctorA/p3/old.jpg', storage.uploads.keys.single]);
