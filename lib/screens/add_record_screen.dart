@@ -187,7 +187,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
     return Wrap(
       spacing: 8,
       children: provider.dosageTemplates.map((t) => ActionChip(
-        label: Text(t, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+        label: Text(t, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
         backgroundColor: const Color(0xFFEEF2FF),
         side: BorderSide.none,
         onPressed: () {
@@ -221,7 +221,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
 
   Widget _buildVitalInput(TextEditingController controller, String label, String hint) {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF64748B))),
+      Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF64748B))),
       const SizedBox(height: 6),
       TextField(controller: controller, decoration: InputDecoration(hintText: hint, hintStyle: TextStyle(fontSize: 13, color: Colors.grey.shade300), contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12), border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: Colors.grey.shade100)))),
     ]);

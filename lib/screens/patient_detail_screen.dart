@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:share_plus/share_plus.dart';
 import '../providers/patient_provider.dart';
+import '../theme/app_theme.dart';
 import '../providers/doctor_provider.dart';
 import '../models/patient.dart';
 import '../utils/pdf_export.dart';
@@ -129,7 +130,7 @@ class PatientDetailScreen extends StatelessWidget {
   Widget _buildFamilyChip(BuildContext context, Patient familyMember) {
     return Semantics(button: true, child: GestureDetector(
       onTap: () => Navigator.pushReplacement(context, MaterialPageRoute(builder: (c) => PatientDetailScreen(patientId: familyMember.id))),
-      child: Container(margin: const EdgeInsets.only(right: 12), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), decoration: BoxDecoration(color: const Color(0xFFECFDF5), borderRadius: BorderRadius.circular(30), border: Border.all(color: const Color(0xFF10B981).withValues(alpha: 0.2))), child: Row(children: [Text(familyMember.name, style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF065F46), fontSize: 13)), const SizedBox(width: 6), Text('(${familyMember.relation})', style: const TextStyle(color: Color(0xFF10B981), fontSize: 11))])),
+      child: Container(margin: const EdgeInsets.only(right: 12), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), decoration: BoxDecoration(color: const Color(0xFFECFDF5), borderRadius: BorderRadius.circular(30), border: Border.all(color: const Color(0xFF10B981).withValues(alpha: 0.2))), child: Row(children: [Text(familyMember.name, style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF065F46), fontSize: 13)), const SizedBox(width: 6), Text('(${familyMember.relation})', style: const TextStyle(color: Color(0xFF10B981), fontSize: 12))])),
     ));
   }
 
@@ -138,7 +139,7 @@ class PatientDetailScreen extends StatelessWidget {
   }
 
   Widget _buildDataPoint(String label, String value, IconData icon) {
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: [Icon(icon, size: 14, color: const Color(0xFF94A3B8)), const SizedBox(width: 4), Text(label, style: const TextStyle(color: Color(0xFF94A3B8), fontSize: 11, fontWeight: FontWeight.bold))]), const SizedBox(height: 4), Text(value, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF1E293B)))]);
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: [Icon(icon, size: 14, color: AppColors.muted), const SizedBox(width: 4), Text(label, style: const TextStyle(color: AppColors.muted, fontSize: 12, fontWeight: FontWeight.bold))]), const SizedBox(height: 4), Text(value, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF1E293B)))]);
   }
 
   Widget _buildClinicalTimeline(BuildContext context, dynamic doctor, Patient patient, VisitRecord record, bool isLatest, PatientProvider provider) {
@@ -154,8 +155,8 @@ class PatientDetailScreen extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                Text(DateFormat('MMM dd, yyyy').format(record.date), style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF94A3B8), fontSize: 11)),
-                Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: isLatest ? const Color(0xFFEEF2FF) : const Color(0xFFF8FAFC), borderRadius: BorderRadius.circular(8)), child: Text(record.visitType, style: TextStyle(color: isLatest ? const Color(0xFF6366F1) : Colors.grey, fontSize: 10, fontWeight: FontWeight.bold))),
+                Text(DateFormat('MMM dd, yyyy').format(record.date), style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.muted, fontSize: 12)),
+                Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: isLatest ? const Color(0xFFEEF2FF) : const Color(0xFFF8FAFC), borderRadius: BorderRadius.circular(8)), child: Text(record.visitType, style: TextStyle(color: isLatest ? const Color(0xFF6366F1) : AppColors.muted, fontSize: 12, fontWeight: FontWeight.bold))),
               ]),
               const SizedBox(height: 8),
               Text(record.diagnosis, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16, color: Color(0xFF1E293B))),
@@ -173,7 +174,7 @@ class PatientDetailScreen extends StatelessWidget {
   }
 
   Widget _buildSmallVitalChip(String label, String val) {
-    return Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: const Color(0xFFF8FAFC), borderRadius: BorderRadius.circular(6), border: Border.all(color: const Color(0xFFE2E8F0))), child: Text('$label: $val', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Color(0xFF475569))));
+    return Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: const Color(0xFFF8FAFC), borderRadius: BorderRadius.circular(6), border: Border.all(color: const Color(0xFFE2E8F0))), child: Text('$label: $val', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF475569))));
   }
 
   void _showRecordDetails(BuildContext context, dynamic doctor, Patient patient, VisitRecord record, PatientProvider provider) {
@@ -224,6 +225,6 @@ class PatientDetailScreen extends StatelessWidget {
   }
 
   Widget _buildProfessionalDetail(String label, String value, IconData icon, {bool isSpecial = false}) {
-    return Padding(padding: const EdgeInsets.only(bottom: 24), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: [Icon(icon, size: 16, color: const Color(0xFF94A3B8)), const SizedBox(width: 8), Text(label, style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF94A3B8), fontSize: 12))]), const SizedBox(height: 10), Container(width: double.infinity, padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: isSpecial ? const Color(0xFFF5F3FF) : const Color(0xFFF8FAFC), borderRadius: BorderRadius.circular(12), border: Border.all(color: isSpecial ? const Color(0xFFDDD6FE) : const Color(0xFFF1F5F9))), child: Text(value, style: TextStyle(fontSize: 15, height: 1.5, fontWeight: isSpecial ? FontWeight.w700 : FontWeight.normal, color: isSpecial ? const Color(0xFF6366F1) : const Color(0xFF1E293B))))]));
+    return Padding(padding: const EdgeInsets.only(bottom: 24), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: [Icon(icon, size: 16, color: AppColors.muted), const SizedBox(width: 8), Text(label, style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.muted, fontSize: 12))]), const SizedBox(height: 10), Container(width: double.infinity, padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: isSpecial ? const Color(0xFFF5F3FF) : const Color(0xFFF8FAFC), borderRadius: BorderRadius.circular(12), border: Border.all(color: isSpecial ? const Color(0xFFDDD6FE) : const Color(0xFFF1F5F9))), child: Text(value, style: TextStyle(fontSize: 15, height: 1.5, fontWeight: isSpecial ? FontWeight.w700 : FontWeight.normal, color: isSpecial ? const Color(0xFF6366F1) : const Color(0xFF1E293B))))]));
   }
 }
