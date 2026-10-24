@@ -15,6 +15,7 @@ import '../utils/prescription_lines.dart';
 import '../utils/visit_order.dart';
 import '../utils/attachment_processor.dart';
 import '../utils/attachment_storage.dart';
+import '../utils/pick_registry.dart';
 
 class AddRecordScreen extends StatefulWidget {
   final String patientId;
@@ -161,6 +162,8 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
           _deleteQuietly(path);
           continue;
         }
+        // #16 L-1: a save keeps a new photo only if it was registered.
+        registerPickedAttachment(context.read<PatientProvider>(), patientId: widget.patientId, localPath: path);
         setState(() {
           _attachmentPaths.add(path);
           _newAttachmentPaths.add(path);
