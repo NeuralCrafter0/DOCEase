@@ -33,6 +33,8 @@ class FakeMedicineProvider extends MedicineProvider {
 }
 
 const tileKey = ValueKey('photo-unavailable-tile');
+const cloudKey = ValueKey('photo-cloud-tile');
+const cloudPath = 'clinical_attachments/u1/p1/0b6f3c2e-uploaded.jpg';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -101,6 +103,12 @@ void main() {
     await settle(t, () => find.byKey(tileKey).evaluate().length >= tiles);
   }
 
+  /// The (x) button of the thumbnail containing [tile].
+  Finder removeButtonOf(Finder tile) => find.descendant(
+        of: find.ancestor(of: tile, matching: find.byType(Stack)).first,
+        matching: find.bySemanticsLabel('Remove photo'),
+      );
+
   void expectNoPathOrRawError(WidgetTester t) {
     expect(t.takeException(), isNull, reason: 'the image error is handled, not reported');
     expect(find.textContaining(base.path), findsNothing, reason: 'the file path is never shown');
@@ -108,6 +116,7 @@ void main() {
     expect(find.textContaining('Exception'), findsNothing);
     expect(find.textContaining('Error'), findsNothing);
     expect(find.textContaining('http'), findsNothing);
+    expect(find.textContaining('clinical_attachments'), findsNothing);
   }
 
   testWidgets('STALE-05 a missing local photo shows the neutral "Photo saved" tile', (t) async {
@@ -154,5 +163,64 @@ void main() {
     expect(find.text('Photo saved'), findsOneWidget);
     expect(find.byIcon(Icons.close), findsOneWidget);
     expectNoPathOrRawError(t);
+  });
+
+  testWidgets('an uploaded photo (Storage path) shows "Saved to cloud", not the broken-photo tile', (t) async {
+    await open(t, visitWith([cloudPath, present]), tiles: 0);
+    await settle(t, () => find.byType(Image).evaluate().isNotEmpty);
+
+    expect(find.byKey(cloudKey), findsOneWidget);
+    expect(find.text('Saved to cloud'), findsOneWidget);
+    expect(find.descendant(of: find.byKey(cloudKey), matching: find.byIcon(Icons.cloud_done_outlined)), findsOneWidget);
+    expect(find.bySemanticsLabel('Saved to cloud'), findsOneWidget);
+    expect(find.byKey(tileKey), findsNothing, reason: 'not shown as a missing photo');
+    expect(find.text('Photo saved'), findsNothing);
+    // It is not tried as a file or a URL: the only image is the local photo.
+    expect(find.byType(Image), findsOneWidget);
+    expect(t.widget<Image>(find.byType(Image)).image, isA<FileImage>());
+    expectNoPathOrRawError(t);
+  });
+
+  testWidgets('removing an uploaded photo works and the save drops only it', (t) async {
+    await open(t, visitWith([cloudPath, present]), tiles: 0);
+    await t.tap(removeButtonOf(find.byKey(cloudKey)));
+    await t.pump();
+    expect(find.byKey(cloudKey), findsNothing);
+    expect(find.bySemanticsLabel('Remove photo'), findsOneWidget);
+
+    await t.tap(find.text('Save Clinical Record'));
+    await settle(t, () => patients.updated != null && find.byType(AddRecordScreen).evaluate().isEmpty);
+    expect(patients.updated!.attachmentPaths, [present]);
+    expect(File(present).existsSync(), isTrue);
+    expectNoPathOrRawError(t);
+  });
+
+  testWidgets('the remove (x) has its own "Remove photo" label and a 48x48 target, drawn where it was', (t) async {
+    final handle = t.ensureSemantics();
+    await open(t, visitWith([missing, present]), tiles: 1);
+
+    final buttons = find.bySemanticsLabel('Remove photo');
+    expect(buttons, findsNWidgets(2));
+    final node = t.getSemantics(buttons.first);
+    expect(node, isSemantics(label: 'Remove photo', isButton: true, hasTapAction: true));
+    expect(node.rect.width, greaterThanOrEqualTo(48));
+    expect(node.rect.height, greaterThanOrEqualTo(48));
+
+    // The red circle keeps its place: 4 px in from the thumbnail's top-right.
+    final thumb = t.getRect(find.ancestor(of: find.byKey(tileKey), matching: find.byType(ClipRRect)).first);
+    final circle = t.getRect(find.ancestor(of: find.byIcon(Icons.close), matching: find.byType(CircleAvatar)).first);
+    expect(circle.size, const Size(24, 24));
+    expect(circle.right, moreOrLessEquals(thumb.right - 4));
+    expect(circle.top, moreOrLessEquals(thumb.top + 4));
+
+    // A tap well outside the circle but inside the 48x48 target removes it.
+    final target = t.getRect(removeButtonOf(find.byKey(tileKey)));
+    expect(target.size, const Size(48, 48));
+    await t.tapAt(target.bottomLeft + const Offset(4, -4));
+    await t.pump();
+    expect(find.byKey(tileKey), findsNothing);
+    expect(find.bySemanticsLabel('Remove photo'), findsOneWidget);
+    expectNoPathOrRawError(t);
+    handle.dispose();
   });
 }
