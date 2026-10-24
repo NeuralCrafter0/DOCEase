@@ -28,3 +28,28 @@ String _national(String digits) {
   if (digits.length == 11 && digits.startsWith('0')) return digits.substring(1);
   return digits;
 }
+
+/// Whether two stored phone numbers are the same number, for grouping a
+/// patient's Family Network. Compared on digits only, ignoring a +91 country
+/// code or 0 trunk prefix, so '+91 98111-11111' and '9811111111' match.
+/// A number with fewer than [minFamilyPhoneDigits] digits (empty, or a
+/// placeholder like '0') never matches anything: patients registered without
+/// a phone must not all show up as one family.
+bool samePhone(String a, String b) {
+  final x = _familyDigits(a);
+  final y = _familyDigits(b);
+  if (x.length < minFamilyPhoneDigits || y.length < minFamilyPhoneDigits) return false;
+  return x == y;
+}
+
+/// National digits of a stored number: an explicit +91 is dropped first, so
+/// '+91 12345' counts as 5 digits, not 7.
+String _familyDigits(String phone) {
+  final t = phone.trim();
+  final digits = t.replaceAll(_nonDigit, '');
+  if (t.startsWith('+91')) return digits.substring(2);
+  return _national(digits);
+}
+
+/// Shortest phone number that can link patients as one family.
+const int minFamilyPhoneDigits = 7;

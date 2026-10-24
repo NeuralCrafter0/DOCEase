@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import '../utils/vitals_display.dart';
 import 'vitals_trends_screen.dart';
+import '../utils/patient_search.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:share_plus/share_plus.dart';
 import '../providers/patient_provider.dart';
@@ -118,7 +119,9 @@ class PatientDetailScreen extends StatelessWidget {
         // The patient was just deleted: this route is on its way out, so
         // render nothing instead of throwing from findById.
         if (patient == null) return const Scaffold(backgroundColor: Color(0xFFF8FAFC));
-        final family = provider.allPatients.where((p) => p.phone == patient.phone && p.id != patient.id).toList();
+        // #11 68b4cbb: digits-only match, +91 / leading 0 ignored, under 7
+        // digits never links (samePhone).
+        final family = provider.allPatients.where((p) => p.id != patient.id && samePhone(p.phone, patient.phone)).toList();
         // Timeline, "Last Visit" and the latest marker follow visit date,
         // not insertion order (a backdated note is inserted at index 0).
         final timeline = patient.history.newestFirst();
