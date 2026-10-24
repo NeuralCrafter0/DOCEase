@@ -1,0 +1,26 @@
+# Code owners for DOCEase (security request, PR #21).
+#
+# Changes to dependencies, CI, the release/dev-mode guards and this file need
+# a review from a code owner. This is only ENFORCED once main has a branch
+# ruleset (or branch protection) with "Require review from Code Owners".
+#
+# GitHub does not let a PR's author approve their own PR. While NeuralCrafter0
+# is the only code owner and also opens the PRs, add a second reviewer account
+# here (e.g. "@NeuralCrafter0 @<security-reviewer>") once it has write access.
+#
+# Later lines take precedence over earlier ones for the same file.
+
+# Dependencies (any pubspec in the repo)
+pubspec.yaml                     @NeuralCrafter0
+pubspec.lock                     @NeuralCrafter0
+
+# CI workflows, Dependabot and this file
+/.github/                        @NeuralCrafter0
+/.github/CODEOWNERS              @NeuralCrafter0
+
+# CI scripts and budgets (asset/font/size limits, APK and dev-marker checks)
+/tool/ci/                        @NeuralCrafter0
+/tool/ci/budgets.json            @NeuralCrafter0
+
+# Android build config: signing, flavors and the dev-mode release guard
+/android/app/build.gradle.kts    @NeuralCrafter0
