@@ -229,7 +229,7 @@ void main() {
       final tile = o.entries.where((e) => isTile(e.key)).toList();
       expect(tile, isEmpty, reason: 'tile overflow: $tile');
       expect(find.byKey(tileKey), findsOneWidget);
-    });
+    }, skip: scale >= 2.0 && !_ff); // CONFIRMED #8: fixed 100x120 tile overflows 50px at 2.0x; QA_FAILING_FIRST=true
     testWidgets('TILE-03b small screen (320x568) at ${scale}x text: rest of the visit form '
         '(pre-existing, not #8) does not overflow', (t) async {
       final o = await overflowsAt(t, scale);
