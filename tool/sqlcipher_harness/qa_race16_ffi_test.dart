@@ -32,9 +32,6 @@ const uidA = 'doctorA';
 const u1 = '0b7f6c2e-4d1a-4c3b-9e8f-2a1b3c4d5e6f';
 // Failing-first on b217f46/#13 7c3ee41 (_syncOne upload rewrite saves a
 // whole-row copy OUTSIDE the per-patient _historyChain): QA_FAILING_FIRST=true.
-final bool _ff = Platform.environment['QA_FAILING_FIRST'] == 'true';
-const _ffWhy = 'CONFIRMED #13 7c3ee41: _syncOne upload rewrite writes outside the per-patient lock '
-    '(removed photo returns as a new S); set QA_FAILING_FIRST=true until every local save uses the lock';
 final int loops = int.tryParse(Platform.environment['QA_RACE_LOOPS'] ?? '') ?? 20;
 String storageOf(String u, {String pid = 'p1'}) => 'clinical_attachments/$uidA/$pid/$u.jpg';
 
@@ -132,6 +129,16 @@ class _World {
 
 Future<Object?> _settle(Future<void> f) => f.then<Object?>((_) => null, onError: (Object e) => e);
 
+// L-1 (security 3a695b0 review): failing-first until #16 accepts only this
+// session's picks. Run with QA_FAILING_FIRST=true to see them fail today.
+final bool _ffL1 = Platform.environment['QA_FAILING_FIRST'] == 'true';
+const _l1Why = 'L-1 (security #16 3a695b0, CONFIRMED): a stale form re-adds a removed photo whose '
+    'local copy is still on disk (re-uploaded under a new name); QA_FAILING_FIRST=true until fixed';
+
+/// Any photo at all in v1 after a removal (security L-1: the old detector only
+/// looked for the original Storage name / file id).
+bool _anyStorage(List<String> got) => got.any((e) => e.startsWith('clinical_attachments/'));
+
 void main() {
   for (final deleteLocal in [true, false]) {
     final variant = deleteLocal ? 'local copy deleted' : 'local copy still on disk';
@@ -149,9 +156,10 @@ void main() {
           await _settle(stale);
           await Future<void>.delayed(const Duration(milliseconds: 20));
           final got = await w.storedV1();
-          if (got.contains(w.s) || (await w.pushedPaths()).contains(w.s)) revived.add(i);
-          if (got.contains(w.local)) danglingL.add(i);
-          if (w.storage.uploads.keys.any((k) => k.contains(u1))) reuploads.add(i);
+          final pushed = await w.pushedPaths();
+          if (_anyStorage(got) || _anyStorage(pushed)) revived.add(i);
+          if (got.any((e) => !e.startsWith('clinical_attachments/'))) danglingL.add(i);
+          if (w.storage.uploads.isNotEmpty) reuploads.add(i); // ANY upload (L-1)
         } finally {
           await w.dispose();
         }
@@ -161,7 +169,7 @@ void main() {
       expect(revived, isEmpty, reason: 'removed photo came back as S');
       expect(reuploads, isEmpty, reason: 'removed photo was uploaded again');
       expect(danglingL, isEmpty, reason: 'removed photo came back as its local path');
-    });
+    }, skip: !deleteLocal && !_ffL1 ? _l1Why : null);
 
     test('RACE-02 [$variant] stale save queued FIRST, removal second, x$loops: '
         'ends with no photo', () async {
@@ -176,7 +184,8 @@ void main() {
           final err = await _settle(removal);
           await Future<void>.delayed(const Duration(milliseconds: 20));
           final got = await w.storedV1();
-          if (got.isNotEmpty || err != null || (await w.pushedPaths()).contains(w.s)) {
+          if (got.isNotEmpty || err != null || _anyStorage(await w.pushedPaths()) ||
+              w.storage.uploads.isNotEmpty) {
             bad[i] = [...got, if (err != null) 'removal error: ${err.runtimeType}'];
           }
         } finally {
@@ -186,9 +195,39 @@ void main() {
       // ignore: avoid_print
       print('RACE-02 [$variant] observed bad=$bad');
       expect(bad, isEmpty, reason: 'the later removal must win and succeed');
-    }, skip: !deleteLocal && !_ff ? _ffWhy : null);
+    });
   }
 
+
+  // RACE-04 (QA, 3a695b0): no race at all - the removal has COMPLETED, then
+  // a form opened before it is saved. Pins the second layer, the "a form can
+  // keep a cloud reference, never introduce one" guard in updateRecord, which
+  // the jittered races above cannot reach once the strict reads sit under the
+  // per-patient lock (QA mutation `guard` passed RACE-01..03; only backend's
+  // stale_visit_form_test caught it).
+  for (final (holds, onDisk) in [('S', false), ('L', false), ('L', true)]) {
+    test('RACE-04 [form holds $holds${onDisk ? ', file on disk' : ''}] removal completed, then the stale form is saved: '
+        'S is not reintroduced, never pushed', () async {
+      final w = _World();
+      await w.boot(4242, deleteLocal: !onDisk);
+      try {
+        await w.provider.updateRecord('p1', visit('v1', const []));
+        expect(await w.storedV1(), isEmpty, reason: 'precondition: removal saved');
+        final formPath = holds == 'S' ? w.s : w.local;
+        final err = await _settle(
+            w.provider.updateRecord('p1', visit('v1', [formPath], diagnosis: 'stale edit')));
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        final got = await w.storedV1();
+        // ignore: avoid_print
+        print('RACE-04 [$holds] observed: stored=$got err=${err?.runtimeType}');
+        expect(got, isEmpty, reason: 'stale form brought the removed photo back (any name)');
+        expect(_anyStorage(await w.pushedPaths()), isFalse);
+        expect(w.storage.uploads.keys, isEmpty, reason: 'no new Storage object at all (L-1)');
+      } finally {
+        await w.dispose();
+      }
+    }, skip: onDisk && !_ffL1 ? _l1Why : null);
+  }
 
   test('RACE-03 a NEW photo removed while its upload rewrite is pending, x$loops: '
       'stays removed in the DB, in memory, and in what is pushed', () async {
@@ -215,7 +254,7 @@ void main() {
     // ignore: avoid_print
     print('RACE-03 observed bad=${bad.length}/$loops $bad');
     expect(bad, isEmpty, reason: 'sync rewrite outside the per-patient lock overwrote the removal');
-  }, skip: _ff ? null : _ffWhy);
+  });
   test('RACE-CTRL positive control (runs today): an OUTSIDE-the-lock '
       'swappedPathsFor patch of an old copy revives the photo, x$loops', () async {
     var revivals = 0;
