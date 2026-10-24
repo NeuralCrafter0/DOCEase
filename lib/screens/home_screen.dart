@@ -146,7 +146,7 @@ class _HomeScreenState extends State<HomeScreen> {
             decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), border: Border.all(color: const Color(0xFFF1F5F9))),
             child: ListTile(
               contentPadding: const EdgeInsets.all(16),
-              leading: Hero(tag: patients[i].id, child: Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: const Color(0xFFF8FAFC), borderRadius: BorderRadius.circular(14)), child: const Icon(Icons.person_search_outlined, color: Color(0xFF6366F1)))),
+              leading: Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: const Color(0xFFF8FAFC), borderRadius: BorderRadius.circular(14)), child: const Icon(Icons.person_search_outlined, color: Color(0xFF6366F1))),
               title: Text(patients[i].name, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16, color: Color(0xFF1E293B))),
               subtitle: Text(patients[i].phone, style: const TextStyle(color: Color(0xFF64748B), fontSize: 13)),
               onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (ctx) => PatientDetailScreen(patientId: patients[i].id))),
