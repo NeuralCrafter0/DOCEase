@@ -263,8 +263,20 @@ void main() {
     final mutate = body('_mutateHistory');
     expect(mutate, contains('_storedRowFor('), reason: 'built from the strict stored row');
     expect(mutate, contains('_withHistory(stored, history)'));
-    expect(body('updatePatientDetails'), contains('fetchPatientsStrict('));
-    expect(body('deletePatient'), contains('fetchPatientsStrict('));
+    expect(body('updatePatientDetails'), contains('_readStoredRow('));
+    expect(body('deletePatient'), contains('_readStoredRow('));
+    expect(body('_storedRowFor'), contains('_readStoredRow('));
+    // Each save reads only its own row (#10's fetchPatientStrict, 4f3a8ee):
+    // never a full-table read, never memory.
+    for (final fn in [...saves, '_storedRowFor', '_refreshSaved', '_refreshFromDb']) {
+      expect(body(fn), isNot(contains('fetchPatientsStrict(')), reason: '$fn reads one row');
+    }
+    final readAt = src.indexOf('  Future<Patient?> _readStoredRow(');
+    expect(readAt, isNot(-1));
+    final read = src.substring(readAt, src.indexOf('\n  }\n', readAt));
+    expect(read, contains('_db.fetchPatientStrict(expectedOwner: owner, patientId: patientId)'));
+    expect(read, isNot(contains('_patients')));
+    expect(read, isNot(contains('_byId(')));
     // The pull: no list-wide overwrite; memory follows per patient in the lock.
     expect(body('_pullFromCloud'), isNot(contains('_patients =')));
     final apply = body('_applyCloud');

@@ -350,8 +350,8 @@ class MergeDb extends FakeLocalDatabase {
     return ok;
   }
 
-  /// When set, only fetchPatientsStrict throws it (the push's dirty read
-  /// keeps working).
+  /// When set, the strict row reads (fetchPatientsStrict and the one-row
+  /// fetchPatientStrict) throw it; the push's dirty read keeps working.
   Object? fetchStrictThrows;
   int strictFetches = 0;
 
@@ -361,6 +361,17 @@ class MergeDb extends FakeLocalDatabase {
     final t = fetchStrictThrows;
     if (t != null) throw t;
     return [for (final p in await super.fetchPatientsStrict()) _stamped(p)];
+  }
+
+  int strictOneFetches = 0;
+
+  @override
+  Future<Patient?> fetchPatientStrict({required String expectedOwner, required String patientId}) async {
+    strictOneFetches++;
+    final t = fetchStrictThrows;
+    if (t != null) throw t;
+    final p = await super.fetchPatientStrict(expectedOwner: expectedOwner, patientId: patientId);
+    return p == null ? null : _stamped(p);
   }
 
   /// Like the real DB, a strict read returns each row with its stored

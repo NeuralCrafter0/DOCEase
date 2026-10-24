@@ -381,7 +381,7 @@ void main() {
       expect(up, isNot(contains('.history')));
       final details = s.substring(s.indexOf('Future<void> updatePatientDetails('), s.indexOf('/// Deletes a patient.'));
       expect(details, contains('await _underPatientLock(patientId, () async {'));
-      expect(details, contains('await _db.fetchPatientsStrict()'));
+      expect(details, contains('await _readStoredRow(patientId, _rowOwner)'));
       expect(details, contains('history: stored.history, // never the caller\'s'));
     });
   });

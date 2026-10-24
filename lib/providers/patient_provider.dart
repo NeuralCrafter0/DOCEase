@@ -244,6 +244,7 @@ class PatientProvider with ChangeNotifier {
   void _resetLoadState() {
     _patients = [];
     _listOwner = null;
+    _unreadable.clear();
     _loadFailed = false;
     _hasLoaded = false;
     _loadFailure = null;
@@ -335,6 +336,7 @@ class PatientProvider with ChangeNotifier {
     if (!_live(uid, token)) return;
     _patients = local;
     _listOwner = uid;
+    _unreadable.clear(); // the full strict read just read every row
     _loadFailed = false;
     _hasLoaded = true; // notified below on both paths
     _loadFailure = null;
@@ -371,6 +373,16 @@ class PatientProvider with ChangeNotifier {
     // the dirty rows can't be read, don't merge at all.
     final dirtyIds = await _dirtyIds();
     if (dirtyIds == null || !_live(uid, token)) return;
+    // All-or-nothing: a pull merges only into a DB whose every row reads
+    // strictly. One unreadable row (e.g. damaged after the list loaded)
+    // stops the whole pull; it is never narrowed to "skip that patient".
+    try {
+      await _db.fetchPatientsStrict();
+    } catch (e) {
+      debugPrint('Sync: pull skipped, local rows unreadable (${errorCode(e)})');
+      return;
+    }
+    if (!_live(uid, token)) return;
     var hasChanges = false;
     var skippedDirty = false;
     for (final cp in cloudPatients) {
@@ -809,20 +821,16 @@ class PatientProvider with ChangeNotifier {
   /// returns it. Null (memory unchanged, nothing deleted, push retried) if
   /// the read throws, the row is gone or unreadable, or the session or
   /// owner changed meanwhile. Logs only the error code.
-  ///
-  /// TODO(db-strict-read): a single-row `fetchPatientStrict(id)` on #10
-  /// would avoid reading every row here.
   Future<Patient?> _refreshFromDb(String owner, String? uid, SyncCancelToken token, String patientId) async {
-    final List<Patient> rows;
+    final Patient? row;
     try {
-      rows = await _db.fetchPatientsStrict();
+      row = await _readStoredRow(patientId, owner);
     } catch (e) {
       debugPrint('Upload: refresh after swap failed (${errorCode(e)})');
       return null;
     }
     if (!_live(uid, token) || _openDbUid != owner) return null;
-    final row = rows.where((p) => p.id == patientId).firstOrNull;
-    if (row == null || row.hasParseErrors) return null;
+    if (row == null) return null;
     if (_byId(patientId) == null) return null; // forgotten meanwhile
     _replaceInMemory(row);
     notifyListeners();
@@ -838,16 +846,16 @@ class PatientProvider with ChangeNotifier {
   Future<Patient?> _refreshSaved(String patientId) async {
     final uid = _uid;
     final token = _token;
-    final List<Patient> rows;
+    if (uid == null) return null;
+    final Patient? row;
     try {
-      rows = await _db.fetchPatientsStrict();
+      row = await _readStoredRow(patientId, uid);
     } catch (e) {
       debugPrint('Refresh after save failed (${errorCode(e)})');
       return null;
     }
     if (!_live(uid, token)) return null;
-    final row = rows.where((p) => p.id == patientId).firstOrNull;
-    if (row == null || row.hasParseErrors || _byId(patientId) == null) return null;
+    if (row == null || _byId(patientId) == null) return null;
     _replaceInMemory(row);
     notifyListeners();
     return row;
@@ -1139,7 +1147,7 @@ class PatientProvider with ChangeNotifier {
           Error.throwWithStackTrace(SaveRefusedException(PatientSaveOperation.update, e), st);
       final Patient stored;
       try {
-        final row = (await _db.fetchPatientsStrict()).where((p) => p.id == patientId).firstOrNull;
+        final row = await _readStoredRow(patientId, _rowOwner);
         if (row == null) throw StoredPatientMissingException(patientId);
         _ensureWritable(row);
         stored = row;
@@ -1194,7 +1202,7 @@ class PatientProvider with ChangeNotifier {
       // Unreadable: the delete still runs; its photos are left to the sweep.
       Patient? stored;
       try {
-        stored = (await _db.fetchPatientsStrict()).where((p) => p.id == id).firstOrNull;
+        stored = await _readStoredRow(id, _rowOwner);
       } catch (e) {
         debugPrint('Photos: cleanup after a delete skipped (${errorCode(e)})');
       }
@@ -1214,6 +1222,7 @@ class PatientProvider with ChangeNotifier {
     final removed = _byId(id);
     _patients.removeWhere((p) => p.id == id);
     _unconfirmed.remove(id);
+    _unreadable.remove(id);
     if (removed != null) {
       for (final r in removed.history) {
         _pendingUploads.removeAll(r.attachmentPaths);
@@ -1314,15 +1323,84 @@ class PatientProvider with ChangeNotifier {
   Future<Patient> _storedRowFor(String patientId, PatientSaveOperation operation) async {
     final Patient? row;
     try {
-      row = (await _db.fetchPatientsStrict()).where((p) => p.id == patientId).firstOrNull;
+      row = await _readStoredRow(patientId, _rowOwner);
     } catch (e, st) {
       Error.throwWithStackTrace(SaveRefusedException(operation, e), st);
     }
     if (row == null) throw LocalSaveFailedException(patientId);
-    if (row.hasParseErrors) {
-      throw SaveRefusedException(operation, const DbReadException(DbReadFailure.unreadableRow));
-    }
     return row;
+  }
+
+  // ------------------------------------------- per-patient strict reads
+  /// Patients whose stored row could not be read this session
+  /// ([DbReadFailure.unreadableRow] from #10's one-row strict read).
+  /// Only that patient is blocked: its saves are refused, and the UI shows
+  /// "couldn't open this record" instead of its contents. Cleared on
+  /// `clear()`, an owner change and a successful full load; an entry also
+  /// goes once a later strict read of that patient succeeds.
+  final Set<String> _unreadable = {};
+
+  /// True when [patientId]'s stored row failed to read with
+  /// [DbReadFailure.unreadableRow] in this session (a save, a refresh or
+  /// [openPatient]). The detail screen then shows a "couldn't open this
+  /// record" state with no row contents or error text, never an empty
+  /// patient, and keeps editing disabled. Listeners are notified when it
+  /// changes.
+  bool isPatientUnreadable(String patientId) => _unreadable.contains(patientId);
+
+  /// Strict one-row read of [patientId] for the detail screen (call it when
+  /// the screen opens): updates [isPatientUnreadable], so a row damaged
+  /// after the list loaded is caught when it is opened. Runs under the
+  /// patient's lock. Never throws and never changes the stored row or the
+  /// list; other read failures (DB not open, read failed) leave the flag
+  /// as it is and log only the code.
+  Future<void> openPatient(String patientId) async {
+    final uid = _rowOwner;
+    if (uid == null || _loadFailed || _openDbUid != uid) return;
+    await _underPatientLock(patientId, () async {
+      if (_rowOwner != uid || _openDbUid != uid) return;
+      try {
+        await _readStoredRow(patientId, uid);
+      } catch (e) {
+        debugPrint('Open patient: read failed (${errorCode(e)})');
+      }
+    });
+  }
+
+  /// #10's [LocalDatabase.fetchPatientStrict] for [owner]: the one stored
+  /// row, or null when it is gone or deleted locally (pending delete); a
+  /// caller that saves treats null as "deleted" and refuses. Never falls
+  /// back to the in-memory copy or to a full scan. Throws
+  /// [DbReadException]: [DbReadFailure.unreadableRow] blocks only this
+  /// patient (recorded for [isPatientUnreadable]); `notOpen`, `readFailed`
+  /// and an owner mismatch are not per-patient (the DB itself is not safe)
+  /// and are thrown as they are, so every save that reads is refused.
+  Future<Patient?> _readStoredRow(String patientId, String? owner) async {
+    if (owner == null) throw const DbReadException(DbReadFailure.notOpen);
+    final Patient? row;
+    try {
+      row = await _db.fetchPatientStrict(expectedOwner: owner, patientId: patientId);
+    } on DbReadException catch (e) {
+      if (e.reason == DbReadFailure.unreadableRow) _markUnreadable(patientId, owner, true);
+      rethrow;
+    }
+    if (row != null && row.hasParseErrors) {
+      _markUnreadable(patientId, owner, true);
+      throw const DbReadException(DbReadFailure.unreadableRow);
+    }
+    _markUnreadable(patientId, owner, false);
+    return row;
+  }
+
+  /// The owner a save's one-row read must find open: the session owner,
+  /// or (no session, e.g. a provider used without `loadAndSync`) the
+  /// owner the DB is open for. Null: refused as not open.
+  String? get _rowOwner => _uid ?? _openDbUid;
+
+  void _markUnreadable(String patientId, String owner, bool unreadable) {
+    if (_rowOwner != owner) return; // a stale owner's read changes nothing
+    final changed = unreadable ? _unreadable.add(patientId) : _unreadable.remove(patientId);
+    if (changed) notifyListeners();
   }
 
   // ------------------------------------------- photos picked this session
