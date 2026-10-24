@@ -240,4 +240,114 @@ abstract final class AttachmentRefs {
     }
     return out;
   }
+
+  // --- swapAttachmentPath support (pure; shared by the helper and fakes) --
+
+  /// The uploader's visit-photo object name rule (backend
+  /// `AttachmentPolicy`): `[A-Za-z0-9_-]{1,128}` plus jpg/jpeg/png/webp.
+  static final RegExp _storageFileName =
+      RegExp(r'^[A-Za-z0-9_-]{1,128}\.(jpg|jpeg|png|webp)$');
+
+  /// True for exactly `clinical_attachments/{uid}/{patientId}/{file}`, the
+  /// layout the uploader writes (backend `AttachmentPolicy.isStoragePathFor`):
+  /// four segments, [uid] and [patientId] matched exactly, a file name the
+  /// Storage rules accept. Anything else (`..`, `.`, empty segments, another
+  /// uid or patient, `doctor_profiles/`, a scheme) is false.
+  static bool isPatientStoragePath(String path,
+      {required String uid, required String patientId}) {
+    bool okSeg(String s) =>
+        s.isNotEmpty && s != '.' && s != '..' && !s.contains('/');
+    if (!okSeg(uid) || !okSeg(patientId)) return false;
+    final parts = path.split('/');
+    return parts.length == 4 &&
+        parts[0] == 'clinical_attachments' &&
+        parts[1] == uid &&
+        parts[2] == patientId &&
+        _storageFileName.hasMatch(parts[3]);
+  }
+
+  /// Validates swapAttachmentPath's arguments and returns the visit-photo
+  /// key (`attachments/<file>`) of [localPath] in [expectedOwner]'s folder.
+  /// Throws [ArgumentError] (naming the parameter, never its value) if
+  /// [expectedOwner] or [patientId] is empty, [storagePath] is not
+  /// [isPatientStoragePath] for them, or [localPath] has no visit-photo key
+  /// for [expectedOwner].
+  static String swapKeyFor(
+      {required String expectedOwner,
+      required String patientId,
+      required String localPath,
+      required String storagePath}) {
+    if (expectedOwner.isEmpty) {
+      throw ArgumentError('must not be empty', 'expectedOwner');
+    }
+    if (patientId.isEmpty) throw ArgumentError('must not be empty', 'patientId');
+    if (!isPatientStoragePath(storagePath,
+        uid: expectedOwner, patientId: patientId)) {
+      throw ArgumentError(
+          'must be clinical_attachments/<expectedOwner>/<patientId>/<file>',
+          'storagePath');
+    }
+    final key = localPath.isEmpty || isNonLocalRef(localPath)
+        ? null
+        : attachmentKey(localPath,
+            ownerFolderName: ownerFolderNameFor(expectedOwner));
+    if (key == null || !key.startsWith('$attachmentsFolder/')) {
+      throw ArgumentError(
+          "must be a visit photo in the expected owner's attachments folder",
+          'localPath');
+    }
+    return key;
+  }
+
+  /// [historyJson] (a stored `history` value) with every attachment entry
+  /// whose own [attachmentKey] equals [key] replaced by [storagePath]; every
+  /// other entry, visit and field is kept exactly as stored (key order
+  /// included). Entries that cannot be keyed are left as they are. Returns
+  /// null when no entry matches. Throws [FormatException] (no data in the
+  /// message) if the JSON is not a list of objects whose `attachmentPaths`
+  /// is absent, null or a list of strings.
+  static String? swapInHistoryJson(String historyJson,
+      {required String key,
+      required String ownerFolderName,
+      required String storagePath}) {
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(historyJson);
+    } on FormatException {
+      throw const FormatException('history is not JSON');
+    }
+    if (decoded is! List) throw const FormatException('history is not a list');
+    var changed = false;
+    final out = <Object?>[];
+    for (final visit in decoded) {
+      if (visit is! Map) throw const FormatException('visit is not an object');
+      final paths = visit['attachmentPaths'];
+      if (paths == null) {
+        out.add(visit);
+        continue;
+      }
+      if (paths is! List) {
+        throw const FormatException('attachmentPaths is not a list');
+      }
+      var hit = false;
+      final next = <Object?>[];
+      for (final e in paths) {
+        if (e is! String) {
+          throw const FormatException('attachment entry is not a string');
+        }
+        final match = e.isNotEmpty &&
+            !isNonLocalRef(e) &&
+            attachmentKey(e, ownerFolderName: ownerFolderName) == key;
+        next.add(match ? storagePath : e);
+        hit = hit || match;
+      }
+      if (hit) {
+        changed = true;
+        out.add(Map<String, Object?>.from(visit)..['attachmentPaths'] = next);
+      } else {
+        out.add(visit);
+      }
+    }
+    return changed ? jsonEncode(out) : null;
+  }
 }

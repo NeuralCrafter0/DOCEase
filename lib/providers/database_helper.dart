@@ -12,6 +12,7 @@ import 'package:sqflite_sqlcipher/sqflite.dart' as sqlcipher;
 import 'package:sqflite_sqlcipher/sqflite.dart'
     show
         ConflictAlgorithm,
+        DatabaseExecutor,
         Database,
         DatabaseException,
         OnDatabaseCreateFn,
@@ -1253,6 +1254,87 @@ class DatabaseHelper implements LocalDatabase {
     });
   }
 
+  /// See [LocalDatabase.swapAttachmentPath]. Reads and writes the raw
+  /// stored row inside one transaction under the row write queue, so a
+  /// write queued before it is seen and one queued after it sees the swap.
+  @override
+  Future<bool> swapAttachmentPath(
+      {required String expectedOwner,
+      required String patientId,
+      required String localPath,
+      required String storagePath}) {
+    final String key;
+    try {
+      key = AttachmentRefs.swapKeyFor(
+          expectedOwner: expectedOwner,
+          patientId: patientId,
+          localPath: localPath,
+          storagePath: storagePath);
+    } on ArgumentError catch (e) {
+      return Future.error(e);
+    }
+    const notOpen = DbReadException(DbReadFailure.notOpen);
+    const unreadable = DbReadException(DbReadFailure.unreadableRow);
+    return _rowSerial(() async {
+      final Database db;
+      try {
+        db = await database;
+      } catch (_) {
+        throw notOpen;
+      }
+      if (_uid != expectedOwner) throw notOpen;
+      try {
+        return await db.transaction((txn) async {
+          // Owner check inside the transaction: nothing is written for a
+          // DB that is no longer the expected owner's.
+          if (_uid != expectedOwner || !identical(_db, db)) throw notOpen;
+          if (await _hasTombstone(txn, patientId)) return false;
+          final rows = await txn.query('patients',
+              where: 'id = ?', whereArgs: [patientId], limit: 1);
+          if (rows.isEmpty) return false;
+          final row = rows.first;
+          if (_patientFromRow(row).hasParseErrors) throw unreadable;
+          final history = row['history'];
+          if (history == null) return false; // no visits
+          if (history is! String) throw unreadable;
+          final String? next;
+          try {
+            next = AttachmentRefs.swapInHistoryJson(history,
+                key: key,
+                ownerFolderName:
+                    AttachmentRefs.ownerFolderNameFor(expectedOwner),
+                storagePath: storagePath);
+          } on FormatException {
+            throw unreadable;
+          }
+          if (next == null) return false; // the photo is gone
+          // Count a clean row before it turns dirty (never under-reports).
+          if (row['sync_state'] == SyncState.synced) {
+            await _incrementCounter(expectedOwner, txn);
+          }
+          final n = await txn.update(
+              'patients',
+              {
+                'history': next,
+                'sync_state': SyncState.dirty,
+                'updated_at': _nextVersion(),
+              },
+              where: 'id = ?',
+              whereArgs: [patientId]);
+          if (n != 1) throw const DbReadException(DbReadFailure.readFailed);
+          return true;
+        });
+      } on DbReadException {
+        rethrow;
+      } on UnsyncedCounterException {
+        rethrow;
+      } catch (e) {
+        debugPrint('SQLITE attachment swap error: ${_describe(e)}');
+        throw const DbReadException(DbReadFailure.readFailed);
+      }
+    });
+  }
+
   /// Same as [markPendingDelete] (kept for existing callers).
   @override
   Future<void> deletePatient(String id) => markPendingDelete(id);
@@ -1533,7 +1615,7 @@ class DatabaseHelper implements LocalDatabase {
   /// new value cannot be stored, the counter is deleted (reads as unknown);
   /// if even that fails, throws [UnsyncedCounterException] and the caller
   /// must not write the row.
-  Future<void> _incrementCounter(String uid, Database db) async {
+  Future<void> _incrementCounter(String uid, DatabaseExecutor db) async {
     final name = unsyncedCounterKeyFor(uid);
     try {
       final current = await _readCounter(uid);
@@ -1596,7 +1678,7 @@ class DatabaseHelper implements LocalDatabase {
   }
 
   /// Unsynced changes: dirty rows plus delete tombstones.
-  Future<int> _countDirty(Database db) async {
+  Future<int> _countDirty(DatabaseExecutor db) async {
     final r = await db.rawQuery(
         'SELECT (SELECT COUNT(*) FROM patients WHERE sync_state != ?) + '
         '(SELECT COUNT(*) FROM pending_deletes) AS c',
@@ -1604,7 +1686,7 @@ class DatabaseHelper implements LocalDatabase {
     return r.first['c'] as int;
   }
 
-  Future<bool> _hasTombstone(Database db, String id) async {
+  Future<bool> _hasTombstone(DatabaseExecutor db, String id) async {
     final r = await db.query('pending_deletes',
         columns: ['patient_id'],
         where: 'patient_id = ?',
