@@ -13,6 +13,7 @@ import 'dev/dev_build_refused.dart';
 import 'dev/dev_mode_app.dart';
 import 'services/log_codes.dart';
 import 'services/session_controller.dart';
+import 'services/photo_sweep.dart';
 import 'services/startup_hooks.dart';
 import 'utils/attachment_storage.dart';
 import 'services/current_owner.dart';
@@ -23,8 +24,10 @@ import 'security/app_lock.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Features register StartupHooks here (before the switch) so they run in
-  // dev and normal mode alike; see services/startup_hooks.dart.
+  // Features register StartupHooks here (before the start-mode checks) so
+  // they run in dev and normal mode alike; see services/startup_hooks.dart.
+  // The photo sweep waits for the first open DB and sweeps only that owner.
+  StartupHooks.register(PhotoSweep.hookName, PhotoSweep.startupHook);
 
   // #8 merge wiring (QA merge, per frontend): photo storage follows #13's
   // CurrentOwner (the Google uid, or the local owner in dev mode), and the

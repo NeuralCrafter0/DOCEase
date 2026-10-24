@@ -9,6 +9,7 @@ import 'package:uuid/uuid.dart';
 import '../config/dev_mode.dart';
 import '../models/patient.dart';
 import '../services/attachments.dart';
+import '../services/attachment_keys.dart';
 import '../services/local_photo_store.dart';
 import '../services/log_codes.dart';
 import '../services/sync_cancel_token.dart';
@@ -44,9 +45,12 @@ class PatientProvider with ChangeNotifier {
     Duration retryMaxDelay = const Duration(minutes: 5),
     bool cloudSync = true,
     LocalPhotoStore? photos,
+    AttachmentKeyFn? attachmentKey,
   })  : _db = db ?? DatabaseHelper.instance,
         _cloudSync = cloudSync,
         _photosOverride = photos,
+        // TODO(#10): #10's attachmentKey once it lands (one line).
+        _attachmentKey = attachmentKey ?? AttachmentKeys.interimAttachmentKey,
         _firestoreOverride = firestore,
         _authOverride = auth,
         _storageOverride = storage,
@@ -68,6 +72,10 @@ class PatientProvider with ChangeNotifier {
       _cloudSync && !isLocalOwner(_uid) && !isLocalOwner(_openDbUid);
   final LocalPhotoStore? _photosOverride;
   LocalPhotoStore get _photos => _photosOverride ?? LocalPhotoStore.instance;
+
+  /// Maps a stored attachment entry to its owner-relative key (#10's
+  /// `attachmentKey`); photo cleanup compares keys, never raw paths.
+  final AttachmentKeyFn _attachmentKey;
 
   /// Whether this provider syncs with Firebase (false in dev mode).
   bool get cloudSync => _cloudSync;
@@ -675,11 +683,21 @@ class PatientProvider with ChangeNotifier {
   /// and the patient never comes back on merge); the tombstone is cleared
   /// only once Firestore confirms. Throws (nothing changed) when the local
   /// delete is refused.
+  ///
+  /// Once the local delete succeeded, the patient's visit photos in the
+  /// owner's photo folder are deleted (the tombstone keeps only the id and
+  /// time, so they are no longer referenced). A refused delete removes
+  /// nothing. See [_deleteUnreferencedPhotos].
   Future<void> deletePatient(String id) async {
     final uid = _uid;
     final token = _token;
-    await _db.markPendingDelete(id); // throws: nothing changed
+    final owner = _photoOwner;
+    final removed = _byId(id);
+    await _db.markPendingDelete(id); // throws: nothing changed, no photo removed
     _forget(id);
+    if (removed != null && owner != null) {
+      await _deleteUnreferencedPhotos(owner, [for (final r in removed.history) ...r.attachmentPaths]);
+    }
     if (!_cloud) return; // dev mode: the tombstone stays; no cloud delete
     final ok = await _confirmCloudDelete(id);
     if (!ok && _live(uid, token)) _scheduleRetry(uid, token);
@@ -718,6 +736,7 @@ class PatientProvider with ChangeNotifier {
       _ensureWritable(current);
       final uid = _uid;
       final token = _token;
+      final owner = _photoOwner;
       final history = await change(current);
       if (history == null) return null;
       final latest = _byId(patientId);
@@ -736,11 +755,14 @@ class PatientProvider with ChangeNotifier {
       }
       // Saved: from here on the visit references its photos, so never
       // report "not saved" (that would discard kept photo copies).
-      if (!_live(uid, token)) return (Future<void>.value(),);
+      if (!_live(uid, token)) return (Future<void>.value(),); // the startup sweep catches its photos
       _replaceInMemory(updated);
       final fresh = _newLocalFiles(latest, updated);
       if (_cloud) _pendingUploads.addAll(fresh);
       notifyListeners();
+      // Saved: photos the change dropped (a deleted visit, or a photo
+      // removed while editing) are no longer referenced.
+      if (owner != null) await _deleteUnreferencedPhotos(owner, _droppedEntries(latest, updated));
       return (_afterLocalWrite(patientId, version),); // a record: not awaited here
     });
     _historyChain = run.then((_) {}, onError: (_) {});
@@ -775,6 +797,57 @@ class PatientProvider with ChangeNotifier {
       }
     }
     return out;
+  }
+
+  /// Attachment entries on [before] that are not on [after].
+  static List<String> _droppedEntries(Patient before, Patient after) {
+    final now = {for (final r in after.history) ...r.attachmentPaths};
+    return [
+      for (final r in before.history)
+        for (final e in r.attachmentPaths)
+          if (!now.contains(e)) e,
+    ];
+  }
+
+  /// Deletes the files of [owner]'s visit folder that [entries] (stored
+  /// attachment entries just removed from the DB) name, after the DB
+  /// change succeeded. The provider is the single owner of this cleanup
+  /// (PR #8's screen hooks become redundant).
+  ///
+  /// Fails closed: does nothing when the photo owner changed since the
+  /// change started, or when any patient in memory has parse errors (its
+  /// references may be incomplete). Entries are compared by key (#10's
+  /// `attachmentKey`): a null key (Storage path, web link, another owner's
+  /// folder, `..`) is never deleted, nor is a key still referenced by any
+  /// visit in memory or by a save in progress. Only regular files inside
+  /// the owner's `attachments/` folder are deleted
+  /// ([LocalPhotoStore.deleteOwnedVisitFile]); a missing file is ignored,
+  /// so a second delete (e.g. #8's screen hook) is harmless. Never throws.
+  /// Whatever this skips is left to the startup sweep ([PhotoSweep]).
+  Future<void> _deleteUnreferencedPhotos(String owner, Iterable<String> entries) async {
+    try {
+      final list = entries.toList();
+      if (list.isEmpty || _photoOwner != owner) return;
+      if (_patients.any((p) => p.hasParseErrors)) return;
+      final folder = LocalPhotoStore.ownerFolderName(owner);
+      final stillUsed = [
+        for (final p in _patients)
+          for (final r in p.history) ...r.attachmentPaths,
+        ..._validatedPicks,
+      ].map((e) => _attachmentKey(e, ownerFolderName: folder)).whereType<String>().toSet();
+      await _photos.init();
+      var removed = 0;
+      for (final e in list) {
+        final key = _attachmentKey(e, ownerFolderName: folder);
+        if (key == null || stillUsed.contains(key)) continue;
+        final path = _photos.visitPathForKey(owner, key);
+        if (path == null) continue;
+        if (await _photos.deleteOwnedVisitFile(path, owner: owner)) removed++;
+      }
+      if (removed > 0) debugPrint('Photos: removed $removed after a delete');
+    } catch (e) {
+      debugPrint('Photos: cleanup failed (${errorCode(e)})');
+    }
   }
 
   /// Files that passed [_validateNewAttachments] for a save in progress.
