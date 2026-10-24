@@ -20,11 +20,10 @@ class PatientLoad {
   /// Patient and visit writes are refused: hide add, edit and delete.
   static bool readOnly(PatientProvider p) => failed(p);
 
-  /// True while the current owner's first load hasn't finished (backend
-  /// G2). Until `PatientProvider.hasLoaded` lands in #16 there is no signal,
-  /// so this is false and Home's empty state stays neutral. When it lands
-  /// this becomes `!p.hasLoaded`; nothing else changes.
-  static bool loading(PatientProvider p) => false;
+  /// True while the current owner's first load hasn't settled (#16
+  /// `hasLoaded`, contract G2). A failed first load is not "loading": the
+  /// failure view shows instead.
+  static bool loading(PatientProvider p) => !p.hasLoaded && !p.loadFailed;
 
   /// Retries the load.
   static Future<void> reload(PatientProvider p) => p.reload();

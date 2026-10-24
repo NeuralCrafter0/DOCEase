@@ -36,9 +36,12 @@ final _patients = [
 ];
 
 class _Patients extends PatientProvider {
-  _Patients(this._list, {this.failed = false, this.query = ''});
+  _Patients(this._list, {this.failed = false, this.query = '', this.loaded = true});
   final List<Patient> _list;
   final bool failed;
+  final bool loaded;
+  @override
+  bool get hasLoaded => loaded;
   final String query;
   @override
   bool get loadFailed => failed;
@@ -104,6 +107,7 @@ void main() {
     await _shot(t, 'home_list', p: _Patients(_patients), doctor: _doc);
     await _shot(t, 'home_list_dark', p: _Patients(_patients), doctor: _doc, dark: true);
     await _shot(t, 'home_empty', p: _Patients(const []), doctor: _doc);
+    await _shot(t, 'home_loading', p: _Patients(const [], loaded: false), doctor: _doc);
     await _shot(t, 'home_failed', p: _Patients(const [], failed: true), doctor: null);
     await _shot(t, 'home_stale', p: _Patients(_patients, failed: true), doctor: _doc);
     await _shot(t, 'home_nomatch', p: _Patients(_patients, query: 'zz'), doctor: _doc, act: (t) async {
