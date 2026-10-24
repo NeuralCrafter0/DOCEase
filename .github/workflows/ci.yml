@@ -341,46 +341,13 @@ jobs:
         run: |
           set -euo pipefail
           apk="$APK"
-          test -f "$apk"
-          # Newest stable build-tools (skip -rc). apksigner output differs by version
-          # ("Signer #1 certificate DN:" in 36, "V2 Signer: certificate DN:" in 37),
-          # so match on the field name only.
-          bt="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | grep -vE -- '-rc[0-9]*$' | sort -V | tail -1)"
-          certs="$("$bt/apksigner" verify --print-certs "$apk")"
-          dns="$(printf '%s\n' "$certs" | sed -n 's/^.*certificate DN: //p' | sort -u)"
-          shas="$(printf '%s\n' "$certs" | sed -n 's/^.*certificate SHA-256 digest: //p' | sort -u)"
-          # Fail closed: exactly one readable signer certificate is required.
-          if [ -z "$dns" ] || [ -z "$shas" ] || [ "$(printf '%s\n' "$shas" | wc -l)" -ne 1 ]; then
-            echo "::error title=Signature check::Could not read exactly one signer certificate from $apk with $(basename "$bt") apksigner."
-            exit 1
-          fi
-          cert_dn="$(printf '%s\n' "$dns" | head -1)"
-          cert_sha256="$shas"
-          # Public certificate details only (no secrets).
-          echo "APK signer (apksigner $(basename "$bt")): $cert_dn, SHA-256 $cert_sha256"
-          # Package ID: production builds must be exactly APP_ID; dev-flavor builds APP_ID.dev.
-          pkg="$("$bt/aapt2" dump packagename "$apk")"
-          echo "APK package: $pkg (flavor ${FLAVOR:-none})"
-          if [ "$DEV_MODE" = "false" ] && [ "$pkg" != "$APP_ID" ]; then
-            echo "::error title=Release guard::Production build has package '$pkg', expected '$APP_ID'."
-            exit 1
-          fi
-          if [ "$FLAVOR" = "dev" ] && [ "$pkg" != "$APP_ID.dev" ]; then
-            echo "::error title=Release guard::Dev-flavor build has package '$pkg', expected '$APP_ID.dev'."
-            exit 1
-          fi
-          debug_cert=false
-          if printf '%s' "$cert_dn" | grep -q 'CN=Android Debug'; then debug_cert=true; fi
-          # Never label a debug-key APK as release-signed.
-          if [ "$SIGNED" = "true" ] && [ "$debug_cert" = "true" ]; then
-            echo "::error title=Release signing failed::Signing secrets were provided but the APK is signed with the debug key."
-            exit 1
-          fi
-          # Third guard: a non-debug (release) certificate on a dev-mode build is never allowed.
-          if [ "$debug_cert" = "false" ] && [ "$DEV_MODE" != "false" ]; then
-            echo "::error title=Release guard::The APK carries a release certificate but was built with DOCEASE_DEV_MODE=$DEV_MODE."
-            exit 1
-          fi
+          # Shared with the split-per-ABI job: one signer certificate, package
+          # ID, debug-key vs release-signed, no release certificate in dev mode.
+          bash tool/ci/verify_apk_signature.sh "$apk" "$RUNNER_TEMP/apk-sig.txt"
+          cert_dn="$(sed -n 's/^cert_dn=//p' "$RUNNER_TEMP/apk-sig.txt")"
+          cert_sha256="$(sed -n 's/^cert_sha256=//p' "$RUNNER_TEMP/apk-sig.txt")"
+          pkg="$(sed -n 's/^pkg=//p' "$RUNNER_TEMP/apk-sig.txt")"
+          apk_sha256="$(sed -n 's/^apk_sha256=//p' "$RUNNER_TEMP/apk-sig.txt")"
           {
             echo "## Android build"
             echo ""
@@ -408,6 +375,7 @@ jobs:
             echo "| Signer cert | ${cert_dn} |"
             echo "| Signer cert SHA-256 | \`${cert_sha256}\` |"
             echo "| APK size | $(du -h "$apk" | cut -f1) |"
+            echo "| APK SHA-256 | \`${apk_sha256}\` |"
             if [ "$IS_RELEASE_TAG" = "true" ]; then
               echo "| Debug symbols | Uploaded as a separate artifact (release tag) |"
             else
@@ -597,6 +565,7 @@ jobs:
       contents: read
     env:
       UNIVERSAL_RELEASE_BASELINE_KIB: "35951" # universal arm64 release APK, PR #21 run 40068366351
+      APP_ID: com.medhistory.app.medhistory
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -631,7 +600,33 @@ jobs:
             --dart-define=DOCEASE_DEV_MODE=false
           mv "$out"/app-*release.apk build/split-measure/release/
           ls -l build/split-measure/dev build/split-measure/release
+      - name: Verify signature and dev mode (arm64-v8a APKs)
+        # Same checks as the Android build job (tool/ci/verify_apk_signature.sh),
+        # plus the release dev-marker scan (QA REL-07) on the release split.
+        # Never release-signed here (no secrets): SIGNED=false.
+        run: |
+          set -euo pipefail
+          flavor_dev=""; flavor_rel=""
+          if grep -qE '^[[:space:]]*productFlavors[[:space:]]*\{' android/app/build.gradle.kts 2>/dev/null; then
+            flavor_dev=dev; flavor_rel=prod
+          fi
+          status=0
+          for kind in dev release; do
+            apk="$(find build/split-measure/$kind -name 'app-arm64-v8a*.apk' | head -1)"
+            if [ -z "$apk" ]; then echo "::error::no arm64-v8a APK from the $kind split build"; status=1; continue; fi
+            if [ "$kind" = dev ]; then dm=true; fl="$flavor_dev"; else dm=false; fl="$flavor_rel"; fi
+            DEV_MODE="$dm" SIGNED=false FLAVOR="$fl" \
+              bash tool/ci/verify_apk_signature.sh "$apk" "build/split-measure/$kind.sig" || status=1
+          done
+          rel="$(find build/split-measure/release -name 'app-arm64-v8a*.apk' | head -1)"
+          if [ -n "$rel" ] && bash tool/ci/check_release_markers.sh "$rel"; then
+            echo clean > build/split-measure/release.markers
+          else
+            echo FAILED > build/split-measure/release.markers; status=1
+          fi
+          exit "$status"
       - name: Measure the arm64-v8a APKs
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           bt="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | grep -vE -- '-rc[0-9]*$' | sort -V | tail -1)"
@@ -663,15 +658,26 @@ jobs:
                   bad.append(f"{kind}: arm64-v8a libsqlcipher.so is missing")
               others = {os.path.basename(a): round(os.path.getsize(a) / 1024, 1)
                         for a in glob.glob(f"build/split-measure/{kind}/*.apk") if "arm64-v8a" not in a}
+              sig = {}
+              if os.path.exists(f"build/split-measure/{kind}.sig"):
+                  sig = dict(l.rstrip("\n").split("=", 1) for l in open(f"build/split-measure/{kind}.sig") if "=" in l)
+              else:
+                  bad.append(f"{kind}: signature / dev-mode check did not pass")
               rows.append((kind, r["apk"], r["total_kib"], r["version_code"],
-                           sqlc[0]["kib"] if sqlc else 0, others))
+                           sqlc[0]["kib"] if sqlc else 0, others, sig))
           out = ["### Split-per-ABI vs universal APK", "",
                  f"Universal arm64 release APK (today): **{base:.0f} KiB**", "",
                  "| Build | arm64-v8a APK | KiB | vs universal | versionCode | arm64 libsqlcipher.so KiB |",
                  "|---|---|---:|---:|---:|---:|"]
-          for kind, apk, kib, vc, s, _ in rows:
+          for kind, apk, kib, vc, s, _, _ in rows:
               out.append(f"| {kind} | `{apk}` | {kib:.0f} | {kib - base:+.0f} ({(kib - base) / base * 100:+.1f}%) | {vc} | {s:.0f} |")
-          for kind, *_, others in rows:
+          markers = open("build/split-measure/release.markers").read().strip() if os.path.exists("build/split-measure/release.markers") else "not run"
+          out += ["", "| Build | File | SHA-256 | Package | Signer | DOCEASE_DEV_MODE | Dev-marker scan |", "|---|---|---|---|---|---|---|"]
+          for kind, apk, *_, sig in rows:
+              signer = ("debug key (not release-signed)" if sig.get("debug_cert") == "true" else sig.get("cert_dn", "?")) if sig else "check failed"
+              out.append(f"| {kind} | `{apk}` | `{sig.get('apk_sha256', '?')}` | `{sig.get('pkg', '?')}` | {signer} | "
+                         f"{'true' if kind == 'dev' else 'false'} | {'n/a (DEV contains it on purpose)' if kind == 'dev' else markers} |")
+          for kind, *_, others, _ in rows:
               out.append("")
               out.append(f"Other {kind} split APKs (not handed out): " + ", ".join(f"`{k}` {v:.0f} KiB" for k, v in sorted(others.items())))
           out.append("")
