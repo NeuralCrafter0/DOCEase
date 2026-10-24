@@ -78,15 +78,23 @@ name the flavor (`--flavor prod` or `--flavor dev`).
   - At startup (`StartupHooks`, both start modes) a sweep waits for the first open DB and deletes
     files in that owner's `attachments/<owner folder>/` that no row references any more (e.g.
     after a crash between the DB delete and the file delete). Rules: it skips everything unless
-    the full reference list is available (`referencedAttachmentKeys()`, which throws when no DB
-    is open, a row fails to parse or a local path can't be keyed); unsynced rows count as
-    referenced; only regular files directly in that folder, never symlinks, directories,
-    `profile/` or another owner's folder; files changed in the last 10 minutes are kept; logs
-    carry counts only.
-  - Both compare owner-relative keys (`attachments/<file>`), never raw paths, so
-    `/data/user/0/...` and `/data/data/...` name the same photo. Keys come from #10's
-    `attachmentKey` / `referencedAttachmentKeys()`; until #10 lands, `services/attachment_keys.dart`
-    has stand-ins with the same contract. Tests: `test/backend/photo_cleanup_test.dart`.
+    #10's `referencedAttachmentKeys()` returns the full set; it throws `AttachmentScanIncomplete`
+    otherwise, and only the reason's name is logged (`noDatabase`, `openFailed`, `unreadableRow`,
+    `unreadableAttachmentList`, `unreadableDoctorProfile`, `unrecognisedPath`, `readFailed`).
+    Unsynced rows count as referenced; only regular files directly in that folder, never
+    symlinks, directories, `profile/` or another owner's folder; files changed in the last 10
+    minutes are kept; logs carry counts only. It runs once per start, so a skip is logged once.
+  - Both compare #10's owner-relative keys (`AttachmentRefs.attachmentKey`: `attachments/<file>`
+    or `profile/<file>`), never raw paths, so `/data/user/0/...` and `/data/data/...` name the
+    same photo; the sweep only looks at `attachments/` keys. The owner folder is #10's
+    `ownerFolderNameFor` (sha256 hex, first 32; `local` is `25bf8e1a2393f1108d37029b3df55932`).
+  - The scan also counts the doctor's photo (`doctor_profile` setting, the same key
+    `DoctorProvider` writes). A new avatar is saved in the setting before the old file is deleted,
+    so the two never disagree; the sweep never touches `profile/`.
+  - Known limitation: a visit that still holds an old image_picker cache path makes the scan fail
+    with `unrecognisedPath`, so that phone is never swept (safe; clinical records are not
+    migrated). Deletes through the provider still work there. A leftover avatar after a crash is
+    not swept either. Tests: `test/backend/photo_cleanup_test.dart`.
 - iOS: each owner photo folder is excluded from iCloud and computer backups when it is first used
   in a run, through #10's `PlatformBackupExcluder` (the existing `docease/backup_exclusion`
   channel in `ios/Runner/AppDelegate.swift`, which also covers the encrypted DB; no new native
