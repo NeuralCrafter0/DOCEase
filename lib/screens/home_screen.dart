@@ -9,6 +9,7 @@ import 'add_patient_screen.dart';
 import 'patient_detail_screen.dart';
 import 'doctor_profile_screen.dart';
 import 'insights_screen.dart';
+import '../widgets/stat_card.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -115,20 +116,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildDailyCard(String label, String value, IconData icon, Color color) {
-    return Expanded(
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24), border: Border.all(color: const Color(0xFFE2E8F0))),
-        child: Row(children: [
-          Icon(icon, color: color, size: 18),
-          const SizedBox(width: 12),
-          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(value, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: Color(0xFF1E293B))),
-            Text(label, style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Colors.grey.shade500)),
-          ]),
-        ]),
-      ),
-    );
+    return Expanded(child: StatCard(label: label, value: value, icon: icon, color: color));
   }
 
   Widget _buildProfessionalSearchBar(BuildContext context) {
