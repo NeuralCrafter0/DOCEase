@@ -161,14 +161,29 @@ class LocalPhotoStore {
     return dir == null ? null : p.join(dir, name);
   }
 
-  /// Strict delete for photo cleanup (security #8 review). Deletes [path]
-  /// only when all hold:
-  /// - it is lexically inside [owner]'s visit folder
-  ///   (`attachments/<ownerHash>/`, never `profile/`);
-  /// - it is a regular file, checked with `followLinks: false`, so
-  ///   symlinks and directories are never deleted or followed;
-  /// - its resolved path is still inside that folder (a symlinked
-  ///   `attachments/` or owner folder cannot redirect the delete).
+  /// Visit photo names the app itself writes (this store and PR #8's
+  /// picker): `<uuid v4>.<ext>`, lower-case, with an [UploadImageType]
+  /// extension. Cleanup leaves every other name alone (security #16 Low-3:
+  /// rules out foreign files and Unicode or case aliases).
+  static final RegExp _appVisitName = RegExp(
+      '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+      '\\.(${UploadImageType.values.map((t) => t.fileExtension).join('|')})\$');
+
+  /// Whether [name] (a bare file name) is one the app generates for visit photos.
+  static bool isAppVisitFileName(String name) => _appVisitName.hasMatch(name);
+
+  /// Strict delete for photo cleanup (security #8 and #16 reviews). Deletes
+  /// the directory entry [path] only when all hold:
+  /// - it is directly in [owner]'s visit folder (`attachments/<ownerHash>/`,
+  ///   never a sub-folder or `profile/`);
+  /// - its name is one the app generates ([isAppVisitFileName]);
+  /// - the folder itself resolves to itself (a symlinked `attachments/` or
+  ///   owner folder cannot redirect the delete);
+  /// - right before the delete, the entry is a regular file, checked with
+  ///   `followLinks: false`, so symlinks and directories are skipped.
+  /// The delete target is always the entry's own path, never a resolved
+  /// one: if the entry is swapped for a symlink at the last moment, the
+  /// worst case is unlinking that link, never the photo it points to.
   /// A missing file returns false, so deleting twice is harmless. Never
   /// throws.
   Future<bool> deleteOwnedVisitFile(String path, {required String owner}) async {
@@ -176,12 +191,13 @@ class LocalPhotoStore {
       await init();
       final dir = visitFolderFor(owner);
       if (dir == null || !p.isAbsolute(path)) return false;
-      final n = p.normalize(path);
-      if (!p.isWithin(dir, n)) return false;
-      if (await FileSystemEntity.type(n, followLinks: false) != FileSystemEntityType.file) return false;
-      final real = p.normalize(await File(n).resolveSymbolicLinks());
-      if (!p.isWithin(dir, real)) return false;
-      await File(real).delete();
+      final entry = p.normalize(path);
+      if (p.dirname(entry) != dir) return false;
+      if (!isAppVisitFileName(p.basename(entry))) return false;
+      if (FileSystemEntity.typeSync(dir, followLinks: false) != FileSystemEntityType.directory) return false;
+      if (p.normalize(await Directory(dir).resolveSymbolicLinks()) != dir) return false;
+      if (FileSystemEntity.typeSync(entry, followLinks: false) != FileSystemEntityType.file) return false;
+      await File(entry).delete(); // unlinks the entry itself
       return true;
     } catch (_) {
       return false;

@@ -2,7 +2,10 @@
 // Runs in both suite modes: everything here injects cloudSync: false and the
 // dev owner explicitly; nothing depends on the define.
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+
+import 'package:crypto/crypto.dart';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:docease/config/dev_mode.dart';
@@ -56,10 +59,17 @@ class _ScanDb extends FakeLocalDatabase {
   @override
   Stream<DbOpenState> get states => emit == null ? super.states : Stream.fromIterable(emit!);
 
+  /// Security #16 main finding: fetchPatients() returns [] on a read error
+  /// while the DB still reports open.
+  bool fetchReturnsEmpty = false;
+  /// Replaces the scan result (the DB holds references memory does not).
+  Set<String>? keysOverride;
+  @override
+  Future<List<Patient>> fetchPatients() async => fetchReturnsEmpty ? [] : super.fetchPatients();
   @override
   Future<Set<String>> referencedAttachmentKeys() async {
     if (failWith != null) throw failWith!;
-    return super.referencedAttachmentKeys();
+    return keysOverride ?? super.referencedAttachmentKeys();
   }
 }
 
@@ -92,6 +102,14 @@ Patient patient(String id, List<VisitRecord> history, {List<String> parseErrors 
     id: id, name: 'Test $id', age: '30', gender: 'Female', phone: '+9100000',
     history: history, parseErrors: parseErrors);
 
+/// The app-generated file name (`<uuid v4>.<ext>`, see
+/// LocalPhotoStore.isAppVisitFileName) standing for [label], e.g. 'a.jpg'.
+String n(String label) {
+  final h = sha256.convert(utf8.encode(label)).toString();
+  final ext = label.substring(label.lastIndexOf('.') + 1);
+  return '${h.substring(0, 8)}-${h.substring(8, 12)}-4${h.substring(13, 16)}-a${h.substring(17, 20)}-${h.substring(20, 32)}.$ext';
+}
+
 /// "Old enough" clock: one hour ahead, so files created now are past grace.
 DateTime later() => DateTime.now().add(const Duration(hours: 1));
 
@@ -106,7 +124,7 @@ void main() {
     return (File(p.join(dir, name))..writeAsBytesSync([0xFF, 0xD8, 1, 2, 0xFF, 0xD9])).path;
   }
 
-  String visitPhoto(String owner, String name) => photoIn(photos.visitFolderFor(owner), name);
+  String visitPhoto(String owner, String name) => photoIn(photos.visitFolderFor(owner), n(name));
 
   PatientProvider devPatients() => PatientProvider(
       db: db, cloudSync: false, photos: photos,
@@ -152,10 +170,10 @@ void main() {
     test('a walked file and its stored path give the same key; stored paths are LocalPhotoStore\'s', () async {
       final folder = LocalPhotoStore.ownerFolderName(kLocalOwnerId);
       final a = visitPhoto(kLocalOwnerId, 'a.jpg');
-      expect(a, p.join(photos.supportPath!, 'attachments', folder, 'a.jpg'));
-      expect(AttachmentRefs.attachmentKey(a, ownerFolderName: folder), 'attachments/a.jpg');
+      expect(a, p.join(photos.supportPath!, 'attachments', folder, n('a.jpg')));
+      expect(AttachmentRefs.attachmentKey(a, ownerFolderName: folder), 'attachments/${n('a.jpg')}');
       db.rows['p1'] = patient('p1', [visit('v1', [a, 'https://example.com/x.jpg', 'clinical_attachments/u/p1/y.jpg', ''])]);
-      expect(await db.referencedAttachmentKeys(), {'attachments/a.jpg'});
+      expect(await db.referencedAttachmentKeys(), {'attachments/${n('a.jpg')}'});
     });
 
     test('no stand-ins and no hand-built keys are left', () {
@@ -167,7 +185,12 @@ void main() {
       expect(sweep, isNot(contains('TODO(#10)')));
       final provider = File('lib/providers/patient_provider.dart').readAsStringSync();
       expect(provider, isNot(contains('TODO(#10)')));
-      expect(RegExp(r'AttachmentRefs\.attachmentKey\(').allMatches(provider).length, greaterThanOrEqualTo(2));
+      expect(provider, contains('AttachmentRefs.attachmentKey('));
+      // Security #16: "still used" = fail-closed keys of memory + a fresh scan.
+      expect(provider, contains('final stillUsed = AttachmentRefs.referencedKeys(['));
+      expect(provider, contains('stillUsed.addAll(await _db.referencedAttachmentKeys());'));
+      expect(provider, isNot(contains('.whereType<String>().toSet()')));
+      expect(sweep, isNot(contains('fetchPatients')));
     });
   });
 
@@ -198,7 +221,7 @@ void main() {
       await db.markPendingDelete('p1');
 
       expect(db.tombstones, contains('p1'));
-      expect(await db.referencedAttachmentKeys(), {'attachments/c.jpg'});
+      expect(await db.referencedAttachmentKeys(), {'attachments/${n('c.jpg')}'});
       final r = await sweepFor().sweep(kLocalOwnerId);
       expect(r.removed, 1);
       expect(File(a).existsSync(), isFalse);
@@ -217,7 +240,7 @@ void main() {
       expect(provider.patients.map((x) => x.id), contains('p1'));
       expect(File(a).existsSync(), isTrue);
       expect(File(b).existsSync(), isTrue);
-      expect(await db.referencedAttachmentKeys(), {'attachments/a.jpg', 'attachments/b.jpg'});
+      expect(await db.referencedAttachmentKeys(), {'attachments/${n('a.jpg')}', 'attachments/${n('b.jpg')}'});
       final r = await sweepFor().sweep(kLocalOwnerId);
       expect(r.removed, 0);
       expect(File(a).existsSync() && File(b).existsSync(), isTrue);
@@ -293,7 +316,7 @@ void main() {
 
     test('a symlink entry is never followed or deleted', () async {
       final outside = (File(p.join(root.path, 'outside.jpg'))..writeAsBytesSync([1])).path;
-      final link = Link(p.join(photos.visitFolderFor(kLocalOwnerId)!, 'link.jpg'));
+      final link = Link(p.join(photos.visitFolderFor(kLocalOwnerId)!, n('link.jpg')));
       Directory(p.dirname(link.path)).createSync(recursive: true);
       link.createSync(outside);
       db.rows['p1'] = patient('p1', [visit('v1', [link.path])]);
@@ -428,9 +451,9 @@ void main() {
         final target = visitPhoto(kLocalOwnerId, 'target.jpg');
         db.rows['p1'] = patient('p1', [visit('v1', [target])]); // referenced
         final outside = (File(p.join(root.path, 'outside.jpg'))..writeAsBytesSync([1])).path;
-        final linkOut = Link(p.join(dir, 'out.jpg'))..createSync(outside);
-        final linkIn = Link(p.join(dir, 'in.jpg'))..createSync(target);
-        final sub = Directory(p.join(dir, 'sub.jpg'))..createSync();
+        final linkOut = Link(p.join(dir, n('out.jpg')))..createSync(outside);
+        final linkIn = Link(p.join(dir, n('in.jpg')))..createSync(target);
+        final sub = Directory(p.join(dir, n('sub.jpg')))..createSync();
         final nested = photoIn(p.join(dir, 'nested'), 'deep.jpg');
 
         final r = await sweepFor().sweep(kLocalOwnerId);
@@ -445,7 +468,7 @@ void main() {
 
       test('a symlinked owner folder is not listed through', () async {
         final elsewhere = Directory(p.join(root.path, 'elsewhere'))..createSync();
-        final victim = photoIn(elsewhere.path, 'victim.jpg');
+        final victim = photoIn(elsewhere.path, n('victim.jpg'));
         final dir = photos.visitFolderFor(kLocalOwnerId)!;
         Directory(p.dirname(dir)).createSync(recursive: true);
         Link(dir).createSync(elsewhere.path);
@@ -454,7 +477,7 @@ void main() {
 
         expect(r.ran, isFalse);
         expect(File(victim).existsSync(), isTrue);
-        expect(await photos.deleteOwnedVisitFile(p.join(dir, 'victim.jpg'), owner: kLocalOwnerId), isFalse,
+        expect(await photos.deleteOwnedVisitFile(p.join(dir, n('victim.jpg')), owner: kLocalOwnerId), isFalse,
             reason: 'resolved path is outside the owner folder');
         expect(File(victim).existsSync(), isTrue);
       });
@@ -470,7 +493,7 @@ void main() {
 
       test('other owners\' folders and the attachments root are untouched', () async {
         final theirs = visitPhoto(doctorB, 'orphan.jpg');
-        final loose = photoIn(p.join(photos.supportPath!, 'attachments'), 'loose.jpg');
+        final loose = photoIn(p.join(photos.supportPath!, 'attachments'), n('loose.jpg'));
         final mine = visitPhoto(kLocalOwnerId, 'orphan.jpg');
 
         await sweepFor().sweep(kLocalOwnerId);
@@ -599,7 +622,7 @@ void main() {
       final folder = LocalPhotoStore.ownerFolderName(kLocalOwnerId);
       final inUse = visitPhoto(kLocalOwnerId, 'in-use.jpg');
       final orphan = visitPhoto(kLocalOwnerId, 'orphan.jpg');
-      final storedViaLink = p.join(viaLink, 'attachments', folder, 'in-use.jpg');
+      final storedViaLink = p.join(viaLink, 'attachments', folder, n('in-use.jpg'));
       expect(storedViaLink, isNot(inUse), reason: 'raw paths differ');
       db.rows['p1'] = patient('p1', [visit('v1', [storedViaLink]), visit('v2', ['file://$storedViaLink'])]);
 
@@ -616,6 +639,152 @@ void main() {
       expect(File(inUse).existsSync(), isTrue, reason: 'v2 still references it');
       await provider.deleteRecord('p1', 'v2');
       expect(File(inUse).existsSync(), isFalse);
+    });
+  });
+
+  group('security #16 review', () {
+    String key(String path) =>
+        AttachmentRefs.attachmentKey(path, ownerFolderName: LocalPhotoStore.ownerFolderName(kLocalOwnerId))!;
+
+    group('main finding: "referenced" never comes from a read that can return empty', () {
+      test('sweep: fetchPatients() is [] and referencedAttachmentKeys() throws: photo kept', () async {
+        final inUse = visitPhoto(kLocalOwnerId, 'in-use.jpg');
+        db.rows['p1'] = patient('p1', [visit('v1', [inUse])]);
+        db.fetchReturnsEmpty = true;
+        for (final failure in <Object>[
+          const AttachmentScanIncomplete(AttachmentScanFailure.readFailed),
+          StateError('database handle closed'),
+        ]) {
+          db.failWith = failure;
+          final r = await sweepFor().sweep(kLocalOwnerId);
+          expect(r.ran, isFalse);
+          expect(File(inUse).existsSync(), isTrue);
+        }
+      });
+
+      test('sweep: fetchPatients() is [] but referencedAttachmentKeys() returns the key: photo kept', () async {
+        final inUse = visitPhoto(kLocalOwnerId, 'in-use.jpg');
+        db.rows['p1'] = patient('p1', [visit('v1', [inUse])]);
+        db.fetchReturnsEmpty = true;
+        final r = await sweepFor().sweep(kLocalOwnerId);
+        expect(r.ran, isTrue);
+        expect((r.removed, r.referenced), (0, 1));
+        expect(File(inUse).existsSync(), isTrue);
+      });
+
+      test('provider: a fresh scan that throws after the delete aborts the cleanup', () async {
+        final a = visitPhoto(kLocalOwnerId, 'a.jpg');
+        db.rows['p1'] = patient('p1', [visit('v1', [a]), visit('v2', const [])]);
+        final provider = await loaded();
+        db.fetchReturnsEmpty = true;
+        db.failWith = const AttachmentScanIncomplete(AttachmentScanFailure.readFailed);
+        final logs = <String>[];
+        await captureLogs(logs, () => provider.deleteRecord('p1', 'v1'));
+        expect(db.rows['p1']!.history.map((r) => r.id), ['v2'], reason: 'the DB delete itself succeeded');
+        expect(File(a).existsSync(), isTrue);
+        expect(logs.where((l) => l.startsWith('Photos:')), ['Photos: cleanup skipped (readFailed)']);
+        provider.dispose();
+      });
+
+      test('provider: the DB still references the file (not in memory): kept', () async {
+        final a = visitPhoto(kLocalOwnerId, 'a.jpg');
+        db.rows['p1'] = patient('p1', [visit('v1', [a])]);
+        final provider = await loaded();
+        db.keysOverride = {key(a)}; // e.g. a row memory never loaded
+        await provider.deleteRecord('p1', 'v1');
+        expect(db.rows['p1']!.history, isEmpty);
+        expect(File(a).existsSync(), isTrue);
+        provider.dispose();
+      });
+    });
+
+    test('Low-2: a still-used entry that cannot be keyed aborts the provider cleanup', () async {
+      final a = visitPhoto(kLocalOwnerId, 'a.jpg');
+      final legacy = photoIn(p.join(root.path, 'cache'), 'image_picker_77.jpg');
+      db.rows['p1'] = patient('p1', [visit('v1', [a]), visit('v2', [legacy])]);
+      final provider = await loaded();
+      db.keysOverride = {}; // isolate the memory side: the scan alone would allow it
+      final logs = <String>[];
+      await captureLogs(logs, () => provider.deleteRecord('p1', 'v1'));
+      expect(File(a).existsSync(), isTrue);
+      expect(File(legacy).existsSync(), isTrue);
+      expect(logs.where((l) => l.startsWith('Photos:')), ['Photos: cleanup skipped (unrecognisedPath)']);
+      provider.dispose();
+    });
+
+    test('Low-3: only app-generated <uuid>.<ext> names are ever deleted', () async {
+      final dir = photos.visitFolderFor(kLocalOwnerId)!;
+      final uuid = n('x.jpg').split('.').first;
+      final foreign = [
+        'orphan.jpg', 'IMG_0001.JPG', '${uuid.toUpperCase()}.jpg', '$uuid.JPG', '$uuid.heic',
+        '$uuid.jpeg', '$uuid.jpg.bak', '.$uuid.jpg', '$uuid.jpg ', 'x$uuid.jpg',
+      ].map((name) => photoIn(dir, name)).toList();
+      final mine = [for (final ext in ['jpg', 'png', 'webp']) photoIn(dir, n('m.$ext'))];
+      expect(mine.map((f) => LocalPhotoStore.isAppVisitFileName(p.basename(f))), everyElement(isTrue));
+
+      final r = await sweepFor().sweep(kLocalOwnerId);
+      expect((r.removed, r.other), (3, foreign.length));
+      for (final f in foreign) {
+        expect(File(f).existsSync(), isTrue, reason: p.basename(f));
+        expect(await photos.deleteOwnedVisitFile(f, owner: kLocalOwnerId), isFalse);
+      }
+      expect(mine.where((f) => File(f).existsSync()), isEmpty);
+    });
+
+    group('Low-1: the entry itself is deleted, never a resolved target', () {
+      test('a symlink entry pointing at an in-use photo leaves the target intact', () async {
+        final dir = photos.visitFolderFor(kLocalOwnerId)!;
+        final inUse = visitPhoto(kLocalOwnerId, 'in-use.jpg');
+        db.rows['p1'] = patient('p1', [visit('v1', [inUse])]);
+        final link = Link(p.join(dir, n('swapped.jpg')))..createSync(inUse); // unreferenced, app name
+
+        final r = await sweepFor().sweep(kLocalOwnerId);
+        expect(r.removed, 0);
+        expect(await photos.deleteOwnedVisitFile(link.path, owner: kLocalOwnerId), isFalse);
+        expect(FileSystemEntity.typeSync(link.path, followLinks: false), FileSystemEntityType.link);
+        expect(File(inUse).readAsBytesSync(), isNotEmpty);
+      });
+
+      test('worst case of a last-moment swap: deleting the entry path unlinks the link only', () async {
+        // deleteOwnedVisitFile ends in File(entry).delete(); if the entry
+        // became a link after the type check, this is what that call does.
+        final inUse = visitPhoto(kLocalOwnerId, 'in-use.jpg');
+        final link = Link(p.join(photos.visitFolderFor(kLocalOwnerId)!, n('swapped.jpg')))..createSync(inUse);
+        await File(link.path).delete();
+        expect(FileSystemEntity.typeSync(link.path, followLinks: false), FileSystemEntityType.notFound);
+        expect(File(inUse).existsSync(), isTrue);
+      });
+
+      test('sub-folders and a symlinked owner folder are refused', () async {
+        final dir = photos.visitFolderFor(kLocalOwnerId)!;
+        final nested = photoIn(p.join(dir, 'sub'), n('deep.jpg'));
+        expect(await photos.deleteOwnedVisitFile(nested, owner: kLocalOwnerId), isFalse);
+        expect(File(nested).existsSync(), isTrue);
+
+        final real = Directory(p.join(root.path, 'elsewhere'))..createSync();
+        final victim = photoIn(real.path, n('victim.jpg'));
+        Directory(dir).deleteSync(recursive: true);
+        Link(dir).createSync(real.path);
+        expect(await photos.deleteOwnedVisitFile(p.join(dir, n('victim.jpg')), owner: kLocalOwnerId), isFalse);
+        expect(File(victim).existsSync(), isTrue);
+      });
+
+      test('source pin: no resolved path is ever a delete target', () {
+        final s = File('lib/services/local_photo_store.dart').readAsStringSync();
+        final body = s.substring(s.indexOf('Future<bool> deleteOwnedVisitFile('), s.indexOf('Future<bool> _realPathWithin('));
+        expect(body, contains('await File(entry).delete();'));
+        expect(body, contains('FileSystemEntity.typeSync(entry, followLinks: false) != FileSystemEntityType.file'));
+        expect(body.indexOf('typeSync(entry, followLinks: false)'), lessThan(body.indexOf('await File(entry).delete();')));
+        expect(body, contains('p.dirname(entry) != dir'));
+        expect(body, isNot(contains('File(entry).resolveSymbolicLinks()')));
+        expect(RegExp(r'\.delete\(').allMatches(body).length, 1);
+      });
+    });
+
+    test('F8-R1 review: confirmed uploads must be in the signed-in owner\'s Storage folder', () {
+      final s = File('lib/providers/patient_provider.dart').readAsStringSync();
+      expect(s, contains("final folder = '\${AttachmentPolicy.attachmentFolder(uid, saved.id)}/';"));
+      expect(s, contains('if (storagePath.startsWith(folder) && entries.contains(storagePath) && !entries.contains(local)) local,'));
     });
   });
 }
