@@ -42,6 +42,8 @@ dependencies:
   path: ^1.9.1
   firebase_auth: ^6.2.0
   image_picker: ^1.2.1
+  image_picker_android: ^0.8.13+14
+  image_picker_platform_interface: ^2.11.1
   pdf: ^3.11.3
   printing: ^5.14.2
   path_provider: ^2.1.5
@@ -52,6 +54,7 @@ dependencies:
   local_auth: ^3.0.1
   sqflite_sqlcipher: ^3.4.0
   flutter_secure_storage: ^10.0.0
+  crypto: 3.0.7
   intl_phone_field: ^3.2.0
   fl_chart: ^1.1.1
   flutter_typeahead: ^5.2.0
