@@ -1,6 +1,7 @@
 // Regression tests for the patient search (QA feature pass F-SRCH-02,
 // F-SRCH-04): phone numbers typed with spaces or +91, and family members
-// hidden by an active search.
+// hidden by an active search. Plus the security review's Family Network
+// finding (#11, Low): patients without a phone must not form one family.
 // ignore_for_file: depend_on_referenced_packages
 import 'package:docease/models/patient.dart';
 import 'package:docease/providers/doctor_provider.dart';
@@ -59,6 +60,66 @@ void main() {
       expect(phoneMatchesQuery(stored, '+'), isFalse);
       expect(phoneMatchesQuery(stored, 'ravi 98'), isFalse);
     });
+  });
+
+  group('samePhone (Family Network)', () {
+    test('same number written differently is one family', () {
+      expect(samePhone('+919811111111', '9811111111'), isTrue);
+      expect(samePhone('+91 98111-11111', '098111 11111'), isTrue);
+      expect(samePhone('9811111111', '9811111111'), isTrue);
+    });
+    test('different numbers are not', () {
+      expect(samePhone('+919811111111', '+919822222222'), isFalse);
+      expect(samePhone('+919811111111', '98111'), isFalse, reason: 'a prefix is not the same number');
+    });
+    test('empty or short numbers never match, not even each other', () {
+      for (final short in ['', ' ', '0', '+91', '123456', '+91 12345']) {
+        expect(samePhone(short, short), isFalse, reason: "'$short'");
+        expect(samePhone(short, '+919811111111'), isFalse, reason: "'$short'");
+      }
+      expect(samePhone('1234567', '1234567'), isTrue, reason: '7 digits is the minimum');
+      expect(minFamilyPhoneDigits, 7);
+    });
+  });
+
+  testWidgets('patients registered without a phone are not shown as one family', (t) async {
+    final a = patient('p1', 'Anil', '');
+    final b = patient('p2', 'Bina', '');
+    final c = patient('p3', 'Chetan', '0');
+    final provider = SearchingProvider('', [a, b, c]);
+    t.view.physicalSize = const Size(1080, 2400);
+    t.view.devicePixelRatio = 2.0;
+    addTearDown(t.view.reset);
+    await t.pumpWidget(MultiProvider(
+      providers: [
+        ChangeNotifierProvider<PatientProvider>.value(value: provider),
+        ChangeNotifierProvider<DoctorProvider>.value(value: DoctorProvider()),
+      ],
+      child: const MaterialApp(home: PatientDetailScreen(patientId: 'p1')),
+    ));
+    await t.pumpAndSettle();
+    expect(find.text('Family Network'), findsNothing);
+    expect(find.textContaining('Bina'), findsNothing);
+    expect(find.textContaining('Chetan'), findsNothing);
+  });
+
+  testWidgets('the same number written with +91 or spaces still links family', (t) async {
+    final rohan = patient('p1', 'Rohan', '+919811111111');
+    final asha = patient('p2', 'Asha', '98111 11111');
+    final provider = SearchingProvider('', [rohan, asha]);
+    t.view.physicalSize = const Size(1080, 2400);
+    t.view.devicePixelRatio = 2.0;
+    addTearDown(t.view.reset);
+    await t.pumpWidget(MultiProvider(
+      providers: [
+        ChangeNotifierProvider<PatientProvider>.value(value: provider),
+        ChangeNotifierProvider<DoctorProvider>.value(value: DoctorProvider()),
+      ],
+      child: const MaterialApp(home: PatientDetailScreen(patientId: 'p1')),
+    ));
+    await t.pumpAndSettle();
+    expect(find.text('Family Network'), findsOneWidget);
+    expect(find.textContaining('Asha'), findsWidgets);
   });
 
   testWidgets('F-SRCH-04 an active search does not hide family members on the patient screen', (t) async {
