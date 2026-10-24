@@ -36,7 +36,7 @@ class PatientDetailScreen extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.red.withOpacity(0.1), shape: BoxShape.circle), child: const Icon(Icons.delete_forever_rounded, color: Colors.redAccent, size: 40)),
+            Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.red.withValues(alpha: 0.1), shape: BoxShape.circle), child: const Icon(Icons.delete_forever_rounded, color: Colors.redAccent, size: 40)),
             const SizedBox(height: 24),
             const Text('Delete Patient Profile?', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Color(0xFF1E293B))),
             const SizedBox(height: 12),
@@ -128,7 +128,7 @@ class PatientDetailScreen extends StatelessWidget {
   Widget _buildFamilyChip(BuildContext context, Patient familyMember) {
     return GestureDetector(
       onTap: () => Navigator.pushReplacement(context, MaterialPageRoute(builder: (c) => PatientDetailScreen(patientId: familyMember.id))),
-      child: Container(margin: const EdgeInsets.only(right: 12), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), decoration: BoxDecoration(color: const Color(0xFFECFDF5), borderRadius: BorderRadius.circular(30), border: Border.all(color: const Color(0xFF10B981).withOpacity(0.2))), child: Row(children: [Text(familyMember.name, style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF065F46), fontSize: 13)), const SizedBox(width: 6), Text('(${familyMember.relation})', style: const TextStyle(color: Color(0xFF10B981), fontSize: 11))])),
+      child: Container(margin: const EdgeInsets.only(right: 12), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), decoration: BoxDecoration(color: const Color(0xFFECFDF5), borderRadius: BorderRadius.circular(30), border: Border.all(color: const Color(0xFF10B981).withValues(alpha: 0.2))), child: Row(children: [Text(familyMember.name, style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF065F46), fontSize: 13)), const SizedBox(width: 6), Text('(${familyMember.relation})', style: const TextStyle(color: Color(0xFF10B981), fontSize: 11))])),
     );
   }
 

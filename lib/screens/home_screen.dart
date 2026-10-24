@@ -57,7 +57,7 @@ class _HomeScreenState extends State<HomeScreen> {
         slivers: [
           SliverAppBar(
             expandedHeight: 120, floating: true, pinned: true, elevation: 0,
-            backgroundColor: const Color(0xFFF8FAFC).withOpacity(0.8),
+            backgroundColor: const Color(0xFFF8FAFC).withValues(alpha: 0.8),
             flexibleSpace: FlexibleSpaceBar(
               titlePadding: const EdgeInsets.only(left: 60, bottom: 16),
               title: const Text('DOCEase', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 20, color: Color(0xFF1E293B))),
