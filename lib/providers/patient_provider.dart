@@ -395,9 +395,13 @@ class PatientProvider with ChangeNotifier {
   /// same patient runs, and no end-of-pull overwrite can undo a save made
   /// after this patient was applied.
   ///
-  /// A patient saved locally after the fetch started ([fetchedAfter]) is
-  /// kept and retried with a fresh snapshot, even if its push already made
-  /// the row clean: the fetched copy predates that save.
+  /// A patient written locally after the fetch started ([fetchedAfter]: a
+  /// save, or an upload swap, security #16 M-2) is kept as stored and
+  /// skipped by this pull, even if its push already made the row clean:
+  /// the fetched copy predates that write. Nothing re-fetches it in this
+  /// session (the pull runs once per session), and its next push replaces
+  /// the whole cloud doc, so a visit that exists only in the cloud can
+  /// still be lost (pre-existing; tracked in #16 "When Firebase returns").
   Future<_Pulled> _applyCloud(Patient cp, String uid, SyncCancelToken token, int fetchedAfter) =>
       _underPatientLock(cp.id, () async {
         if (!_live(uid, token) || !_dbReadyFor(uid)) return _Pulled.unchanged;
@@ -677,6 +681,15 @@ class PatientProvider with ChangeNotifier {
           notSwappable++;
           continue;
         }
+        // Security #16 L-2: only a regular file directly in the owner's
+        // visit folder is uploaded (links not followed, no sub-folder).
+        // Anything else stays local, is no longer pending, and is left to
+        // the sweep; a missing file is left to putFile (retried).
+        if (await _isRejectedPhotoFile(path, _openDbUid ?? uid)) {
+          _pendingUploads.remove(path);
+          notSwappable++;
+          continue;
+        }
         final uploaded = _unswapped[path];
         if (uploaded != null) {
           out[path] = uploaded; // already uploaded; only its swap is retried
@@ -733,6 +746,9 @@ class PatientProvider with ChangeNotifier {
         if (!_live(uid, token) || _openDbUid != owner) break; // owner changed: no swap
         try {
           if (await _swapPath(owner, patientId, local, storagePath)) {
+            // Security #16 M-2: the swap is a local row write; a pull
+            // snapshot fetched before it must not be applied over it.
+            _noteLocalSave(patientId);
             swapped[local] = storagePath;
           } else {
             gone.add(storagePath); // photo or visit removed mid-upload
@@ -1345,6 +1361,19 @@ class PatientProvider with ChangeNotifier {
     return key != null && key.startsWith('${AttachmentRefs.attachmentsFolder}/') ? key : null;
   }
 
+  /// Security #16 L-2: [path] exists (links not followed) but is not a
+  /// regular file directly in [owner]'s visit folder. A missing file is
+  /// not rejected here: the save's validation or the upload's retry
+  /// handles it as before.
+  Future<bool> _isRejectedPhotoFile(String path, String owner) async {
+    try {
+      if (FileSystemEntity.typeSync(path, followLinks: false) == FileSystemEntityType.notFound) return false;
+    } catch (_) {
+      return true;
+    }
+    return !await _photos.isOwnedVisitFile(path, owner: owner);
+  }
+
   /// Removes from [patientId]'s registry every key that [rows] reference.
   void _consumePicks(String owner, String patientId, Iterable<Patient> rows) {
     if (owner != _sessionPicksOwner) return;
@@ -1388,8 +1417,10 @@ class PatientProvider with ChangeNotifier {
       }
       final key = owner == null ? null : _visitKey(e, owner);
       final mine = key != null || (owner != null && _photos.isAppPhoto(e, owner: owner));
-      if (key != null && (rowKeys.contains(key) || picks.contains(key))) {
+      if (key != null && rowKeys.contains(key)) {
         kept.add(e);
+      } else if (key != null && picks.contains(key) && !await _isRejectedPhotoFile(e, owner!)) {
+        kept.add(e); // L-2: a link or a sub-folder file is not a pick
       } else if (mine || _photos.isAppPhoto(e)) {
         dropped++; // an app photo the row no longer has, or another owner's
       } else {

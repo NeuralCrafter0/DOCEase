@@ -204,6 +204,35 @@ class LocalPhotoStore {
     }
   }
 
+  /// Security #16 L-2: whether [path] is a regular file directly in
+  /// [owner]'s visit folder (`attachments/<ownerHash>/<file>`): the path is
+  /// absolute and already normalised (no `.` or `..` segments), never in a
+  /// sub-folder, the folder resolves to itself, and the entry is a regular
+  /// file checked with `followLinks: false` (a symlink or a directory is
+  /// not). Same rules as [deleteOwnedVisitFile], minus the name check.
+  /// False before the support directory resolves or on any error. Never
+  /// throws.
+  Future<bool> isOwnedVisitFile(String path, {required String owner}) async {
+    try {
+      await init();
+      final dir = visitFolderFor(owner);
+      if (dir == null || !p.isAbsolute(path) || p.normalize(path) != path) return false;
+      return await _isDirectRegularFile(path, dir);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// [entry] sits directly in [dir], [dir] is a real directory that
+  /// resolves to itself, and [entry] is a regular file (links not
+  /// followed).
+  Future<bool> _isDirectRegularFile(String entry, String dir) async {
+    if (p.dirname(entry) != dir) return false;
+    if (FileSystemEntity.typeSync(dir, followLinks: false) != FileSystemEntityType.directory) return false;
+    if (p.normalize(await Directory(dir).resolveSymbolicLinks()) != dir) return false;
+    return FileSystemEntity.typeSync(entry, followLinks: false) == FileSystemEntityType.file;
+  }
+
   Future<bool> _realPathWithin(String path, String dir) async {
     try {
       return p.isWithin(dir, p.normalize(await File(path).resolveSymbolicLinks()));
