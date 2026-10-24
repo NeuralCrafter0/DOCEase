@@ -1,0 +1,32 @@
+{
+  // DOCEase run configurations. Dev mode (no Firebase, login or lock, on-phone
+  // data only) is the `dev` flavor plus the define, debug or profile only; a
+  // release build refuses it. The prod entry is the real app.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "DOCEase DEV (dev mode)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "flutterMode": "debug",
+      "args": ["--flavor", "dev", "--dart-define=DOCEASE_DEV_MODE=true"]
+    },
+    {
+      "name": "DOCEase DEV (dev mode, profile)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "flutterMode": "profile",
+      "args": ["--flavor", "dev", "--dart-define=DOCEASE_DEV_MODE=true"]
+    },
+    {
+      "name": "DOCEase (prod: Firebase, login + lock)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "flutterMode": "debug",
+      "args": ["--flavor", "prod", "--dart-define=DOCEASE_DEV_MODE=false"]
+    }
+  ]
+}

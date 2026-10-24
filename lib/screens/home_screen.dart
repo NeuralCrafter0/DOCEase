@@ -2,6 +2,8 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import '../config/dev_mode.dart';
+import '../widgets/avatar_image.dart';
 import 'package:intl/intl.dart';
 import '../providers/patient_provider.dart';
 import '../providers/doctor_provider.dart';
@@ -99,7 +101,7 @@ class _HomeScreenState extends State<HomeScreen> {
         onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (ctx) => const DoctorProfileScreen())),
         child: CircleAvatar(
           radius: 18, backgroundColor: const Color(0xFFEEF2FF),
-          backgroundImage: (doctor?.profileImageUrl != null && doctor!.profileImageUrl!.isNotEmpty) ? NetworkImage(doctor.profileImageUrl!) : null,
+          backgroundImage: avatarImageFor(doctor?.profileImageUrl),
           child: (doctor?.profileImageUrl == null || doctor!.profileImageUrl!.isEmpty) ? const Icon(Icons.account_circle_outlined, color: Color(0xFF6366F1), size: 24) : null,
         ),
       ),
@@ -178,7 +180,7 @@ class _HomeScreenState extends State<HomeScreen> {
           padding: const EdgeInsets.fromLTRB(24, 60, 24, 32),
           decoration: const BoxDecoration(color: Color(0xFF1E293B), borderRadius: BorderRadius.only(bottomRight: Radius.circular(32))),
           child: Row(children: [
-            CircleAvatar(radius: 35, backgroundColor: Colors.white24, backgroundImage: (doctor?.profileImageUrl != null && doctor!.profileImageUrl!.isNotEmpty) ? NetworkImage(doctor.profileImageUrl!) : null, child: (doctor?.profileImageUrl == null || doctor!.profileImageUrl!.isEmpty) ? const Icon(Icons.medical_services_outlined, color: Colors.white, size: 32) : null),
+            CircleAvatar(radius: 35, backgroundColor: Colors.white24, backgroundImage: avatarImageFor(doctor?.profileImageUrl), child: (doctor?.profileImageUrl == null || doctor!.profileImageUrl!.isEmpty) ? const Icon(Icons.medical_services_outlined, color: Colors.white, size: 32) : null),
             const SizedBox(width: 16),
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text(doctor != null ? "${doctor.title} ${doctor.name}" : 'Doctor Name', style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis),
@@ -191,7 +193,8 @@ class _HomeScreenState extends State<HomeScreen> {
         _buildDrawerItem(Icons.analytics_outlined, 'Clinical Insights', () { Navigator.pop(context); Navigator.of(context).push(MaterialPageRoute(builder: (ctx) => const InsightsScreen())); }),
         _buildDrawerItem(Icons.badge_outlined, 'Professional Profile', () { Navigator.pop(context); Navigator.of(context).push(MaterialPageRoute(builder: (ctx) => const DoctorProfileScreen())); }),
         const Spacer(),
-        Padding(padding: const EdgeInsets.all(24.0), child: ListTile(onTap: () => FirebaseAuth.instance.signOut(), leading: const Icon(Icons.logout_rounded, color: Colors.redAccent), title: const Text('Sign Out', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), tileColor: Colors.red.withOpacity(0.05))),
+        // Dev mode has no account; sign-out returns with DOCEASE_DEV_MODE=false.
+        if (!DevMode.of(context)) Padding(padding: const EdgeInsets.all(24.0), child: ListTile(onTap: () => FirebaseAuth.instance.signOut(), leading: const Icon(Icons.logout_rounded, color: Colors.redAccent), title: const Text('Sign Out', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), tileColor: Colors.red.withOpacity(0.05))),
       ]),
     );
   }
