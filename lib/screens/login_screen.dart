@@ -89,7 +89,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       color: const Color(0xFF6366F1),
                       borderRadius: BorderRadius.circular(18),
                       boxShadow: [
-                        BoxShadow(color: const Color(0xFF6366F1).withOpacity(0.3), blurRadius: 15, offset: const Offset(0, 8))
+                        BoxShadow(color: const Color(0xFF6366F1).withValues(alpha: 0.3), blurRadius: 15, offset: const Offset(0, 8))
                       ],
                     ),
                     child: const Icon(Icons.medical_services, size: 32, color: Colors.white),

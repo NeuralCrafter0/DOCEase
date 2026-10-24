@@ -6,6 +6,8 @@ import 'package:provider/provider.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter_typeahead/flutter_typeahead.dart';
+import '../widgets/field_label.dart';
+import '../widgets/segmented_selector.dart';
 import '../models/patient.dart';
 import '../providers/patient_provider.dart';
 import '../providers/medicine_provider.dart';
@@ -303,13 +305,13 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   }
 
   Widget _buildDatePicker() {
-    return GestureDetector(
+    return Semantics(button: true, label: 'Visit date', child: GestureDetector(
       onTap: () async {
         final d = await showDatePicker(context: context, initialDate: _selectedDate, firstDate: DateTime(2000), lastDate: DateTime.now());
         if (d != null) setState(() => _selectedDate = d);
       },
       child: Container(padding: const EdgeInsets.all(18), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), border: Border.all(color: const Color(0xFFE2E8F0))), child: Row(children: [const Icon(Icons.calendar_month_outlined, color: Color(0xFF6366F1), size: 20), const SizedBox(width: 12), Text(DateFormat('EEEE, dd MMM yyyy').format(_selectedDate), style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16, color: Color(0xFF1E293B)))]))
-    );
+    ));
   }
 
   Widget _buildSmartPrescriptionField(MedicineProvider medProvider) {
@@ -421,7 +423,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
     ]);
   }
 
-  Widget _buildLabel(String text) => Padding(padding: const EdgeInsets.only(bottom: 10, left: 4), child: Text(text, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Color(0xFF475569))));
+  Widget _buildLabel(String text) => FieldLabel(text);
 
   Widget _buildModernInput(TextEditingController controller, String hint, IconData icon, {int maxLines = 1, FormFieldValidator<String>? validator}) {
     // Clinical text: no keyboard learning, autocorrect, suggestions or smart
@@ -430,21 +432,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   }
 
   Widget _buildHighPerfSelector(List<String> options, String selectedValue, Function(String) onSelected) {
-    final selectedIndex = options.indexOf(selectedValue);
-    return Container(
-      height: 54, padding: const EdgeInsets.all(4),
-      decoration: BoxDecoration(color: const Color(0xFFF1F5F9), borderRadius: BorderRadius.circular(18)),
-      child: LayoutBuilder(builder: (context, constraints) {
-        final width = constraints.maxWidth / options.length;
-        return Stack(children: [
-          AnimatedPositioned(duration: const Duration(milliseconds: 250), curve: Curves.easeOutCubic, left: selectedIndex * width, top: 0, bottom: 0, width: width, child: Container(decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 8)]))),
-          Row(children: options.map((opt) {
-            final isSelected = selectedValue == opt;
-            return Expanded(child: GestureDetector(onTap: () => onSelected(opt), behavior: HitTestBehavior.opaque, child: Center(child: Text(opt, style: TextStyle(fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600, color: isSelected ? const Color(0xFF6366F1) : const Color(0xFF64748B), fontSize: 12)))));
-          }).toList()),
-        ]);
-      }),
-    );
+    return SegmentedSelector(options: options, selected: selectedValue, onSelected: onSelected, fontSize: 12);
   }
 
   Widget _buildAttachmentsSection() {
