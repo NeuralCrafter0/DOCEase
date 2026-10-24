@@ -443,4 +443,38 @@ abstract final class AttachmentRefs {
         if (!keys.contains(m.key) && !entries.contains(m.value)) m.key,
     };
   }
+
+  /// True for a recorded swap key: exactly `attachments/<file>`, the
+  /// [attachmentKey] format for a visit photo, with one non-empty file
+  /// segment that is not `.` or `..`.
+  static bool isSwapLocalKey(String key) {
+    const prefix = 'attachments/';
+    if (!key.startsWith(prefix)) return false;
+    final file = key.substring(prefix.length);
+    return file.isNotEmpty &&
+        file != '.' &&
+        file != '..' &&
+        !file.contains('/') &&
+        !file.contains(r'\');
+  }
+
+  /// `local_key -> storage_path` from raw `attachment_swaps` rows for
+  /// [patientId], keeping only rows that pass the save-time validation:
+  /// string columns, [isSwapLocalKey], and [isPatientStoragePath] for [uid]
+  /// and [patientId]. Tampered or foreign rows are dropped. Never throws.
+  static Map<String, String> validSwapMappings(
+      Iterable<Map<String, Object?>> rows,
+      {required String uid,
+      required String patientId}) {
+    final out = <String, String>{};
+    for (final r in rows) {
+      final k = r['local_key'];
+      final v = r['storage_path'];
+      if (k is! String || v is! String) continue;
+      if (!isSwapLocalKey(k)) continue;
+      if (!isPatientStoragePath(v, uid: uid, patientId: patientId)) continue;
+      out[k] = v;
+    }
+    return out;
+  }
 }

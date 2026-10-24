@@ -563,6 +563,21 @@ abstract class LocalDatabase {
       required String localPath,
       required String storagePath});
 
+  /// The recorded swaps for [patientId] in the open DB: `local_key`
+  /// (exactly the [attachmentKey] format, `attachments/<file>`) ->
+  /// `storage_path`. Only mappings that pass the save-time check are
+  /// returned (the path is in [expectedOwner]'s folder for [patientId],
+  /// `clinical_attachments/{uid}/{patientId}/{file}`, as
+  /// [AttachmentRefs.isPatientStoragePath] checks); tampered rows are left
+  /// out. A strict read: an empty map
+  /// means there really are none. Throws [DbReadException] `notOpen` if no
+  /// DB is open, its open failed, or the open DB's owner is not
+  /// [expectedOwner] (nothing is returned), and `readFailed` if the read
+  /// fails. [ArgumentError] for an empty [expectedOwner] or [patientId].
+  /// Read only.
+  Future<Map<String, String>> swappedPathsFor(
+      {required String expectedOwner, required String patientId});
+
   /// Owner-relative key of a stored or on-disk photo path, or null if it is
   /// not in [ownerFolderName]'s folders ("not mine, never delete"). Pure;
   /// see [AttachmentRefs.attachmentKey].

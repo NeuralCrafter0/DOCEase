@@ -199,6 +199,26 @@ class FakeLocalDatabase implements LocalDatabase {
       _strict(() => tombstones.toList());
 
   @override
+  Future<Map<String, String>> swappedPathsFor(
+      {required String expectedOwner, required String patientId}) async {
+    if (expectedOwner.isEmpty) {
+      throw ArgumentError.value('', 'expectedOwner', 'must not be empty');
+    }
+    if (patientId.isEmpty) {
+      throw ArgumentError.value('', 'patientId', 'must not be empty');
+    }
+    return _strict(() {
+      if (openUid != expectedOwner) {
+        throw const DbReadException(DbReadFailure.notOpen);
+      }
+      return AttachmentRefs.validSwapMappings([
+        for (final e in (swaps[patientId] ?? const {}).entries)
+          {'local_key': e.key, 'storage_path': e.value},
+      ], uid: expectedOwner, patientId: patientId);
+    });
+  }
+
+  @override
   Future<List<Patient>> dirtyPatients() async =>
       [for (final e in rows.entries) if (dirty[e.key] == true) e.value];
 

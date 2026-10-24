@@ -1564,6 +1564,30 @@ class DatabaseHelper implements LocalDatabase {
           columns: ['patient_id'],
           orderBy: 'deleted_at ASC, patient_id ASC')));
 
+  @override
+  Future<Map<String, String>> swappedPathsFor(
+      {required String expectedOwner, required String patientId}) async {
+    if (expectedOwner.isEmpty) {
+      throw ArgumentError.value('', 'expectedOwner', 'must not be empty');
+    }
+    if (patientId.isEmpty) {
+      throw ArgumentError.value('', 'patientId', 'must not be empty');
+    }
+    return _strictRead('swap mappings', (db) async {
+      // _strictRead re-checks after the read that the same DB is open.
+      if (_uid != expectedOwner) {
+        throw const DbReadException(DbReadFailure.notOpen);
+      }
+      final rows = await db.query('attachment_swaps',
+          columns: ['local_key', 'storage_path'],
+          where: 'patient_id = ?',
+          whereArgs: [patientId],
+          orderBy: 'local_key ASC');
+      return AttachmentRefs.validSwapMappings(rows,
+          uid: expectedOwner, patientId: patientId);
+    });
+  }
+
   /// Runs [body] on the open database. `notOpen` if there is none (or its
   /// open failed), or if a different database is open by the time the read
   /// finishes; `readFailed` for any other error.

@@ -1185,6 +1185,69 @@ void runDbSuite(DbSuiteHarness h) {
     await wipe();
   });
 
+  h.define('SWQ-12 swappedPathsFor: swap then map; tampered rows and other '
+      "patients' mappings never returned; wrong owner / closed / failed "
+      'read throw; a dropped mapping is gone', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    const key = 'attachments/$swpUuid.jpg';
+    Future<Map<String, String>> map(String pid, {String owner = uidA}) =>
+        d.swappedPathsFor(expectedOwner: owner, patientId: pid);
+    await d.insertPatient(withVisits('p1', [[swpLocal]]));
+    await d.insertPatient(withVisits('p2', [[swpLocal]]));
+    expect(await map('p1'), isEmpty, reason: 'none recorded yet');
+    expect(await swp(d), isTrue);
+    final s2 = 'clinical_attachments/$uidA/p2/$swpUuid.jpg';
+    expect(await swp(d, patient: 'p2', storagePath: s2), isTrue);
+    expect(await map('p1'), {key: swpStorage});
+    expect(AttachmentRefs.attachmentKey(swpLocal, ownerFolderName: ownA), key,
+        reason: 'keys use the attachmentKey format');
+    expect(await map('p2'), {key: s2});
+    expect(await map('p3'), isEmpty);
+    // Tampered rows for p1 are left out.
+    final now = DateTime.now().millisecondsSinceEpoch;
+    for (final (k, v) in [
+      ('attachments/t1.jpg', 'clinical_attachments/$uidB/p1/t1.jpg'),
+      ('attachments/t2.jpg', 'clinical_attachments/$uidA/p2/t2.jpg'),
+      ('attachments/t3.jpg', 'clinical_attachments/$uidA/p1/../p2/t3.jpg'),
+      ('attachments/t4.jpg', 'doctor_profiles/$uidA/t4.jpg'),
+      ('attachments/t5.jpg', 'https://example.com/t5.jpg'),
+      ('../evil.jpg', 'clinical_attachments/$uidA/p1/evil.jpg'),
+      ('attachments/../x.jpg', 'clinical_attachments/$uidA/p1/x.jpg'),
+      ('profile/t6.jpg', 'clinical_attachments/$uidA/p1/t6.jpg'),
+    ]) {
+      await db.insert('attachment_swaps', {
+        'patient_id': 'p1', 'local_key': k, 'storage_path': v,
+        'swapped_at': now,
+      });
+    }
+    expect(await map('p1'), {key: swpStorage});
+    // Wrong owner: notOpen, nothing returned.
+    await expectLater(map('p1', owner: uidB), readFails(DbReadFailure.notOpen));
+    await expectLater(map('p1', owner: uidOther), readFails(DbReadFailure.notOpen));
+    expect(() => d.swappedPathsFor(expectedOwner: uidA, patientId: ''),
+        throwsArgumentError);
+    expect(() => d.swappedPathsFor(expectedOwner: '', patientId: 'p1'),
+        throwsArgumentError);
+    // The removed-photo fix drops p2's mapping: no longer returned.
+    expect(await d.updatePatient(withVisits('p2', [[]])), isNotNull);
+    expect(await map('p2'), isEmpty);
+    expect(await map('p1'), {key: swpStorage});
+    // Read only: the counter and sync_state are untouched by the reads.
+    final c = await counterOf(uidA);
+    final r1 = await rawRow(db, 'p1');
+    await map('p1');
+    expect(await counterOf(uidA), c);
+    expect(await rawRow(db, 'p1'), r1);
+    // A failed read while the DB counts as open: readFailed, not {}.
+    await db.execute('DROP TABLE attachment_swaps');
+    await expectLater(map('p1'), readFails(DbReadFailure.readFailed));
+    await d.close();
+    await expectLater(map('p1'), readFails(DbReadFailure.notOpen));
+    await wipe();
+  });
+
   h.define('STR-01 healthy DB: strict reads equal the lenient ones; an '
       'empty DB gives empty, not an error', () async {
     await wipe();
