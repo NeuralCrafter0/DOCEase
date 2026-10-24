@@ -11,6 +11,7 @@
 # (QA KCV/SET cases) the same way. run.sh itself is untouched.
 # Usage (from anywhere):  bash tool/sqlcipher_harness/run_qa.sh [flutter test args]
 # Env:
+#   QA_FFI_TEST    QA host test file in this folder (default qa_sqlcipher_ffi_test.dart)
 #   FLUTTER        flutter executable (default: flutter on PATH)
 #   KEEP_WORKDIR=1 keep the temp copy for debugging
 # Exit code: non-zero if any test fails or a precondition is not met.
@@ -71,9 +72,13 @@ YAML
 "$FLUTTER" pub add --dev "${FFI_PACKAGES[@]}"
 cp "$HARNESS_DIR/sqlcipher_ffi_test.dart" test/sqlcipher_ffi_test.dart
 cp "$HARNESS_DIR/qa_sqlcipher_ffi_test.dart" test/qa_sqlcipher_ffi_test.dart
+# QA_FFI_TEST picks the QA host test (default: the KCV/SET suite).
+QA_FFI_TEST="${QA_FFI_TEST:-qa_sqlcipher_ffi_test.dart}"
+[ -f "$HARNESS_DIR/$QA_FFI_TEST" ] || die "no $HARNESS_DIR/$QA_FFI_TEST"
+cp "$HARNESS_DIR/$QA_FFI_TEST" "test/$QA_FFI_TEST"
 
 status=0
-"$FLUTTER" test test/qa_sqlcipher_ffi_test.dart "$@" || status=$?
+"$FLUTTER" test "test/$QA_FFI_TEST" "$@" || status=$?
 
 cd "$REPO_ROOT"
 if [ "$(checksum)" != "$BEFORE" ]; then

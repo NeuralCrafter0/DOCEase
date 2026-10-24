@@ -323,4 +323,67 @@ void main() {
               'reason', AttachmentScanFailure.unrecognisedPath)));
     });
   });
+
+  group('KEY-07 file URI hosts (DB engineer, 07:40 + 07:46)', () {
+    final fa7 = AttachmentRefs.ownerFolderNameFor('doctorA');
+    const root = '/data/data/com.x/files';
+    final plain = '$root/attachments/$fa7/a.jpg';
+
+    test('file:/// and file://localhost/ give the plain path\'s key', () {
+      final k = AttachmentRefs.attachmentKey(plain, ownerFolderName: fa7);
+      expect(k, 'attachments/a.jpg');
+      for (final u in [
+        'file://$plain',
+        'file://localhost$plain',
+        'file://LOCALHOST$plain',
+        'file://LocalHost$plain',
+      ]) {
+        expect(AttachmentRefs.attachmentKey(u, ownerFolderName: fa7), k,
+            reason: u);
+        expect(AttachmentRefs.referencedKeys([u], ownerFolderName: fa7), {k},
+            reason: u);
+      }
+    });
+
+    for (final host in [
+      'evil', 'evil.com', '127.0.0.1', 'localhost.evil', // other hosts
+      'localhost:80', 'localhost:8080', 'user@localhost', 'user:pw@localhost', // port / user
+      'EVIL',
+    ]) {
+      test('file://$host/... makes the scan throw (unrecognisedPath)', () {
+        final u = 'file://$host$plain';
+        expect(AttachmentRefs.attachmentKey(u, ownerFolderName: fa7), isNull);
+        expect(
+            () => AttachmentRefs.referencedKeys([plain, u],
+                ownerFolderName: fa7),
+            throwsA(isA<AttachmentScanIncomplete>().having((e) => e.reason,
+                'reason', AttachmentScanFailure.unrecognisedPath)));
+      });
+    }
+
+
+    // KEY-07b (QA finding, low): Dart's Uri treats ':0' and an empty ':'
+    // port as the file: scheme default, so hasPort is false and #10's port
+    // check never sees it. Fail-safe today (keyed like the plain path, so the
+    // photo stays protected), but it is a port the spec says must throw.
+    for (final host in ['localhost:0', 'localhost:']) {
+      test('KEY-07b file://$host/... is never dropped silently', () {
+        final u = 'file://$host$plain';
+        try {
+          expect(AttachmentRefs.referencedKeys([u], ownerFolderName: fa7),
+              {'attachments/a.jpg'});
+        } on AttachmentScanIncomplete catch (e) {
+          expect(e.reason, AttachmentScanFailure.unrecognisedPath);
+        }
+      });
+      test('KEY-07b-strict file://$host/... throws per spec (low)', () {
+        expect(
+            () => AttachmentRefs.referencedKeys(['file://$host$plain'],
+                ownerFolderName: fa7),
+            throwsA(isA<AttachmentScanIncomplete>()));
+      }, skip: 'QA low finding for the DB engineer: Dart Uri normalises '
+          'port 0 / empty port to "no port" for file:, so hasPort is false. '
+          'Un-skip once attachmentKey checks the raw authority.');
+    }
+  });
 }
