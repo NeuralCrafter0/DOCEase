@@ -118,13 +118,12 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
         } else {
           await provider.updatePatient(patient);
         }
-      } catch (_) {
+      } on SaveRefusedException {
         // The local database refused the save; the provider has already
         // dropped the new patient or restored the previous details. Close
         // the form, so the screen underneath shows what is really stored
         // (QA F-PAT-05/06), and say so there without any patient data in
-        // the message. TODO(after #13 merges): narrow this to
-        // `on SaveRefusedException`.
+        // the message. Any other error is a bug and is not swallowed here.
         if (!mounted) return;
         final messenger = ScaffoldMessenger.of(context);
         Navigator.of(context).pop();

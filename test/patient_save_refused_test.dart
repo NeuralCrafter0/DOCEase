@@ -4,6 +4,8 @@
 // provider rollback is the backend's).
 // ignore_for_file: depend_on_referenced_packages
 import 'package:docease/models/patient.dart';
+import 'dart:async';
+
 import 'package:docease/providers/patient_provider.dart';
 import 'package:docease/screens/add_patient_screen.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -12,10 +14,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 
-/// Stands in for #13's UnsyncedCounterException / SaveRefusedException,
-/// which are not on main. The message carries patient data on purpose: the
-/// screen must not show it.
-class RefusedSave implements Exception {
+/// Cause of the refusal. Its text carries patient data on purpose: the
+/// screen must not show it (#5 merge notes: real SaveRefusedException).
+class LeakyCause implements Exception {
   @override
   String toString() => 'refused: Ravi Changed +919876543210';
 }
@@ -23,16 +24,20 @@ class RefusedSave implements Exception {
 /// Refuses like the DB does: the provider rolls back and rethrows.
 class RefusingProvider extends PatientProvider {
   bool refuse;
+  /// When set, thrown instead of a refusal (a bug, not a refused save).
+  Object? bug;
   final List<Patient> saved = [];
   RefusingProvider({this.refuse = true});
   @override
   Future<void> addPatient(Patient patient) async {
-    if (refuse) throw RefusedSave();
+    if (bug != null) throw bug!;
+    if (refuse) throw SaveRefusedException(PatientSaveOperation.add, LeakyCause());
     saved.add(patient);
   }
   @override
   Future<void> updatePatient(Patient patient) async {
-    if (refuse) throw RefusedSave();
+    if (bug != null) throw bug!;
+    if (refuse) throw SaveRefusedException(PatientSaveOperation.update, LeakyCause());
     saved.add(patient);
   }
 }
@@ -106,6 +111,26 @@ void main() {
     await t.pumpAndSettle();
     expect(p.saved.single.name, 'Ravi Kumar');
     expect(find.text('Save Changes'), findsNothing);
+    expect(find.byType(SnackBar), findsNothing);
+  });
+
+  testWidgets('a StateError from addPatient is not swallowed: form stays open, no SnackBar', (t) async {
+    final p = RefusingProvider(refuse: false)..bug = StateError('bug');
+    await open(t, const AddPatientScreen(), p);
+    await t.enterText(nameField, 'Asha Rao');
+    await t.enterText(ageField, '34');
+    await t.enterText(phoneField, '9876543210');
+    final escaped = <Object>[];
+    await runZonedGuarded(() async {
+      await t.tap(find.text('Register Profile'));
+      await t.pump();
+      await t.pump(const Duration(milliseconds: 100));
+    }, (e, _) => escaped.add(e));
+    final taken = t.takeException();
+    if (taken != null) escaped.add(taken);
+    expect(escaped.whereType<StateError>(), isNotEmpty, reason: 'the bug must escape the handler');
+    expect(find.text('Register Profile'), findsOneWidget, reason: 'form stays open');
+    expect(find.text('Asha Rao'), findsOneWidget, reason: 'typed data kept');
     expect(find.byType(SnackBar), findsNothing);
   });
 }
