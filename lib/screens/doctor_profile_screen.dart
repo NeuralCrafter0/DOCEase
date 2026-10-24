@@ -11,6 +11,7 @@ import '../widgets/app_text_field.dart';
 import '../widgets/field_label.dart';
 import '../widgets/primary_button.dart';
 import '../widgets/segmented_selector.dart';
+import '../utils/input_rules.dart';
 import 'package:flutter/services.dart';
 import '../models/doctor.dart';
 import '../providers/doctor_provider.dart';
@@ -166,9 +167,9 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
             _buildHighPerfSelector(['Solo Practice', 'Clinic Mode'], _selectedPracticeMode, (v) => setState(() => _selectedPracticeMode = v)),
             const SizedBox(height: 32),
             _buildLabel('Professional Details'),
-            _buildModernInput(_nameController, 'Full Name', Icons.person_outline),
+            _buildModernInput(_nameController, 'Full Name', Icons.person_outline, inputFormatters: InputRules.personName),
             const SizedBox(height: 24),
-            _buildModernInput(_emailController, 'Clinical Email', Icons.alternate_email_rounded, keyboardType: TextInputType.emailAddress),
+            _buildModernInput(_emailController, 'Clinical Email', Icons.alternate_email_rounded, keyboardType: TextInputType.emailAddress, inputFormatters: InputRules.email),
             const SizedBox(height: 24),
             Row(children: [
               Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [_buildLabel('Age'), _buildModernInput(_ageController, 'Yrs', Icons.cake_outlined, keyboardType: TextInputType.number, isAge: true)])),
@@ -195,9 +196,9 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
               ),
             ]),
             const SizedBox(height: 24),
-            _buildModernInput(_specialtyController, 'Specialty', Icons.medical_services_outlined),
+            _buildModernInput(_specialtyController, 'Specialty', Icons.medical_services_outlined, inputFormatters: InputRules.shortText),
             const SizedBox(height: 24),
-            _buildModernInput(_clinicController, 'Clinic / Hospital', Icons.local_hospital_outlined),
+            _buildModernInput(_clinicController, 'Clinic / Hospital', Icons.local_hospital_outlined, inputFormatters: InputRules.shortText),
             const SizedBox(height: 48),
             if (_isEditing)
               _isLoading ? const Center(child: CircularProgressIndicator()) : PrimaryButton(label: 'Save and Lock Profile', onPressed: _saveProfile),
@@ -210,11 +211,11 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
 
   Widget _buildLabel(String text) => FieldLabel(text);
 
-  Widget _buildModernInput(TextEditingController controller, String hint, IconData icon, {TextInputType? keyboardType, bool isAge = false}) {
+  Widget _buildModernInput(TextEditingController controller, String hint, IconData icon, {TextInputType? keyboardType, bool isAge = false, List<TextInputFormatter>? inputFormatters}) {
     return AppTextField(
       controller: controller, hint: hint, icon: icon, keyboardType: keyboardType,
       enabled: _isEditing,
-      inputFormatters: isAge ? [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(3)] : null,
+      inputFormatters: isAge ? [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(3)] : inputFormatters,
       textColor: _isEditing ? AppColors.ink : Colors.grey,
       fillColor: _isEditing ? Colors.white : AppColors.track,
     );
