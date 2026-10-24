@@ -46,12 +46,38 @@ class PatientDetailScreen extends StatelessWidget {
             Row(children: [
               Expanded(child: TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF475569))))),
               const SizedBox(width: 16),
-              Expanded(child: ElevatedButton(onPressed: () { provider.deletePatient(patient.id); Navigator.pop(ctx); Navigator.pop(context); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))), child: const Text('Delete All', style: TextStyle(fontWeight: FontWeight.bold)))),
+              Expanded(child: ElevatedButton(onPressed: () => _deleteThenClose(context, ctx, () => provider.deletePatient(patient.id), 'Could not delete this patient. Nothing was deleted.'), style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))), child: const Text('Delete All', style: TextStyle(fontWeight: FontWeight.bold)))),
             ])
           ],
         ),
       ),
     );
+  }
+
+  static final _deleting = <Route<dynamic>>{};
+
+  /// Deletes, then closes the confirm sheet and the screen or sheet it was
+  /// opened from ([context]), but only once the delete has worked. A refused
+  /// delete (for example after a failed reload) closes just the confirm
+  /// sheet, says so, and keeps the rest open, so it never looks as if it
+  /// worked. Never pops the first route (home).
+  static Future<void> _deleteThenClose(BuildContext context, BuildContext confirmCtx, Future<void> Function() delete, String refusal) async {
+    final confirm = ModalRoute.of(confirmCtx);
+    final under = ModalRoute.of(context);
+    if (confirm == null || under == null || !_deleting.add(confirm)) return; // already deleting
+    try {
+      await delete();
+    } catch (_) {
+      if (confirm.isCurrent) confirm.navigator?.pop();
+      if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(refusal)));
+      return;
+    } finally {
+      _deleting.remove(confirm);
+    }
+    final nav = under.navigator;
+    if (nav == null || !under.isActive) return;
+    nav.popUntil((r) => r == under || r.isFirst);
+    if (under.isCurrent && !under.isFirst) nav.pop();
   }
 
   void _showModernDeleteRecordConfirm(BuildContext context, PatientProvider provider, String pId, String rId) {
@@ -72,7 +98,7 @@ class PatientDetailScreen extends StatelessWidget {
             Row(children: [
               Expanded(child: TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel'))),
               const SizedBox(width: 16),
-              Expanded(child: ElevatedButton(onPressed: () { provider.deleteRecord(pId, rId); Navigator.pop(ctx); Navigator.pop(context); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white), child: const Text('Delete'))),
+              Expanded(child: ElevatedButton(onPressed: () => _deleteThenClose(context, ctx, () => provider.deleteRecord(pId, rId), 'Could not delete this visit. Nothing was deleted.'), style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white), child: const Text('Delete'))),
             ])
           ],
         ),
@@ -80,12 +106,39 @@ class PatientDetailScreen extends StatelessWidget {
     );
   }
 
+  static Patient? _patientById(PatientProvider provider, String id) {
+    try {
+      return provider.findById(id);
+    } on StateError {
+      return null;
+    }
+  }
+
+  /// The patient is gone, e.g. the session ended and the list was cleared:
+  /// close any sheet, dialog or form opened from this screen, then the
+  /// screen itself, so no diagnosis or symptoms stay on screen. Never pops
+  /// the first route (home).
+  static void _closeWhenPatientGone(BuildContext context) {
+    final route = ModalRoute.of(context);
+    if (route == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final nav = route.navigator;
+      if (nav == null || !route.isActive) return;
+      nav.popUntil((r) => r == route || r.isFirst);
+      if (route.isCurrent && !route.isFirst) nav.pop();
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final doctor = Provider.of<DoctorProvider>(context).currentDoctor;
     return Consumer<PatientProvider>(
       builder: (ctx, provider, _) {
-        final patient = provider.findById(patientId);
+        final patient = _patientById(provider, patientId);
+        if (patient == null) {
+          _closeWhenPatientGone(ctx);
+          return const Scaffold(backgroundColor: Color(0xFFF8FAFC));
+        }
         final family = provider.patients.where((p) => p.phone == patient.phone && p.id != patient.id).toList();
         final lastVisit = patient.history.isNotEmpty ? patient.history.first : null;
 
@@ -177,15 +230,21 @@ class PatientDetailScreen extends StatelessWidget {
     return Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: const Color(0xFFF8FAFC), borderRadius: BorderRadius.circular(6), border: Border.all(color: const Color(0xFFE2E8F0))), child: Text('$label: $val', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Color(0xFF475569))));
   }
 
-  void _showRecordDetails(BuildContext context, dynamic doctor, Patient patient, VisitRecord record, PatientProvider provider) {
-    showModalBottomSheet(context: context, isScrollControlled: true, backgroundColor: Colors.transparent, builder: (ctx) => Container(
+  void _showRecordDetails(BuildContext context, dynamic doctor, Patient openedPatient, VisitRecord openedRecord, PatientProvider openedProvider) {
+    // Live: Edit/Delete go away if a reload fails while this is open, and
+    // nothing is shown once the patient or visit is gone (session end).
+    showModalBottomSheet(context: context, isScrollControlled: true, backgroundColor: Colors.transparent, builder: (_) => Consumer<PatientProvider>(builder: (ctx, provider, _) {
+      final patient = _patientById(provider, openedPatient.id);
+      final record = patient?.history.where((r) => r.id == openedRecord.id).firstOrNull;
+      if (patient == null || record == null) return const SizedBox.shrink();
+      return Container(
       height: MediaQuery.of(context).size.height * 0.85, decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(24))), padding: const EdgeInsets.all(24.0),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
           Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text("${DateFormat('EEEE, MMM dd, yyyy').format(record.date)} • ${record.visitType}", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Color(0xFF6366F1))), Text(record.diagnosis, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 24, color: Color(0xFF1E293B)))])),
           Row(children: [
             if (!PatientLoad.readOnly(provider)) IconButton(onPressed: () { Navigator.pop(ctx); Navigator.push(context, MaterialPageRoute(builder: (c) => AddRecordScreen(patientId: patient.id, existingRecord: record))); }, icon: const Icon(Icons.edit_outlined, color: Color(0xFF6366F1)), tooltip: 'Edit visit'),
-            if (!PatientLoad.readOnly(provider)) IconButton(onPressed: () => _showModernDeleteRecordConfirm(context, provider, patient.id, record.id), icon: const Icon(Icons.delete_outline, color: Colors.redAccent), tooltip: 'Delete visit'),
+            if (!PatientLoad.readOnly(provider)) IconButton(onPressed: () => _showModernDeleteRecordConfirm(ctx, provider, patient.id, record.id), icon: const Icon(Icons.delete_outline, color: Colors.redAccent), tooltip: 'Delete visit'),
             IconButton(onPressed: () => _shareVisitSummary(context, doctor, patient, record), icon: const Icon(Icons.share_outlined, color: Color(0xFF6366F1)), tooltip: 'Share visit'),
           ]),
         ]),
@@ -221,7 +280,8 @@ class PatientDetailScreen extends StatelessWidget {
           ]
         ]))),
       ]),
-    ));
+    );
+    }));
   }
 
   Widget _buildProfessionalDetail(String label, String value, IconData icon, {bool isSpecial = false}) {
