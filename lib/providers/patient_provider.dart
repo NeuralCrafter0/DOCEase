@@ -15,6 +15,8 @@ import '../services/sync_cancel_token.dart';
 import 'database_helper.dart';
 import 'firestore_helper.dart';
 import 'save_refused_exception.dart';
+import 'strict_patient_read.dart';
+import '../services/patient_load_status.dart';
 
 export 'save_refused_exception.dart';
 
@@ -43,7 +45,10 @@ class PatientProvider with ChangeNotifier {
     Duration retryMaxDelay = const Duration(minutes: 5),
     bool cloudSync = true,
     LocalPhotoStore? photos,
+    PatientLoadStatus? loadStatus,
   })  : _db = db ?? DatabaseHelper.instance,
+        // The app's provider (no injected DB) publishes for the photo sweep.
+        _loadStatus = loadStatus ?? (db == null ? PatientLoadStatus.instance : null),
         _cloudSync = cloudSync,
         _photosOverride = photos,
         _firestoreOverride = firestore,
@@ -54,6 +59,7 @@ class PatientProvider with ChangeNotifier {
         _retryDelay = retryBaseDelay;
 
   final LocalDatabase _db;
+  final PatientLoadStatus? _loadStatus;
 
   /// False in dev mode (kDevMode): Firestore, Auth and Storage are never
   /// touched; push, pull, retry and upload are skipped (rows stay dirty)
@@ -90,6 +96,12 @@ class PatientProvider with ChangeNotifier {
   String? _uid;
   SyncCancelToken _token = SyncCancelToken();
   Future<void>? _loading;
+  /// The load run still in progress ([reload] shares it).
+  Future<void>? _activeLoad;
+  /// The owner [_patients] was read for (null: nothing loaded).
+  String? _listOwner;
+  bool _loadFailed = false;
+  PatientReadFailure? _loadFailure;
   Future<void>? _pushInFlight;
 
   /// Local files the doctor picked in this session that are not uploaded
@@ -120,6 +132,18 @@ class PatientProvider with ChangeNotifier {
   }
 
   bool get isSyncing => _isSyncing;
+
+  /// True when the last load of this owner's patients failed. The list is
+  /// then the one loaded before for the same owner (empty on a first load,
+  /// never another owner's), and every patient or visit write or delete is
+  /// refused with [SaveRefusedException] until [reload] succeeds: edits to
+  /// a stale list could overwrite newer rows. Sync, photo cleanup and the
+  /// startup sweep do not run either.
+  bool get loadFailed => _loadFailed;
+
+  /// The reason enum value of the failed load ([PatientReadFailure]), for
+  /// diagnostics only; null when [loadFailed] is false.
+  Object? get loadFailure => _loadFailure;
 
   /// The uid whose data is loaded.
   String? get sessionUid => _uid;
@@ -158,7 +182,14 @@ class PatientProvider with ChangeNotifier {
         (cancel == null || identical(cancel, _token))) {
       return running;
     }
-    if (_uid != uid) _token.cancel();
+    if (_uid != uid) {
+      _token.cancel();
+      // Owner change: the old owner's list and load state go, even while
+      // loadFailed is true (security: never one doctor's patients for the next).
+      final had = _patients.isNotEmpty || _loadFailed || _listOwner != null;
+      _resetLoadState();
+      if (had) notifyListeners();
+    }
     final token = cancel ?? (_token.isCancelled || _uid != uid ? SyncCancelToken() : _token);
     _uid = uid;
     _token = token;
@@ -166,8 +197,75 @@ class PatientProvider with ChangeNotifier {
     if (!_dbReadyFor(uid)) return Future.value();
     final run = _loadAndSync(uid, token);
     _loading = run;
+    _activeLoad = run;
+    void done() {
+      if (identical(_activeLoad, run)) _activeLoad = null;
+    }
+    unawaited(run.then((_) => done(), onError: (Object _) => done()));
     return run;
   }
+
+  /// Reads the current owner's patients again (e.g. after [loadFailed]).
+  /// Success replaces the list and clears [loadFailed]; a failure keeps the
+  /// list. Shares a load that is still running; does nothing without a
+  /// session or while the owner's database is not open.
+  Future<void> reload() {
+    final uid = _uid;
+    if (uid == null || _token.isCancelled) return Future.value();
+    final active = _activeLoad;
+    if (active != null) return active;
+    _loading = null;
+    return loadAndSync(uid);
+  }
+
+  void _resetLoadState() {
+    _patients = [];
+    _listOwner = null;
+    _loadFailed = false;
+    _loadFailure = null;
+    _activeLoad = null;
+    _loadStatus?.cleared();
+  }
+
+  /// A failed load keeps the list only if it is this owner's.
+  void _markLoadFailed(String uid, Object error) {
+    if (_listOwner != uid) {
+      _patients = [];
+      _listOwner = null;
+    }
+    _loadFailed = true;
+    _loadFailure = error is PatientReadIncomplete ? error.reason : PatientReadFailure.readFailed;
+    _loadStatus?.failed(uid);
+    notifyListeners();
+  }
+
+  /// Every patient of [uid], or throws (never a partial or empty list on a
+  /// read error).
+  Future<List<Patient>> _readPatients(String uid) async {
+    final db = _db;
+    if (db case final StrictPatientReads strict) return strict.fetchPatientsStrict();
+    // TODO(db-strict-read): interim until #10's fetchPatientsStrict() lands. fetchPatients()
+    // returns [] on a read error, so an empty result is accepted only when
+    // the DB is open for uid and its unsynced counter can be read too.
+    if (_openDbUid != uid) throw const PatientReadIncomplete(PatientReadFailure.notOpen);
+    final list = await db.fetchPatients();
+    if (list.isEmpty) {
+      UnsyncedCount count;
+      try {
+        count = await db.unsyncedCount();
+      } catch (_) {
+        count = UnsyncedCount.unknown;
+      }
+      if (count is UnsyncedUnknown) throw const PatientReadIncomplete(PatientReadFailure.readFailed);
+    }
+    return list;
+  }
+
+  /// Security (#16 loadFailed contract): the refusal for [operation] while
+  /// the last load failed, else null.
+  SaveRefusedException? _loadRefusal(PatientSaveOperation operation) => _loadFailed
+      ? SaveRefusedException(operation, PatientReadIncomplete(_loadFailure ?? PatientReadFailure.readFailed))
+      : null;
 
   /// Kept for existing callers (HomeScreen). Loading is started by
   /// SessionController when the DB is ready; this only waits for that run
@@ -212,14 +310,21 @@ class PatientProvider with ChangeNotifier {
     }
     final List<Patient> local;
     try {
-      local = await _db.fetchPatients();
+      local = await _readPatients(uid);
     } catch (e) {
       debugPrint('Local load failed: ${errorCode(e)}');
-      if (_live(uid, token)) _loading = null;
+      if (_live(uid, token)) {
+        _loading = null;
+        _markLoadFailed(uid, e);
+      }
       return;
     }
     if (!_live(uid, token)) return;
     _patients = local;
+    _listOwner = uid;
+    _loadFailed = false;
+    _loadFailure = null;
+    _loadStatus?.loaded(uid);
     if (!_cloud) {
       notifyListeners(); // dev mode: on-phone data only, no push or pull
       return;
@@ -241,8 +346,9 @@ class PatientProvider with ChangeNotifier {
   }
 
   Future<void> _pullFromCloud(String uid, SyncCancelToken token) async {
-    // Never read or merge cloud data unless the local DB is open for uid.
-    if (!_dbReadyFor(uid)) return;
+    // Never read or merge cloud data unless the local DB is open for uid,
+    // nor into a stale list (loadFailed).
+    if (!_dbReadyFor(uid) || _loadFailed) return;
     final cloudPatients = await _firestore.fetchAllPatients();
     if (!_live(uid, token) || cloudPatients.isEmpty) return;
     // Never overwrite a local change Firestore has not confirmed yet. If
@@ -320,6 +426,7 @@ class PatientProvider with ChangeNotifier {
   }
 
   Future<void> _pushDirty(String uid, SyncCancelToken token) {
+    if (_loadFailed) return Future.value(); // reload() syncs once the list is good
     final inFlight = _pushInFlight;
     if (inFlight != null) return inFlight;
     final run = _pushDirtyNow(uid, token);
@@ -626,6 +733,8 @@ class PatientProvider with ChangeNotifier {
   /// is unreadable). The patient is then no longer in the list and nothing
   /// is synced.
   Future<void> addPatient(Patient patient) async {
+    final refused = _loadRefusal(PatientSaveOperation.add);
+    if (refused != null) throw refused; // no duplicates after a failed load
     try {
       _ensureWritable(patient);
     } catch (e, st) {
@@ -649,6 +758,8 @@ class PatientProvider with ChangeNotifier {
   /// version is shown again and nothing is synced. Does nothing if no
   /// patient has this id.
   Future<void> updatePatient(Patient patient) async {
+    final refused = _loadRefusal(PatientSaveOperation.update);
+    if (refused != null) throw refused;
     final index = _patients.indexWhere((p) => p.id == patient.id);
     if (index != -1) {
       try {
@@ -685,6 +796,8 @@ class PatientProvider with ChangeNotifier {
   /// time, so they are no longer referenced). A refused delete removes
   /// nothing. See [_deleteUnreferencedPhotos].
   Future<void> deletePatient(String id) async {
+    final refused = _loadRefusal(PatientSaveOperation.delete);
+    if (refused != null) throw refused;
     final uid = _uid;
     final token = _token;
     final owner = _photoOwner;
@@ -723,10 +836,13 @@ class PatientProvider with ChangeNotifier {
   Future<void> _mutateHistory(
     String patientId,
     Future<List<VisitRecord>?> Function(Patient current) change, {
+    required PatientSaveOperation operation,
     bool awaitPush = false,
     List<String>? newCopies,
   }) {
     final run = _historyChain.then<(Future<void>,)?>((_) async {
+      final refused = _loadRefusal(operation);
+      if (refused != null) throw refused;
       final current = _byId(patientId);
       if (current == null) return null;
       _ensureWritable(current);
@@ -738,6 +854,8 @@ class PatientProvider with ChangeNotifier {
       final latest = _byId(patientId);
       if (latest == null || !_live(uid, token)) return null; // deleted or session ended
       final updated = _withHistory(latest, history);
+      final refusedNow = _loadRefusal(operation); // a reload failed meanwhile
+      if (refusedNow != null) throw refusedNow;
       final String? version;
       try {
         version = await _db.updatePatient(updated);
@@ -848,6 +966,10 @@ class PatientProvider with ChangeNotifier {
     try {
       final list = entries.toList();
       if (list.isEmpty || _photoOwner != owner) return;
+      if (_loadFailed) {
+        debugPrint('Photos: cleanup skipped (loadFailed)'); // left to the sweep
+        return;
+      }
       if (_patients.any((p) => p.hasParseErrors)) return;
       final folder = LocalPhotoStore.ownerFolderName(owner);
       final stillUsed = AttachmentRefs.referencedKeys([
@@ -904,7 +1026,7 @@ class PatientProvider with ChangeNotifier {
       _validatedPicks.addAll(toUpload.map((e) => kept[e] ?? e));
       final latest = _byId(patientId) ?? current;
       return [_withPaths(record, kept), ...latest.history];
-    }, newCopies: copies);
+    }, operation: PatientSaveOperation.addVisit, newCopies: copies);
   }
 
   /// Edits a visit. Only attachments not already on the stored visit are
@@ -925,7 +1047,7 @@ class PatientProvider with ChangeNotifier {
       final j = latest.history.indexWhere((r) => r.id == record.id);
       if (j == -1) return null;
       return [...latest.history]..[j] = _withPaths(record, kept);
-    }, newCopies: copies);
+    }, operation: PatientSaveOperation.updateVisit, newCopies: copies);
   }
 
   /// Dev mode: keeps each validated pick in the app's photo folder and
@@ -971,7 +1093,7 @@ class PatientProvider with ChangeNotifier {
       _mutateHistory(patientId, (current) async {
         if (!current.history.any((r) => r.id == recordId)) return null;
         return current.history.where((r) => r.id != recordId).toList();
-      }, awaitPush: true);
+      }, operation: PatientSaveOperation.deleteVisit, awaitPush: true);
 
   Patient findById(String id) => _patients.firstWhere((p) => p.id == id);
 
@@ -1000,7 +1122,7 @@ class PatientProvider with ChangeNotifier {
     _pendingUploads.clear();
     _unconfirmed.clear();
     _validatedPicks.clear();
-    _patients = [];
+    _resetLoadState();
     _searchQuery = '';
     _isSyncing = false;
     notifyListeners();

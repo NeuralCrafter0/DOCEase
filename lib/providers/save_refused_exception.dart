@@ -3,7 +3,7 @@ import '../services/log_codes.dart';
 import 'local_database.dart' show UnsyncedCounterException;
 
 /// Which patient save was refused.
-enum PatientSaveOperation { add, update }
+enum PatientSaveOperation { add, update, delete, addVisit, updateVisit, deleteVisit }
 
 /// Thrown by `PatientProvider.addPatient` and `updatePatient` when the save
 /// is refused, in normal and dev mode alike. By the time it is thrown the
