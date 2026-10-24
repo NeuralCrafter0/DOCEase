@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import '../utils/vitals_display.dart';
 import 'vitals_trends_screen.dart';
+import '../utils/patient_search.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:share_plus/share_plus.dart';
 import '../providers/patient_provider.dart';
@@ -87,7 +88,7 @@ class PatientDetailScreen extends StatelessWidget {
     return Consumer<PatientProvider>(
       builder: (ctx, provider, _) {
         final patient = provider.findById(patientId);
-        final family = provider.allPatients.where((p) => p.phone == patient.phone && p.id != patient.id).toList();
+        final family = provider.allPatients.where((p) => p.id != patient.id && samePhone(p.phone, patient.phone)).toList();
         final lastVisit = patient.history.isNotEmpty ? patient.history.first : null;
 
         return Scaffold(
