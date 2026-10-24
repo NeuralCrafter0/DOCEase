@@ -212,6 +212,141 @@ void main() {
     });
   });
 
+  group('removed photo: mapping dropped', () {
+    test('unreferencedSwapKeys: kept when S or anything keying to L is '
+        'present, dropped otherwise; unreadable history keeps all', () {
+      final m = {localKey: storage};
+      String h(List<String> paths) => jsonEncode([visit('a', paths)]);
+      expect(AttachmentRefs.unreferencedSwapKeys(h([storage]), m, uid: 'doctorA'),
+          isEmpty);
+      expect(AttachmentRefs.unreferencedSwapKeys(h(['file://localhost$local']), m,
+          uid: 'doctorA'), isEmpty);
+      expect(AttachmentRefs.unreferencedSwapKeys(h([newPhoto]), m, uid: 'doctorA'),
+          {localKey});
+      expect(AttachmentRefs.unreferencedSwapKeys(jsonEncode([]), m, uid: 'doctorA'),
+          {localKey});
+      expect(AttachmentRefs.unreferencedSwapKeys('not json', m, uid: 'doctorA'),
+          isEmpty);
+      expect(AttachmentRefs.unreferencedSwapKeys(h([]), {}, uid: 'doctorA'),
+          isEmpty);
+    });
+
+    test('fake: remove the photo, then a stale pre-upload copy keeps L; '
+        "other patients' mappings untouched; a save holding S keeps it",
+        () async {
+      final db = FakeLocalDatabase();
+      await db.insertPatient(patientWith('p1', [[local, newPhoto]]));
+      await db.insertPatient(patientWith('p2', [[local]]));
+      final stale = db.rows['p1']!;
+      for (final pid in ['p1', 'p2']) {
+        expect(
+            await db.swapAttachmentPath(
+                expectedOwner: 'doctorA', patientId: pid, localPath: local,
+                storagePath: 'clinical_attachments/doctorA/$pid/$uuid.jpg'),
+            isTrue);
+      }
+      expect(await db.updatePatient(patientWith('p1', [[newPhoto]])), isNotNull);
+      expect(db.swaps['p1'], isEmpty);
+      expect(db.swaps['p2'], {localKey: 'clinical_attachments/doctorA/p2/$uuid.jpg'});
+      expect(await db.updatePatient(stale), isNotNull);
+      expect(pathsOf(db.rows['p1']!), [[local, newPhoto]]);
+      final cur = db.rows['p2']!;
+      expect(await db.updatePatient(
+          Patient.fromJson({...cur.toJson(), 'name': 'Asha Renamed'})), isNotNull);
+      expect(db.swaps['p2'], hasLength(1));
+    });
+
+    test('fake markSynced refuses a snapshot taken before a later edit',
+        () async {
+      final db = FakeLocalDatabase();
+      await db.insertPatient(patientWith('p1', [[local]]));
+      final snap = (await db.dirtyPatientsStrict()).single;
+      final pushed = db.versions['p1']!; // the fake keeps versions apart
+      await db.updatePatient(
+          Patient.fromJson({...snap.toJson(), 'name': 'Asha Edited'}));
+      expect(await db.markSynced('p1', pushed), isFalse);
+      expect(db.dirty['p1'], isTrue);
+      expect(await db.unsyncedCount(), const UnsyncedCount.known(1));
+    });
+  });
+
+  group('swappedPathsFor', () {
+    const s1 = 'clinical_attachments/doctorA/p1/$uuid.jpg';
+    test('validSwapMappings keeps only save-time-valid rows', () {
+      final got = AttachmentRefs.validSwapMappings([
+        {'local_key': localKey, 'storage_path': s1},
+        {'local_key': 'attachments/b.jpg',
+          'storage_path': 'clinical_attachments/doctorB/p1/b.jpg'},
+        {'local_key': 'attachments/c.jpg',
+          'storage_path': 'clinical_attachments/doctorA/p2/c.jpg'},
+        {'local_key': 'attachments/d.jpg',
+          'storage_path': 'clinical_attachments/doctorA/p1/../p2/d.jpg'},
+        {'local_key': '../e.jpg',
+          'storage_path': 'clinical_attachments/doctorA/p1/e.jpg'},
+        {'local_key': 'attachments/', 'storage_path': s1},
+        {'local_key': 'attachments/a/b.jpg', 'storage_path': s1},
+        {'local_key': 7, 'storage_path': s1},
+        {'local_key': 'attachments/f.jpg', 'storage_path': null},
+      ], uid: 'doctorA', patientId: 'p1');
+      expect(got, {localKey: s1});
+      expect(AttachmentRefs.attachmentKey(local, ownerFolderName: ownerA),
+          localKey);
+    });
+
+    Future<FakeLocalDatabase> swappedDb() async {
+      final db = FakeLocalDatabase();
+      await db.insertPatient(patientWith('p1', [[local]]));
+      await db.insertPatient(patientWith('p2', [[local]]));
+      for (final pid in ['p1', 'p2']) {
+        expect(
+            await db.swapAttachmentPath(
+                expectedOwner: 'doctorA', patientId: pid, localPath: local,
+                storagePath: 'clinical_attachments/doctorA/$pid/$uuid.jpg'),
+            isTrue);
+      }
+      return db;
+    }
+
+    Future<Map<String, String>> map(FakeLocalDatabase db, String pid,
+            {String owner = 'doctorA'}) =>
+        db.swappedPathsFor(expectedOwner: owner, patientId: pid);
+    Matcher fails(DbReadFailure r) => throwsA(
+        isA<DbReadException>().having((e) => e.reason, 'reason', r));
+
+    test('swap then map; other patients never returned; tampered excluded',
+        () async {
+      final db = await swappedDb();
+      expect(await map(db, 'p1'), {localKey: s1});
+      expect(await map(db, 'p3'), isEmpty);
+      db.swaps['p1']!['attachments/t.jpg'] =
+          'clinical_attachments/doctorA/p2/t.jpg';
+      db.swaps['p1']!['../x.jpg'] = 'clinical_attachments/doctorA/p1/x.jpg';
+      expect(await map(db, 'p1'), {localKey: s1});
+    });
+
+    test('wrong owner, closed DB and failed read throw; empty ids are '
+        'ArgumentError', () async {
+      final db = await swappedDb();
+      await expectLater(map(db, 'p1', owner: 'doctorB'),
+          fails(DbReadFailure.notOpen));
+      expect(() => map(db, ''), throwsArgumentError);
+      expect(() => map(db, 'p1', owner: ''), throwsArgumentError);
+      db.strictReadFailure = DbReadFailure.readFailed;
+      await expectLater(map(db, 'p1'), fails(DbReadFailure.readFailed));
+      db.strictReadFailure = null;
+      db.state = const DbOpening('doctorA');
+      await expectLater(map(db, 'p1'), fails(DbReadFailure.notOpen));
+    });
+
+    test('a mapping dropped by the removed-photo fix is no longer returned',
+        () async {
+      final db = await swappedDb();
+      await db.updatePatient(patientWith('p2', [[newPhoto]]));
+      expect(await map(db, 'p2'), isEmpty);
+      expect(await map(db, 'p1'), {localKey: s1});
+    });
+  });
+
   test('DatabaseHelper prunes mappings after 30 days', () {
     expect(DatabaseHelper.attachmentSwapRetention, const Duration(days: 30));
   });

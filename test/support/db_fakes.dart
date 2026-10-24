@@ -132,6 +132,8 @@ class FakeLocalDatabase implements LocalDatabase {
     final (history, n) = AttachmentRefs.applySwapsToHistoryJson(
         jsonEncode(json['history']), recorded,
         uid: uid, patientId: patient.id);
+    final gone = AttachmentRefs.unreferencedSwapKeys(history, recorded, uid: uid);
+    recorded.removeWhere((k, _) => gone.contains(k));
     if (n == 0) return patient;
     return Patient.fromJson({...json, 'history': jsonDecode(history)},
         updatedAt: patient.updatedAt);
@@ -195,6 +197,26 @@ class FakeLocalDatabase implements LocalDatabase {
   @override
   Future<List<String>> pendingDeletesStrict() =>
       _strict(() => tombstones.toList());
+
+  @override
+  Future<Map<String, String>> swappedPathsFor(
+      {required String expectedOwner, required String patientId}) async {
+    if (expectedOwner.isEmpty) {
+      throw ArgumentError.value('', 'expectedOwner', 'must not be empty');
+    }
+    if (patientId.isEmpty) {
+      throw ArgumentError.value('', 'patientId', 'must not be empty');
+    }
+    return _strict(() {
+      if (openUid != expectedOwner) {
+        throw const DbReadException(DbReadFailure.notOpen);
+      }
+      return AttachmentRefs.validSwapMappings([
+        for (final e in (swaps[patientId] ?? const {}).entries)
+          {'local_key': e.key, 'storage_path': e.value},
+      ], uid: expectedOwner, patientId: patientId);
+    });
+  }
 
   @override
   Future<List<Patient>> dirtyPatients() async =>
