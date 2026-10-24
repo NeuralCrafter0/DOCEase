@@ -16,7 +16,6 @@ import 'package:docease/config/dev_mode.dart';
 import 'package:docease/models/patient.dart';
 import 'package:docease/providers/local_database.dart';
 import 'package:docease/providers/patient_provider.dart';
-import 'package:docease/providers/strict_patient_read.dart';
 import 'package:docease/services/local_photo_store.dart';
 import 'package:docease/services/patient_load_status.dart';
 import 'package:docease/services/photo_sweep.dart';
@@ -25,10 +24,10 @@ import 'package:path/path.dart' as p;
 
 import '../support/db_fakes.dart';
 
-/// A DB with #10's strict read (interim interface) that can be made to fail,
-/// and that counts writes so "refused" can be checked as "nothing written".
-class _StrictDb extends FakeLocalDatabase implements StrictPatientReads {
-  PatientReadFailure? failWith;
+/// #10's fake with its strict read made to fail on demand, counting writes
+/// so "refused" can be checked as "nothing written".
+class _StrictDb extends FakeLocalDatabase {
+  DbReadFailure? failWith;
   Object? scanFailWith;
   int scans = 0;
   int strictReads = 0;
@@ -38,8 +37,8 @@ class _StrictDb extends FakeLocalDatabase implements StrictPatientReads {
   Future<List<Patient>> fetchPatientsStrict() async {
     strictReads++;
     final f = failWith;
-    if (f != null) throw PatientReadIncomplete(f);
-    return rows.values.toList();
+    if (f != null) throw DbReadException(f);
+    return super.fetchPatientsStrict();
   }
 
   @override
@@ -69,15 +68,11 @@ class _StrictDb extends FakeLocalDatabase implements StrictPatientReads {
   }
 }
 
-/// No strict read: the provider's interim path (fetchPatients() plus the
-/// unsynced-counter cross-check on an empty result).
-class _LegacyDb extends FakeLocalDatabase {
-  bool fetchReturnsEmpty = false;
-  bool countUnknown = false;
+/// The lenient read returns [] (what it does on a read error); the list
+/// must never come from it.
+class _LenientEmptyDb extends FakeLocalDatabase {
   @override
-  Future<List<Patient>> fetchPatients() async => fetchReturnsEmpty ? [] : super.fetchPatients();
-  @override
-  Future<UnsyncedCount> unsyncedCount() async => countUnknown ? UnsyncedCount.unknown : super.unsyncedCount();
+  Future<List<Patient>> fetchPatients() async => [];
 }
 
 const doctorA = 'doctorA';
@@ -105,9 +100,9 @@ String n(String label) {
 /// Sorted patient ids joined with ',' (records compare lists by identity).
 String ids(PatientProvider provider) => (provider.patients.map((p) => p.id).toList()..sort()).join(',');
 
-Matcher refused(PatientSaveOperation op, PatientReadFailure reason) => throwsA(isA<SaveRefusedException>()
+Matcher refused(PatientSaveOperation op, DbReadFailure reason) => throwsA(isA<SaveRefusedException>()
     .having((e) => e.operation, 'operation', op)
-    .having((e) => e.error, 'error', isA<PatientReadIncomplete>().having((e) => e.reason, 'reason', reason)));
+    .having((e) => e.error, 'error', isA<DbReadException>().having((e) => e.reason, 'reason', reason)));
 
 void main() {
   late Directory root;
@@ -144,12 +139,12 @@ void main() {
   group('strict load: loadFailed, loadFailure, reload()', () {
     test('a failed first load leaves the list empty, sets loadFailed and notifies', () async {
       db.rows['p1'] = patient('p1');
-      db.failWith = PatientReadFailure.readFailed;
+      db.failWith = DbReadFailure.readFailed;
       final provider = make();
       await provider.loadAndSync(doctorA);
       expect(provider.patients, isEmpty);
       expect(provider.loadFailed, isTrue);
-      expect(provider.loadFailure, PatientReadFailure.readFailed);
+      expect(provider.loadFailure, DbReadFailure.readFailed);
       expect(notified, greaterThan(0));
       expect(status.isFailed(doctorA), isTrue);
       provider.dispose();
@@ -162,17 +157,17 @@ void main() {
       expect((ids(provider), provider.loadFailed), ('p1', false));
       final before = notified;
       db.rows['p2'] = patient('p2');
-      db.failWith = PatientReadFailure.unreadableRow;
+      db.failWith = DbReadFailure.unreadableRow;
       await provider.reload();
       expect(ids(provider), 'p1', reason: 'never replaced with []');
       expect(provider.loadFailed, isTrue);
-      expect(provider.loadFailure, PatientReadFailure.unreadableRow);
+      expect(provider.loadFailure, DbReadFailure.unreadableRow);
       expect(notified, greaterThan(before));
       provider.dispose();
     });
 
     test('a successful reload replaces the list and clears loadFailed', () async {
-      db.failWith = PatientReadFailure.readFailed;
+      db.failWith = DbReadFailure.readFailed;
       final provider = make();
       await provider.loadAndSync(doctorA);
       expect(provider.loadFailed, isTrue);
@@ -199,20 +194,26 @@ void main() {
       provider.dispose();
     });
 
-    test('interim path (no strict read yet): [] with an unreadable counter is a failed load', () async {
-      final legacy = _LegacyDb()..state = const DbReady(doctorA);
-      legacy.rows['p1'] = patient('p1');
-      final provider = make(database: legacy);
+    test('the list comes from the strict read, never the lenient one', () async {
+      final lenient = _LenientEmptyDb()..state = const DbReady(doctorA);
+      lenient.rows['p1'] = patient('p1');
+      final provider = make(database: lenient);
       await provider.loadAndSync(doctorA);
       expect((ids(provider), provider.loadFailed), ('p1', false));
-      legacy
-        ..fetchReturnsEmpty = true
-        ..countUnknown = true;
-      await provider.reload();
-      expect((ids(provider), provider.loadFailed, provider.loadFailure), ('p1', true, PatientReadFailure.readFailed));
-      legacy.countUnknown = false; // a genuinely empty, readable DB
-      await provider.reload();
-      expect((ids(provider), provider.loadFailed), ('', false));
+      provider.dispose();
+    });
+
+    test('one unreadable row fails the whole load (unreadableRow)', () async {
+      final flagged = FakeLocalDatabase()..state = const DbReady(doctorA);
+      flagged.rows['p1'] = patient('p1');
+      flagged.rows['p2'] = Patient(
+          id: 'p2', name: 'x', age: '1', gender: 'Female', phone: '+91', parseErrors: const ['name']);
+      final provider = make(database: flagged);
+      await provider.loadAndSync(doctorA);
+      expect((ids(provider), provider.loadFailed, provider.loadFailure), ('', true, DbReadFailure.unreadableRow));
+      await expectLater(provider.addPatient(patient('p3')),
+          refused(PatientSaveOperation.add, DbReadFailure.unreadableRow));
+      expect(flagged.rows.keys.toSet(), {'p1', 'p2'});
       provider.dispose();
     });
 
@@ -220,7 +221,7 @@ void main() {
       db.rows['p1'] = patient('p1');
       final provider = make();
       await provider.loadAndSync(doctorA);
-      db.failWith = PatientReadFailure.readFailed;
+      db.failWith = DbReadFailure.readFailed;
       await provider.reload();
       Object? error;
       try {
@@ -229,7 +230,7 @@ void main() {
         error = e;
       }
       final text = '$error ${provider.loadFailure}';
-      expect(text, contains('PatientReadIncomplete'));
+      expect(text, contains('DbReadException'));
       for (final leak in ['Asha', '+91999', 'p1', 'p9', doctorA]) {
         expect(text, isNot(contains(leak)));
       }
@@ -246,7 +247,7 @@ void main() {
       db.rows['p1'] = patient('p1', [visit('v1', [a])]);
       provider = make();
       await provider.loadAndSync(doctorA);
-      db.failWith = PatientReadFailure.readFailed;
+      db.failWith = DbReadFailure.readFailed;
       await provider.reload();
       expect(provider.loadFailed, isTrue);
       db.writes = 0;
@@ -255,17 +256,17 @@ void main() {
     tearDown(() => provider.dispose());
 
     test('addPatient: no duplicate can be created after a failed load', () async {
-      await expectLater(provider.addPatient(patient('p1')), refused(PatientSaveOperation.add, PatientReadFailure.readFailed));
+      await expectLater(provider.addPatient(patient('p1')), refused(PatientSaveOperation.add, DbReadFailure.readFailed));
       expect(ids(provider), 'p1');
     });
 
     test('updatePatient, deletePatient, addRecord, updateRecord, deleteRecord', () async {
       final p1 = provider.findById('p1');
-      await expectLater(provider.updatePatient(patient('p1')), refused(PatientSaveOperation.update, PatientReadFailure.readFailed));
-      await expectLater(provider.deletePatient('p1'), refused(PatientSaveOperation.delete, PatientReadFailure.readFailed));
-      await expectLater(provider.addRecord('p1', visit('v2', const [])), refused(PatientSaveOperation.addVisit, PatientReadFailure.readFailed));
-      await expectLater(provider.updateRecord('p1', visit('v1', const [])), refused(PatientSaveOperation.updateVisit, PatientReadFailure.readFailed));
-      await expectLater(provider.deleteRecord('p1', 'v1'), refused(PatientSaveOperation.deleteVisit, PatientReadFailure.readFailed));
+      await expectLater(provider.updatePatient(patient('p1')), refused(PatientSaveOperation.update, DbReadFailure.readFailed));
+      await expectLater(provider.deletePatient('p1'), refused(PatientSaveOperation.delete, DbReadFailure.readFailed));
+      await expectLater(provider.addRecord('p1', visit('v2', const [])), refused(PatientSaveOperation.addVisit, DbReadFailure.readFailed));
+      await expectLater(provider.updateRecord('p1', visit('v1', const [])), refused(PatientSaveOperation.updateVisit, DbReadFailure.readFailed));
+      await expectLater(provider.deleteRecord('p1', 'v1'), refused(PatientSaveOperation.deleteVisit, DbReadFailure.readFailed));
       expect(db.writes, 0, reason: 'nothing reached the DB');
       expect(identical(provider.findById('p1'), p1), isTrue, reason: 'memory untouched');
       expect(db.rows['p1']!.history.single.attachmentPaths, [a]);
@@ -295,7 +296,7 @@ void main() {
       db.rows['p1'] = patient('p1');
       final provider = make();
       await provider.loadAndSync(doctorA);
-      db.failWith = PatientReadFailure.readFailed;
+      db.failWith = DbReadFailure.readFailed;
       await provider.reload();
       expect((ids(provider), provider.loadFailed), ('p1', true));
 
@@ -311,7 +312,7 @@ void main() {
       // doctorB's DB opens but its first load fails: still never doctorA's list.
       db
         ..state = const DbReady(doctorB)
-        ..failWith = PatientReadFailure.readFailed;
+        ..failWith = DbReadFailure.readFailed;
       await provider.reload();
       expect(provider.patients, isEmpty);
       expect(provider.loadFailed, isTrue);
@@ -332,10 +333,10 @@ void main() {
       await provider.loadAndSync(doctorA);
       db
         ..state = const DbReady(doctorB)
-        ..failWith = PatientReadFailure.notOpen;
+        ..failWith = DbReadFailure.notOpen;
       await provider.loadAndSync(doctorB);
       expect(provider.patients, isEmpty);
-      expect((provider.loadFailed, provider.loadFailure), (true, PatientReadFailure.notOpen));
+      expect((provider.loadFailed, provider.loadFailure), (true, DbReadFailure.notOpen));
       provider.dispose();
     });
 
@@ -343,7 +344,7 @@ void main() {
       db.rows['p1'] = patient('p1');
       final provider = make();
       await provider.loadAndSync(doctorA);
-      db.failWith = PatientReadFailure.readFailed;
+      db.failWith = DbReadFailure.readFailed;
       await provider.reload();
       expect(provider.loadFailed, isTrue);
       provider.clear();

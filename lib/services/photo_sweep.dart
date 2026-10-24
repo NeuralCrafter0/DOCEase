@@ -63,8 +63,11 @@ class PhotoSweepResult {
 ///    never followed or deleted. Each walked file is keyed with #10's
 ///    [AttachmentRefs.attachmentKey] (keys are never built here); only keys
 ///    starting with `attachments/` are compared, and null means "not mine,
-///    never delete". The delete itself re-checks the resolved path
-///    ([LocalPhotoStore.deleteOwnedVisitFile]).
+///    never delete". The delete itself ([LocalPhotoStore.deleteOwnedVisitFile])
+///    is entry-only: it checks that the owner folder resolves to itself and
+///    that the entry is a regular file (`followLinks: false`) with an
+///    app-generated name directly in that folder, then unlinks the entry's
+///    own path, never a resolved one.
 /// 3. Files changed in the last [grace] are kept, so a photo picked and
 ///    copied but not yet saved is not eaten. The newer of the modified and
 ///    status-change times counts (a copy can keep the source's mtime).

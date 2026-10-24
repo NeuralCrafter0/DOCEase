@@ -27,6 +27,8 @@ const secret = 'Jane Doe +919999 diagnosis:HIV key=x00';
 class _ThrowingLoadDb extends MergeDb {
   @override
   Future<List<Patient>> fetchPatients() async => throw StateError(secret);
+  @override
+  Future<List<Patient>> fetchPatientsStrict() async => throw StateError(secret);
 }
 
 class _ThrowingMarkSyncedDb extends MergeDb {

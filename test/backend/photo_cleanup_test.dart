@@ -783,8 +783,9 @@ void main() {
 
     test('F8-R1 review: confirmed uploads must be in the signed-in owner\'s Storage folder', () {
       final s = File('lib/providers/patient_provider.dart').readAsStringSync();
-      expect(s, contains("final folder = '\${AttachmentPolicy.attachmentFolder(uid, saved.id)}/';"));
-      expect(s, contains('if (storagePath.startsWith(folder) && entries.contains(storagePath) && !entries.contains(local)) local,'));
+      final body = s.substring(s.indexOf('Future<bool> _swapPath('), s.indexOf('return _db.swapAttachmentPath('));
+      expect(body, contains("final folder = '\${AttachmentPolicy.attachmentFolder(owner, patientId)}/';"));
+      expect(body, contains("if (!storagePath.startsWith(folder) || storagePath.contains('..')) {"));
     });
   });
 }
