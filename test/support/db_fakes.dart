@@ -146,6 +146,39 @@ class FakeLocalDatabase implements LocalDatabase {
   @override
   Future<List<Patient>> fetchPatients() async => rows.values.toList();
 
+  /// When set, every strict read throws DbReadException(strictReadFailure)
+  /// while the lenient reads keep returning what they hold.
+  DbReadFailure? strictReadFailure;
+  Future<T> _strict<T>(T Function() read) async {
+    final f = strictReadFailure;
+    if (f != null) throw DbReadException(f);
+    if (openUid == null) throw const DbReadException(DbReadFailure.notOpen);
+    return read();
+  }
+
+  @override
+  Future<List<Patient>> fetchPatientsStrict() => _strict(() {
+        if (rows.values.any((p) => p.hasParseErrors)) {
+          throw const DbReadException(DbReadFailure.unreadableRow);
+        }
+        return rows.values.toList();
+      });
+
+  @override
+  Future<List<Patient>> dirtyPatientsStrict() async {
+    final list = await _strict(() => [
+          for (final e in rows.entries) if (dirty[e.key] == true) e.value
+        ]);
+    if (list.any((p) => p.hasParseErrors)) {
+      throw const DbReadException(DbReadFailure.unreadableRow);
+    }
+    return list;
+  }
+
+  @override
+  Future<List<String>> pendingDeletesStrict() =>
+      _strict(() => tombstones.toList());
+
   @override
   Future<List<Patient>> dirtyPatients() async =>
       [for (final e in rows.entries) if (dirty[e.key] == true) e.value];

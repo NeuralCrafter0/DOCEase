@@ -359,4 +359,67 @@ void main() {
       expect(opener.calls, isEmpty);
     });
   });
+
+  group('QA: file://localhost and file:/// key like the absolute path', () {
+    const uuid = '0b7f6c2e-4d1a-4c3b-9e8f-2a1b3c4d5e6f';
+    const supportDirs = [
+      '/data/user/0/com.docease.app/files', // Android
+      '/var/mobile/Containers/Data/Application/'
+          'A1B2C3D4-E5F6-4711-8899-AABBCCDDEEFF/Library/Application Support', // iOS
+    ];
+
+    test('absolute path, file:/// and file://localhost give the same key', () {
+      for (final dir in supportDirs) {
+        for (final (folder, name) in [
+          ('attachments', '$uuid.jpg'),
+          ('profile', 'avatar_$uuid.png'),
+        ]) {
+          final abs = '$dir/$folder/$ownerA/$name';
+          final encoded = Uri.file(abs).path; // percent-encodes the space
+          final forms = {
+            'absolute': abs,
+            'file:///': 'file://$encoded',
+            'file://localhost/': 'file://localhost$encoded',
+            'file://LOCALHOST/': 'file://LOCALHOST$encoded',
+          };
+          for (final MapEntry(key: what, value: stored) in forms.entries) {
+            expect(key(stored), '$folder/$name', reason: '$what: $stored');
+          }
+          // Same set of keys, so the sweep sees one referenced file.
+          expect(
+              AttachmentRefs.referencedKeys(forms.values,
+                  ownerFolderName: ownerA),
+              {'$folder/$name'});
+        }
+      }
+    });
+
+    test('any other host is unrecognised and makes the scan throw', () {
+      final path = '/data/user/0/com.docease.app/files/attachments/$ownerA/$uuid.jpg';
+      final hostile = [
+        'file://evil$path',
+        'file://evil.example.com$path',
+        'file://localhost.evil$path',
+        'file://127.0.0.1$path',
+        'file://[::1]$path',
+        'file://localhost:80$path',
+        'file://user@localhost$path',
+      ];
+      for (final stored in hostile) {
+        expect(key(stored), isNull, reason: stored);
+        expect(AttachmentRefs.isNonLocalRef(stored), isFalse, reason: stored);
+        // The same pipeline the DB-side scan runs: never a partial set.
+        final paths = AttachmentRefs.collectReferencedPaths(historyValues: [
+          history([
+            visit([path, 'file://localhost$path', stored]),
+          ]),
+        ]);
+        expect(paths, {path, 'file://localhost$path', stored}); // as stored
+        expect(
+            () => AttachmentRefs.referencedKeys(paths, ownerFolderName: ownerA),
+            scanFails(AttachmentScanFailure.unrecognisedPath),
+            reason: stored);
+      }
+    });
+  });
 }

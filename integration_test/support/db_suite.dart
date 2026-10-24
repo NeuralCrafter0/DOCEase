@@ -493,6 +493,152 @@ void runDbSuite(DbSuiteHarness h) {
   Matcher scanFails(AttachmentScanFailure reason) => throwsA(
       isA<AttachmentScanIncomplete>().having((e) => e.reason, 'reason', reason));
 
+  // --- strict reads: an open DB whose read fails must throw, not look empty
+  Matcher readFails(DbReadFailure reason) => throwsA(
+      isA<DbReadException>().having((e) => e.reason, 'reason', reason));
+  const strMarker = 'ZZ-STR-MARKER-91c4';
+  h.define('STR-01 healthy DB: strict reads equal the lenient ones; an '
+      'empty DB gives empty, not an error', () async {
+    await wipe();
+    final d = helper();
+    await d.openFor(uidA);
+    expect(await d.fetchPatientsStrict(), isEmpty);
+    expect(await d.dirtyPatientsStrict(), isEmpty);
+    expect(await d.pendingDeletesStrict(), isEmpty);
+    await d.insertPatient(patient('p1'));
+    await d.insertPatient(withVisits('p2', [['$strMarker.jpg']]));
+    await d.insertPatient(patient('p3'));
+    await d.markPendingDelete('p3');
+    List<String> ids(List<Patient> l) => l.map((p) => p.id).toList();
+    expect(ids(await d.fetchPatientsStrict()), ids(await d.fetchPatients()));
+    expect(ids(await d.fetchPatientsStrict()), unorderedEquals(['p1', 'p2']));
+    expect(ids(await d.dirtyPatientsStrict()), ids(await d.dirtyPatients()));
+    expect(await d.pendingDeletesStrict(), ['p3']);
+    expect(await d.pendingDeletesStrict(), await d.pendingDeletes());
+    await d.close();
+  });
+  h.define('STR-02 table dropped while the DB counts as open: strict reads '
+      'throw readFailed, lenient ones still return empty', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    await d.insertPatient(patient('p1'));
+    await d.insertPatient(patient('p2'));
+    await d.markPendingDelete('p2');
+    final counterBefore = await counterOf(uidA);
+    await db.execute('DROP TABLE patients');
+    await db.execute('DROP TABLE pending_deletes');
+    expect(d.state, isA<DbReady>()); // still "open"
+    expect(d.openUid, uidA);
+    await expectLater(
+        d.fetchPatientsStrict(), readFails(DbReadFailure.readFailed));
+    await expectLater(
+        d.dirtyPatientsStrict(), readFails(DbReadFailure.readFailed));
+    await expectLater(
+        d.pendingDeletesStrict(), readFails(DbReadFailure.readFailed));
+    // Lenient behaviour unchanged: looks exactly like "no patients".
+    expect(await d.fetchPatients(), isEmpty);
+    expect(await d.dirtyPatients(), isEmpty);
+    expect(await d.pendingDeletes(), isEmpty);
+    expect(d.state, isA<DbReady>());
+    expect(await counterOf(uidA), counterBefore); // reads never touch it
+    await d.close();
+    await wipe();
+  });
+  h.define('STR-03 one corrupt history row: strict reads throw '
+      'unreadableRow (no patient data), lenient ones list it flagged',
+      () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    await d.insertPatient(patient('p1'));
+    await d.insertPatient(withVisits('p2', [['a.jpg']]));
+    await d.insertPatient(patient('p3'));
+    await db.update('patients', {'history': '{"$strMarker": [broken', 'name': strMarker},
+        where: 'id = ?', whereArgs: ['p2']);
+    final errors = <Object>[];
+    for (final read in [d.fetchPatientsStrict, d.dirtyPatientsStrict]) {
+      try {
+        await read();
+        fail('expected DbReadException');
+      } on DbReadException catch (e) {
+        expect(e.reason, DbReadFailure.unreadableRow);
+        errors.add(e);
+      }
+    }
+    for (final e in errors) {
+      expect(e.toString(), isNot(contains(strMarker)));
+      expect(e.toString(), isNot(contains('p2')));
+    }
+    // Lenient: every row, the bad one flagged (unchanged behaviour).
+    final lenient = await d.fetchPatients();
+    expect(lenient, hasLength(3));
+    expect(lenient.singleWhere((p) => p.id == 'p2').hasParseErrors, isTrue);
+    expect((await d.dirtyPatients()).map((p) => p.id),
+        unorderedEquals(['p1', 'p2', 'p3']));
+    // A clean, synced corrupt row: dirtyPatientsStrict has nothing to
+    // refuse, fetchPatientsStrict still does.
+    await markAllSynced(d);
+    await db.update('patients', {'sync_state': 'synced'},
+        where: 'id = ?', whereArgs: ['p2']);
+    expect(await d.dirtyPatientsStrict(), isEmpty);
+    await expectLater(
+        d.fetchPatientsStrict(), readFails(DbReadFailure.unreadableRow));
+    await d.close();
+    await wipe();
+  });
+  h.define('STR-04 one unreadable tombstone: pendingDeletesStrict throws '
+      'unreadableRow; lenient pendingDeletes hides or passes it', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    await d.insertPatient(patient('p1'));
+    await d.markPendingDelete('p1');
+    expect(await d.pendingDeletesStrict(), ['p1']);
+    // An empty id: lenient returns it as is, strict refuses the answer.
+    await db.execute(
+        "INSERT INTO pending_deletes (patient_id, deleted_at) VALUES ('', 1)");
+    await expectLater(
+        d.pendingDeletesStrict(), readFails(DbReadFailure.unreadableRow));
+    expect(await d.pendingDeletes(), ['', 'p1']);
+    // An id that is not text: lenient returns empty, hiding 'p1' too.
+    await db.execute("DELETE FROM pending_deletes WHERE patient_id = ''");
+    await db.execute("INSERT INTO pending_deletes (patient_id, deleted_at) "
+        "VALUES (X'00ff', 2)");
+    await expectLater(
+        d.pendingDeletesStrict(), readFails(DbReadFailure.unreadableRow));
+    expect(await d.pendingDeletes(), isEmpty);
+    await d.close();
+    await wipe();
+  });
+  h.define('STR-05 closed, never opened, or open failed: strict reads '
+      'throw notOpen', () async {
+    await wipe();
+    final d = helper();
+    for (final read in [
+      d.fetchPatientsStrict,
+      d.dirtyPatientsStrict,
+      d.pendingDeletesStrict,
+    ]) {
+      await expectLater(read(), readFails(DbReadFailure.notOpen));
+    }
+    await d.openFor(uidA);
+    await d.insertPatient(patient('p1'));
+    await d.close();
+    await expectLater(
+        d.fetchPatientsStrict(), readFails(DbReadFailure.notOpen));
+    // Failed open (wrong key -> keyMismatch): still notOpen, lenient empty.
+    await h.keys.write(DatabaseHelper.keyNameFor(uidA), 'ab' * 32);
+    final d2 = helper();
+    await expectLater(d2.openFor(uidA), throwsA(isA<DbOpenException>()));
+    expect(d2.state, isA<DbFailed>());
+    await expectLater(
+        d2.fetchPatientsStrict(), readFails(DbReadFailure.notOpen));
+    await expectLater(
+        d2.pendingDeletesStrict(), readFails(DbReadFailure.notOpen));
+    expect(await d2.fetchPatients(), isEmpty);
+    await wipe();
+  });
   h.define('ATT-01 mix of patients/visits, dirty rows and the doctor photo: '
       'exact paths, keys, read only', () async {
     await wipe();
@@ -658,6 +804,27 @@ void runDbSuite(DbSuiteHarness h) {
     await d.close();
   });
 
+  h.define('ATT-06 file://localhost and file:/// key like the absolute '
+      'path; any other host makes the DB scan throw', () async {
+    await wipe();
+    final d = helper();
+    await d.openFor(uidA);
+    const uuid = '0b7f6c2e-4d1a-4c3b-9e8f-2a1b3c4d5e6f';
+    final abs = '$appFiles/attachments/$ownA/$uuid.jpg';
+    final enc = Uri.file(abs).path;
+    await d.insertPatient(withVisits('p1', [
+      [abs, 'file://$enc'],
+      ['file://localhost$enc'],
+    ]));
+    expect(await d.referencedAttachmentKeys(), {'attachments/$uuid.jpg'});
+    final evil = 'file://evil$enc';
+    await d.insertPatient(withVisits('p2', [[evil]]));
+    expect(await d.referencedAttachmentPaths(),
+        {abs, 'file://$enc', 'file://localhost$enc', evil}); // as stored
+    await expectLater(d.referencedAttachmentKeys(),
+        scanFails(AttachmentScanFailure.unrecognisedPath));
+    await d.close();
+  });
   h.define('ATT-05 scan throws when no DB is open or the open failed', () async {
     await wipe();
     final none = helper();

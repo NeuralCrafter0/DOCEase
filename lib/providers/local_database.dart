@@ -259,6 +259,46 @@ abstract final class SyncState {
 /// The local, doctor-scoped patient store. [DatabaseHelper] is the SQLCipher
 /// implementation; tests (and the backend engineer's sync tests) can supply a
 /// hand-written fake with `implements LocalDatabase`.
+/// Why a strict read ([LocalDatabase.fetchPatientsStrict],
+/// [LocalDatabase.dirtyPatientsStrict], [LocalDatabase.pendingDeletesStrict])
+/// could not return a complete answer. Switch on this in the UI; an empty
+/// list from a strict read always means "really empty".
+enum DbReadFailure {
+  /// No database is open: never opened, closed, the open failed (see
+  /// [LocalDatabase.state] for why), or the open owner changed while the
+  /// read ran.
+  notOpen,
+
+  /// The database is open but the read itself failed (I/O, a damaged page,
+  /// a missing table).
+  readFailed,
+
+  /// The read worked but at least one row could not be read completely
+  /// (it would come back flagged, [Patient.hasParseErrors], from the
+  /// lenient read). The answer is incomplete, so nothing may be decided
+  /// from it; the lenient read still lists the readable rows (bad ones
+  /// flagged) for display next to a "some records can't be read" notice.
+  unreadableRow,
+}
+
+/// Thrown by the strict reads instead of returning an empty or partial
+/// answer. Carries only [reason]: never patient data, paths, SQL or the
+/// underlying error text.
+final class DbReadException implements Exception {
+  const DbReadException(this.reason);
+  final DbReadFailure reason;
+
+  @override
+  bool operator ==(Object other) =>
+      other is DbReadException && other.reason == reason;
+
+  @override
+  int get hashCode => reason.hashCode;
+
+  @override
+  String toString() => 'DbReadException(${reason.name})';
+}
+
 abstract class LocalDatabase {
   /// Emits the current state immediately on listen, then every change.
   Stream<DbOpenState> get states;
@@ -283,6 +323,11 @@ abstract class LocalDatabase {
   /// whose open failed). Exact from the rows when the database is open, and
   /// the stored counter reconciled to match; otherwise the per-uid counter in
   /// secure storage, or [UnsyncedCount.unknown]. Never throws.
+  ///
+  /// Lenient but safe for the reset warning: an error gives the stored
+  /// counter (which only ever errs high) or [UnsyncedCount.unknown], never a
+  /// made-up `known(0)`. Treat anything but `known(0)` as "may have unsynced
+  /// changes"; [resetAndResync] re-checks the count itself.
   Future<UnsyncedCount> unsyncedCount();
 
   /// Only valid in `DbFailed(keyMismatch)`: moves the current doctor's
@@ -316,7 +361,20 @@ abstract class LocalDatabase {
 
   /// All patients. Rows that fail to parse are returned flagged
   /// ([Patient.hasParseErrors]) with their original data kept.
+  ///
+  /// **Returns an empty list on any error** (no database open, open failed,
+  /// read failed, a row that cannot be decoded at all), indistinguishable
+  /// from "nothing there". Do not use it for destructive, overwrite or
+  /// "nothing to do" decisions, nor to show "no patients"; use [fetchPatientsStrict]
+  /// instead, which throws [DbReadException].
   Future<List<Patient>> fetchPatients();
+
+  /// All patients, complete, or throws [DbReadException]: `notOpen`,
+  /// `readFailed`, or `unreadableRow` if any row would come back flagged
+  /// from [fetchPatients]. An empty list means the table really is empty.
+  /// One statement, so one consistent snapshot. Same order as
+  /// [fetchPatients]. Read only.
+  Future<List<Patient>> fetchPatientsStrict();
 
   /// Inserts or replaces [patient] as a local edit (dirty). Returns the
   /// row's new `updated_at` (pass it to [markSynced] once Firestore
@@ -346,7 +404,18 @@ abstract class LocalDatabase {
 
   /// Rows with sync_state dirty, oldest `updated_at` first, each with
   /// [Patient.updatedAt] set.
+  ///
+  /// **Returns an empty list on any error** (no database open, open failed,
+  /// read failed, a row that cannot be decoded at all), indistinguishable
+  /// from "nothing there". Do not use it for destructive, overwrite or
+  /// "nothing to do" decisions, nor to show "no patients"; use [dirtyPatientsStrict]
+  /// instead, which throws [DbReadException].
   Future<List<Patient>> dirtyPatients();
+
+  /// Like [dirtyPatients] but complete, or throws [DbReadException]
+  /// (`notOpen`, `readFailed`, `unreadableRow` if any dirty row would come
+  /// back flagged). An empty list really means "nothing to push".
+  Future<List<Patient>> dirtyPatientsStrict();
 
   /// Compare-and-set: marks [patientId] clean (and decrements the unsynced
   /// counter) only if its `updated_at` still equals [syncedUpdatedAt], the
@@ -366,7 +435,19 @@ abstract class LocalDatabase {
   Future<void> deletePatient(String id);
 
   /// Ids with a delete tombstone, oldest first.
+  ///
+  /// **Returns an empty list on any error**, including a single tombstone
+  /// whose id is not text (which hides all the others); an empty id is
+  /// returned as is. Do not use it
+  /// for destructive or "nothing to do" decisions; use
+  /// [pendingDeletesStrict] instead, which throws [DbReadException].
   Future<List<String>> pendingDeletes();
+
+  /// Like [pendingDeletes] but complete, or throws [DbReadException]
+  /// (`notOpen`, `readFailed`, `unreadableRow` for a tombstone whose id is
+  /// not a non-empty string). An empty list really means "no deletes to
+  /// push".
+  Future<List<String>> pendingDeletesStrict();
 
   /// Call only after Firestore confirmed deleting [id]: removes its
   /// tombstone and decrements the unsynced counter. A no-op if there is
