@@ -7,6 +7,7 @@ import 'package:share_plus/share_plus.dart';
 import '../providers/patient_provider.dart';
 import '../providers/doctor_provider.dart';
 import '../models/patient.dart';
+import '../utils/attachment_storage.dart';
 import '../utils/pdf_export.dart';
 import 'add_patient_screen.dart';
 import 'add_record_screen.dart';
@@ -45,12 +46,20 @@ class PatientDetailScreen extends StatelessWidget {
             Row(children: [
               Expanded(child: TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF475569))))),
               const SizedBox(width: 16),
-              Expanded(child: ElevatedButton(onPressed: () { provider.deletePatient(patient.id); Navigator.pop(ctx); Navigator.pop(context); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))), child: const Text('Delete All', style: TextStyle(fontWeight: FontWeight.bold)))),
+              Expanded(child: ElevatedButton(onPressed: () { deleteWithLocalAttachments([for (final r in patient.history) ...r.attachmentPaths], () => provider.deletePatient(patient.id)); Navigator.pop(ctx); Navigator.pop(context); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))), child: const Text('Delete All', style: TextStyle(fontWeight: FontWeight.bold)))),
             ])
           ],
         ),
       ),
     );
+  }
+
+  static List<String> _visitAttachments(PatientProvider provider, String pId, String rId) {
+    try {
+      return [for (final r in provider.findById(pId).history) if (r.id == rId) ...r.attachmentPaths];
+    } catch (_) {
+      return const [];
+    }
   }
 
   void _showModernDeleteRecordConfirm(BuildContext context, PatientProvider provider, String pId, String rId) {
@@ -71,7 +80,7 @@ class PatientDetailScreen extends StatelessWidget {
             Row(children: [
               Expanded(child: TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel'))),
               const SizedBox(width: 16),
-              Expanded(child: ElevatedButton(onPressed: () { provider.deleteRecord(pId, rId); Navigator.pop(ctx); Navigator.pop(context); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white), child: const Text('Delete'))),
+              Expanded(child: ElevatedButton(onPressed: () { deleteWithLocalAttachments(_visitAttachments(provider, pId, rId), () => provider.deleteRecord(pId, rId)); Navigator.pop(ctx); Navigator.pop(context); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white), child: const Text('Delete'))),
             ])
           ],
         ),
