@@ -6,8 +6,9 @@
 // failure refuses the save and writes nothing. Removing a photo in the form
 // (stale L or S) leaves no reference to it.
 //
-// swappedPathsFor is coded against MergeDb (test/backend/fakes.dart) until
-// #10 posts LocalDatabase.swappedPathsFor.
+// swappedPathsFor is #10's (b217f46); MergeDb only records calls and
+// injects failures.
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -20,6 +21,7 @@ import 'package:docease/services/local_photo_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 
+import '../support/db_fakes.dart' show captureLogs;
 import 'fakes.dart';
 
 const doctorA = 'doctorA';
@@ -37,10 +39,30 @@ VisitRecord visit(String id, List<String> photos, {String diagnosis = 'd'}) => V
 
 class _CountingDb extends MergeDb {
   int rowWrites = 0;
+
+  /// When set, the next updatePatient completes [entered] and waits for
+  /// [release] before writing (hook-gated: no timers).
+  Completer<void>? entered;
+  Completer<void>? release;
+
   @override
-  Future<String?> updatePatient(Patient patient) {
+  Future<String?> updatePatient(Patient patient) async {
     rowWrites++;
+    final gate = release;
+    if (gate != null) {
+      release = null;
+      entered?.complete();
+      await gate.future;
+    }
     return super.updatePatient(patient);
+  }
+}
+
+/// Runs queued microtasks only (no timers): enough for any purely
+/// future-chained step (the patient lock queue) to advance.
+Future<void> drainMicrotasks() async {
+  for (var i = 0; i < 200; i++) {
+    await Future<void>.value();
   }
 }
 
@@ -66,11 +88,11 @@ void main() {
 
   VisitRecord storedV1() => db.rows['p1']!.history.singleWhere((v) => v.id == 'v1');
 
+  /// Deterministic: completes when the provider's background work (pushes,
+  /// uploads, swaps, deletes) has finished, then checks [done].
   Future<void> until(bool Function() done) async {
-    for (var i = 0; i < 1000 && !done(); i++) {
-      await Future<void>.delayed(const Duration(milliseconds: 2));
-    }
-    await flushMicrotasks();
+    await provider.backgroundIdleForTesting();
+    expect(done(), isTrue, reason: 'state after the background work finished');
   }
 
   setUp(() async {
@@ -169,7 +191,7 @@ void main() {
       await expectLater(provider.updateRecord('p1', edited(form, [a, ghost])),
           throwsA(isA<UnsupportedAttachmentException>()
               .having((e) => '$e', 'reason', contains('missing'))));
-      await flushMicrotasks();
+      await provider.backgroundIdleForTesting();
       expect(db.rowWrites, writes);
       expect(storedV1().attachmentPaths, before);
       expect(storedV1().diagnosis, 'dx-old');
@@ -190,7 +212,7 @@ void main() {
           provider.updateRecord('p1', edited(form, [a])),
           throwsA(isA<SaveRefusedException>()
               .having((e) => e.operation, 'operation', PatientSaveOperation.updateVisit)));
-      await flushMicrotasks();
+      await provider.backgroundIdleForTesting();
 
       expect(db.rowWrites, writes);
       expect(db.versions['p1'], version);
@@ -209,7 +231,7 @@ void main() {
       await expectLater(provider.updateRecord('p1', edited(form, [a])),
           throwsA(isA<SaveRefusedException>()));
       db.fetchStrictThrows = null;
-      await flushMicrotasks();
+      await provider.backgroundIdleForTesting();
       expect(db.rowWrites, writes);
       expect(storedV1().diagnosis, 'dx-old');
     });
@@ -257,21 +279,157 @@ void main() {
     });
   });
 
-  group('MergeDb.swappedPathsFor follows the DB engineer\'s final form', () {
-    test('a wrong owner throws DbReadException(notOpen)', () async {
-      await expectLater(db.swappedPathsFor(expectedOwner: 'doctorB', patientId: 'p1'),
-          throwsA(const DbReadException(DbReadFailure.notOpen)));
+  group('security L-3: a queued stale save cannot undo a removal', () {
+    /// Starts save A held inside its DB write (so it holds the patient lock)
+    /// and returns it with its release.
+    Future<(Future<void>, Completer<void>)> holdInsideLock(Future<void> Function() save) async {
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      db.entered = entered;
+      db.release = release;
+      final a = save();
+      await entered.future; // A is inside the lock, between read and write
+      return (a, release);
+    }
+
+    test('photo removed in save A while save B (stale form holding L) is queued: stays removed', () async {
+      final a = pick('a.jpg');
+      final b = pick('b.jpg');
+      final staleForm = await uploadedWhileFormOpen([a, b]); // holds L for both
+      final sa = storageFor(a);
+      final sb = storageFor(b);
+
+      // A: a fresh form removes photo b (holds S for both).
+      final fresh = provider.findById('p1').history.single;
+      final (saveA, releaseA) =
+          await holdInsideLock(() => provider.updateRecord('p1', edited(fresh, [sa], dx: 'dx-A')));
+      // B: queued behind A; its stale form still holds La and Lb.
+      final saveB = provider.updateRecord('p1', edited(staleForm, [a, b], dx: 'dx-B'));
+      await drainMicrotasks(); // B gets every chance to move; A still holds the lock
+      expect(db.rowWrites, 1 + 1, reason: 'B has not reached the DB: it waits for the lock');
+      releaseA.complete();
+      await saveA;
+      expect(db.swaps['p1']!.containsKey(keyOf(b)), isFalse, reason: '#10 2414a7a dropped b\'s mapping');
+
+      // B reads the stored row and swaps inside the lock, after A: Lb has
+      // no mapping and its file is gone, so B is refused (nothing written).
+      await expectLater(saveB, throwsA(isA<UnsupportedAttachmentException>()));
+      await provider.backgroundIdleForTesting();
+
+      expect(storedV1().attachmentPaths, [sa]);
+      expect(storedV1().diagnosis, 'dx-A');
+      expect(provider.findById('p1').history.single.attachmentPaths, [sa]);
+      expect(storedV1().attachmentPaths, isNot(contains(sb)));
+      expect(storedV1().attachmentPaths, isNot(contains(b)));
     });
 
-    test('only entries passing isStoragePathFor(owner, patientId) are returned', () async {
-      final good = 'clinical_attachments/$doctorA/p1/${n('g.jpg')}';
-      db.swaps['p1'] = {
-        'attachments/${n('g.jpg')}': good,
-        'attachments/${n('x.jpg')}': 'clinical_attachments/doctorB/p1/${n('x.jpg')}',
-        'attachments/${n('y.jpg')}': 'clinical_attachments/$doctorA/p2/${n('y.jpg')}',
-      };
-      expect(await db.swappedPathsFor(expectedOwner: doctorA, patientId: 'p1'),
-          {'attachments/${n('g.jpg')}': good});
+    test('same race, stale form B holds S of the removed photo: not restored, B\'s edit kept', () async {
+      final a = pick('a.jpg');
+      final b = pick('b.jpg');
+      await uploadedWhileFormOpen([a, b]);
+      final sa = storageFor(a);
+      final sb = storageFor(b);
+      final opened = provider.findById('p1').history.single; // both forms open now: [Sa, Sb]
+
+      final (saveA, releaseA) =
+          await holdInsideLock(() => provider.updateRecord('p1', edited(opened, [sa], dx: 'dx-A')));
+      final saveB = provider.updateRecord('p1', edited(opened, [sa, sb], dx: 'dx-B'));
+      releaseA.complete();
+      await saveA;
+      final logs = <String>[];
+      await captureLogs(logs, () async {
+        await saveB;
+        await provider.backgroundIdleForTesting();
+      });
+
+      expect(storedV1().attachmentPaths, [sa], reason: 'Sb removed by A stays removed');
+      expect(storedV1().diagnosis, 'dx-B', reason: 'B\'s other edits are saved');
+      expect(provider.findById('p1').history.single.attachmentPaths, [sa]);
+      expect(logs, contains('Photos: 1 removed photo(s) not restored by a stale save'));
+      expect(logs.join('\n'), isNot(contains(sb)), reason: 'logs carry counts only');
     });
+
+    test('a cloud pull waits for the same lock: it never lands between a save\'s read and write', () async {
+      final a = pick('a.jpg');
+      await uploadedWhileFormOpen([a]);
+      final sa = storageFor(a);
+      final opened = provider.findById('p1').history.single;
+      // The cloud has an extra visit, so the pull would apply its copy.
+      remote.cloud = [testPatient('p1', history: [visit('v1', [sa]), visit('v9', const [])])];
+      final fetch = Completer<List<Patient>>();
+      remote.fetchGate = fetch;
+      db.applyLog.clear();
+
+      final (saveA, releaseA) =
+          await holdInsideLock(() => provider.updateRecord('p1', edited(opened, [sa], dx: 'dx-A')));
+      final pull = provider.syncNowForTesting();
+      await drainMicrotasks();
+      fetch.complete(remote.cloud);
+      await drainMicrotasks();
+      expect(db.applyLog, isEmpty, reason: 'the pull waits while A holds the lock');
+
+      releaseA.complete();
+      await saveA;
+      await pull;
+      await provider.backgroundIdleForTesting();
+      expect(db.applyLog, ['skip:p1'], reason: 'after A the row is dirty: the cloud copy is refused');
+      expect(storedV1().diagnosis, 'dx-A');
+    });
+
+    test('order reversed (B first, then A removes): ends removed too', () async {
+      final a = pick('a.jpg');
+      final b = pick('b.jpg');
+      final staleForm = await uploadedWhileFormOpen([a, b]);
+      final sa = storageFor(a);
+      final (saveB, releaseB) =
+          await holdInsideLock(() => provider.updateRecord('p1', edited(staleForm, [a, b], dx: 'dx-B')));
+      final fresh = provider.findById('p1').history.single;
+      final saveA = provider.updateRecord('p1', edited(fresh, [sa], dx: 'dx-A'));
+      releaseB.complete();
+      await saveB;
+      await saveA;
+      await provider.backgroundIdleForTesting();
+      expect(storedV1().attachmentPaths, [sa]);
+      expect(storedV1().diagnosis, 'dx-A');
+    });
+  });
+
+  test('lock audit (source pin): every local DB write runs under the per-patient lock', () {
+    final src = File('lib/providers/patient_provider.dart').readAsStringSync();
+    const writes = [
+      '_db.insertPatient(', '_db.updatePatient(', '_db.applyCloudPatient(',
+      '_db.swapAttachmentPath(', '_db.markPendingDelete(',
+      '_db.markSynced(', '_db.clearPendingDelete(',
+    ];
+    final member = RegExp(r'^  [A-Za-z_][A-Za-z_<>?,() ]*[ ]([_a-zA-Z]+)[<(]', multiLine: true);
+    final seen = <String>{};
+    for (final w in writes) {
+      for (var at = src.indexOf(w); at != -1; at = src.indexOf(w, at + 1)) {
+        final m = member.allMatches(src.substring(0, at)).last;
+        final name = m.group(1)!;
+        seen.add(name);
+        if (name == '_swapPath') {
+          // Only called from _swapUploaded, inside its lock (pinned in
+          // upload_cleanup_test).
+          expect('_swapPath('.allMatches(src).length, 2, reason: 'definition + one call');
+          continue;
+        }
+        expect(src.substring(m.start, at), contains('_underPatientLock('),
+            reason: '$w in $name must run under the per-patient lock');
+      }
+    }
+    expect(seen, containsAll(['addPatient', 'updatePatientDetails', 'deletePatient',
+        '_mutateHistory', '_applyCloud', '_swapPath', '_syncOne', '_confirmCloudDelete']));
+    // No whole-row write-back in the sync/upload path: _syncOne and the
+    // upload helpers never call updatePatient / insertPatient.
+    for (final fn in ['_syncOne', '_uploadPending', '_swapUploaded', '_pushDirty',
+        '_pushPendingDeletes', '_confirmCloudDelete', '_afterLocalWriteNow']) {
+      final start = src.indexOf(RegExp('^  [^\\n]*[ ]$fn[<(]', multiLine: true));
+      expect(start, isNot(-1), reason: fn);
+      final next = member.allMatches(src).firstWhere((m) => m.start > start).start;
+      final body = src.substring(start, next);
+      expect(body, isNot(contains('_db.updatePatient(')), reason: '$fn writes no whole row');
+      expect(body, isNot(contains('_db.insertPatient(')), reason: '$fn writes no whole row');
+    }
   });
 }

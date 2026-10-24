@@ -35,6 +35,13 @@ class _SwapDb extends MergeDb {
   Object? scanThrows;
   int rowWrites = 0;
 
+  /// When set, markSynced returns it without marking anything.
+  bool? markSyncedResult;
+
+  @override
+  Future<bool> markSynced(String id, String version) async =>
+      markSyncedResult ?? await super.markSynced(id, version);
+
   @override
   Future<String?> updatePatient(Patient patient) {
     rowWrites++;
@@ -67,6 +74,10 @@ void main() {
   late CloudFirestoreHelper remote;
   late FakeStorage storage;
   late PatientProvider provider;
+
+  /// Deterministic wait: the provider's background work (push, upload,
+  /// swap, refresh, file deletes) has finished. No timers, no polling.
+  Future<void> settle() => provider.backgroundIdleForTesting();
 
   String photoIn(String dir, String name) {
     Directory(dir).createSync(recursive: true);
@@ -105,7 +116,7 @@ void main() {
     final logs = <String>[];
     await captureLogs(logs, () async {
       await provider.addRecord('p1', visit('v1', [a]));
-      await flushMicrotasks();
+      await settle();
     });
 
     final storagePath = storage.uploads.keys.single;
@@ -127,14 +138,14 @@ void main() {
     storage.failUploads = true;
     final a = pick('a.jpg');
     await provider.addRecord('p1', visit('v1', [a]));
-    await flushMicrotasks();
+    await settle();
     expect((storage.uploads.length, db.swapCalls), (0, 0));
     expect(rowPaths('p1'), [a]);
     expect(File(a).existsSync(), isTrue);
 
     storage.failUploads = false;
     await provider.retryDirty();
-    await flushMicrotasks();
+    await settle();
     expect(storage.uploads.length, 1);
     expect(rowPaths('p1'), [storage.uploads.keys.single]);
     expect(File(a).existsSync(), isFalse);
@@ -152,7 +163,7 @@ void main() {
       final logs = <String>[];
       await captureLogs(logs, () async {
         await provider.addRecord('p1', visit('v1', [a]));
-        await flushMicrotasks();
+        await settle();
       });
       expect((storage.puts, db.swapCalls), (1, 1));
       expect(rowPaths('p1'), [a], reason: 'the swap wrote nothing');
@@ -166,7 +177,7 @@ void main() {
 
       db.swapThrows = null;
       await provider.retryDirty();
-      await flushMicrotasks();
+      await settle();
       expect(storage.puts, 1, reason: 'the retry swaps the object already uploaded');
       expect(db.swapCalls, 2);
       expect(rowPaths('p1'), [storage.uploads.keys.single]);
@@ -180,7 +191,7 @@ void main() {
     final a = pick('a.jpg');
     storage.beforeUploadCompletes = (_) async => db.state = const DbReady('doctorB');
     await provider.addRecord('p1', visit('v1', [a]));
-    await flushMicrotasks();
+    await settle();
     expect(storage.puts, 1);
     expect(db.swapCalls, 0);
     expect(rowPaths('p1'), [a]);
@@ -198,7 +209,7 @@ void main() {
     final logs = <String>[];
     await captureLogs(logs, () async {
       await provider.addRecord('p1', visit('v1', [a]));
-      await flushMicrotasks();
+      await settle();
     });
     final storagePath = storage.puts == 1 ? storage.deleted.single : '';
     expect(storagePath, startsWith('clinical_attachments/$doctorA/p1/'));
@@ -219,7 +230,7 @@ void main() {
       db.rows['p2'] = testPatient('p2').copyWithHistoryForTest([visit('v9', [storagePath])]); // ... but p2 names it
     };
     await provider.addRecord('p1', visit('v1', [a]));
-    await flushMicrotasks();
+    await settle();
     expect(db.swapCalls, 1);
     expect(storage.deleted, isEmpty);
     expect(storage.uploads.length, 1);
@@ -233,7 +244,7 @@ void main() {
     final logs = <String>[];
     await captureLogs(logs, () async {
       await provider.addRecord('p1', visit('v1', [a]));
-      await flushMicrotasks();
+      await settle();
     });
     expect(storage.deleted, isEmpty);
     expect(storage.uploads.length, 1);
@@ -248,7 +259,7 @@ void main() {
       await provider.updateRecord('p1', visit('v1', [a], diagnosis: 'edited mid-upload'));
     };
     await provider.addRecord('p1', visit('v1', [a]));
-    await flushMicrotasks();
+    await settle();
     final storagePath = storage.uploads.keys.single;
     final stored = db.rows['p1']!.history.single;
     expect(stored.diagnosis, 'edited mid-upload');
@@ -264,7 +275,7 @@ void main() {
     final a = pick('a.jpg');
     await provider.addRecord('p1', visit('v1', [a]));
     final stalePatient = provider.findById('p1'); // taken before the swap
-    await flushMicrotasks();
+    await settle();
     final storagePath = storage.uploads.keys.single;
     expect(File(a).existsSync(), isFalse);
 
@@ -275,7 +286,7 @@ void main() {
 
     // A visit form opened before the swap: saved (not refused as a missing file).
     await provider.updateRecord('p1', visit('v1', [a], diagnosis: 'later'));
-    await flushMicrotasks();
+    await settle();
     expect(rowPaths('p1'), [storagePath]);
     expect(db.rows['p1']!.history.single.diagnosis, 'later');
   });
@@ -291,14 +302,14 @@ void main() {
       await provider.addRecord('p1', visit('v1', [a]));
       final opened = provider.findById('p1'); // details screen opens: snapshot names the local file
       expect(opened.history.single.attachmentPaths, [a]);
-      await flushMicrotasks(); // upload, swap, local copy deleted
+      await settle(); // upload, swap, local copy deleted
       final storagePath = storage.uploads.keys.single;
       expect(File(a).existsSync(), isFalse);
       await provider.addRecord('p1', visit('v2', [])); // a visit saved after the screen opened
-      await flushMicrotasks();
+      await settle();
 
       await provider.updatePatient(detailsForm(opened, name: 'Renamed', phone: '+91 99999'));
-      await flushMicrotasks();
+      await settle();
 
       final row = db.rows['p1']!;
       expect((row.name, row.phone), ('Renamed', '+91 99999'), reason: 'new detail fields apply');
@@ -325,7 +336,7 @@ void main() {
           id: 'p1', name: 'N', age: opened.age, gender: opened.gender, phone: opened.phone,
           relation: opened.relation, history: [visit('v1', ['/tmp/elsewhere.jpg']), visit('vX', [])]);
       await provider.updatePatient(form);
-      await flushMicrotasks();
+      await settle();
       expect(db.rows['p1']!.name, 'N');
       expect([for (final r in db.rows['p1']!.history) (r.id, r.attachmentPaths.length)], [('v1', 0), ('v2', 0)]);
       expect([for (final r in provider.findById('p1').history) r.id], ['v1', 'v2']);
@@ -395,9 +406,9 @@ void main() {
       };
       final logs = <String>[];
       await captureLogs(logs, () async {
-        await flushMicrotasks();
+        await settle();
         await staleSave;
-        await flushMicrotasks();
+        await settle();
       });
       final storagePath = storage.uploads.keys.single;
       expect(staleDoneAtScan, isFalse, reason: 'the stale save ran only after swap, refresh and scan');
@@ -422,7 +433,7 @@ void main() {
       final logs = <String>[];
       await captureLogs(logs, () async {
         await provider.addRecord('p1', visit('v1', [a]));
-        await flushMicrotasks();
+        await settle();
       });
       expect(db.swapCalls, 1);
       expect(db.keyScans, greaterThanOrEqualTo(1));
@@ -443,7 +454,7 @@ void main() {
       final logs = <String>[];
       await captureLogs(logs, () async {
         await provider.addRecord('p1', visit('v1', [a]));
-        await flushMicrotasks();
+        await settle();
       });
       final storagePath = storage.uploads.keys.single;
       expect(rowPaths('p1'), [storagePath], reason: 'the swap itself succeeded');
@@ -467,7 +478,7 @@ void main() {
       final logs = <String>[];
       await captureLogs(logs, () async {
         await provider.addRecord('p1', visit('v1', [a]));
-        await flushMicrotasks();
+        await settle();
       });
       expect(identical(db.rows['p1'], broken), isTrue, reason: 'the swap wrote nothing');
       expect(File(a).existsSync(), isTrue);
@@ -485,7 +496,7 @@ void main() {
     final link = Link(p.join(photos.visitFolderFor(doctorA)!, n('link.jpg')))..createSync(target, recursive: true);
 
     await provider.addRecord('p1', visit('v1', [outside, theirs, loose, link.path]));
-    await flushMicrotasks();
+    await settle();
 
     // #10's swap only takes photos in the owner's attachments/ folder, so
     // the others are not uploaded at all (no unreferenced Storage object).
@@ -510,7 +521,7 @@ void main() {
     expect(provider.findById('p2').history.single.attachmentPaths, [a]);
 
     await provider.addRecord('p1', visit('v1', [a]));
-    await flushMicrotasks();
+    await settle();
 
     expect(rowPaths('p1'), [storage.uploads.keys.single]);
     expect(rowPaths('p2'), [a]);
@@ -518,12 +529,10 @@ void main() {
   });
 
   group("#10's attachment_swaps: the stored row is what is pushed and shown", () {
-    /// Bounded wait for the outcome (real file I/O under suite load).
+    /// Waits for the background work, then checks the outcome.
     Future<void> until(bool Function() done) async {
-      for (var i = 0; i < 1000 && !done(); i++) {
-        await Future<void>.delayed(const Duration(milliseconds: 2));
-      }
-      await flushMicrotasks();
+      await settle();
+      expect(done(), isTrue, reason: 'state after the background work finished');
     }
 
     /// Sets up the DB engineer's case: the DB recorded the swap L -> S for
@@ -610,7 +619,7 @@ void main() {
 
     test('source pin: _syncOne pushes the stored row, not _byId', () {
       final s = File('lib/providers/patient_provider.dart').readAsStringSync();
-      final sync = s.substring(s.indexOf('Future<bool> _syncOne('), s.indexOf('Future<void> _afterLocalWrite('));
+      final sync = s.substring(s.indexOf('Future<_Push> _syncOne('), s.indexOf('Future<void> _afterLocalWrite('));
       expect(sync, isNot(contains('_byId(patientId)')));
       expect(sync, contains('await _db.dirtyPatientsStrict()'));
       expect(sync, contains('var sentVersion = current.updatedAt ?? savedVersion;'));
@@ -643,10 +652,27 @@ void main() {
     expect(s, isNot(contains('_confirmedUploads')));
     expect(s, contains('await _photos.deleteOwnedVisitFile(path, owner: owner)'));
   });
+
+  test('markSynced false (row changed after the pushed snapshot) is not an error: '
+      'the row stays dirty and a retry is scheduled', () async {
+    await load();
+    db.markSyncedResult = false;
+    final logs = <String>[];
+    await captureLogs(logs, () async {
+      await provider.updatePatient(testPatient('p1', name: 'Asha New'));
+      await settle();
+    });
+    expect(remote.payloads, isNotEmpty, reason: 'the stored row was pushed');
+    expect(db.dirty['p1'], isTrue, reason: 'compare-and-set refused: still dirty');
+    expect(provider.retryPendingForTesting, isTrue, reason: 'retried later');
+    expect(logs.where((l) => l.contains('markSynced failed')), isEmpty,
+        reason: 'false is not an error');
+  });
 }
 
 extension on Patient {
   Patient copyWithHistoryForTest(List<VisitRecord> history) => Patient(
       id: id, name: name, age: age, gender: gender, phone: phone, relation: relation,
       updatedAt: updatedAt, history: history);
+
 }
