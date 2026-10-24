@@ -497,6 +497,316 @@ void runDbSuite(DbSuiteHarness h) {
   Matcher readFails(DbReadFailure reason) => throwsA(
       isA<DbReadException>().having((e) => e.reason, 'reason', reason));
   const strMarker = 'ZZ-STR-MARKER-91c4';
+  // --- swapAttachmentPath: confirmed upload swaps one photo, keeps edits
+  const swpUuid = '0b7f6c2e-4d1a-4c3b-9e8f-2a1b3c4d5e6f';
+  final swpLocal = '$appFiles/attachments/$ownA/$swpUuid.jpg';
+  const swpStorage = 'clinical_attachments/$uidA/p1/$swpUuid.jpg';
+  Future<bool> swp(DatabaseHelper d,
+          {String owner = uidA,
+          String patient = 'p1',
+          String? localPath,
+          String storagePath = swpStorage}) =>
+      d.swapAttachmentPath(
+          expectedOwner: owner,
+          patientId: patient,
+          localPath: localPath ?? swpLocal,
+          storagePath: storagePath);
+  Future<Map<String, Object?>?> rawRow(Database db, String id) async {
+    final r = await db.query('patients', where: 'id = ?', whereArgs: [id]);
+    return r.isEmpty ? null : Map.of(r.single);
+  }
+  Patient edited(Patient p, Map<String, Object?> changes) =>
+      Patient.fromJson({...p.toJson(), ...changes});
+
+  h.define('SWP-01 an edit queued during the upload and the swap both '
+      'survive (row queue, current row read in the transaction)', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    await d.insertPatient(withVisits('p1', [[swpLocal, 'keep.jpg']]));
+    final before = (await d.fetchPatientsStrict()).single;
+    // The doctor saves an edit (name + a new visit) while putFile runs;
+    // the swap is queued right behind it, nothing awaited in between.
+    final json = before.toJson();
+    final newVisit = Map<String, Object?>.from(
+        (json['history'] as List).single as Map)
+      ..['id'] = 'v-new'
+      ..['attachmentPaths'] = <String>[];
+    final edit = d.updatePatient(edited(before, {
+      'name': 'Asha R.',
+      'history': [...json['history'] as List, newVisit],
+    }));
+    final swap = swp(d);
+    expect(await edit, isNotNull);
+    expect(await swap, isTrue);
+    final after = (await d.fetchPatientsStrict()).single;
+    expect(after.name, 'Asha R.'); // the edit survived
+    expect(after.history.map((v) => v.id), [before.history.single.id, 'v-new']);
+    expect(after.history.first.attachmentPaths, [swpStorage, 'keep.jpg']);
+    // Reverse order: swap first, then an edit built from the current row.
+    await d.insertPatient(withVisits('p2', [[swpLocal]]));
+    final s2 = swp(d,
+        patient: 'p2', storagePath: 'clinical_attachments/$uidA/p2/$swpUuid.jpg');
+    expect(await s2, isTrue);
+    final p2 = (await d.fetchPatientsStrict()).singleWhere((p) => p.id == 'p2');
+    expect(await d.updatePatient(edited(p2, {'phone': '+91888'})), isNotNull);
+    final p2b = (await rawRow(db, 'p2'))!;
+    expect(p2b['phone'], '+91888');
+    expect(p2b['history'] as String,
+        contains('clinical_attachments/$uidA/p2/$swpUuid.jpg'));
+    await d.close();
+    await wipe();
+  });
+
+  h.define('SWP-02 the path in two visits (and aliased stored forms): all '
+      'swapped; other entries, visits and fields kept exactly', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    final enc = Uri.file(swpLocal).path;
+    final aliasDataData =
+        '/data/data/com.docease.app/files/attachments/$ownA/$swpUuid.jpg';
+    final otherOwner = '$appFiles/attachments/$ownB/$swpUuid.jpg';
+    const legacy = '/storage/emulated/0/DCIM/legacy.jpg';
+    await d.insertPatient(withVisits('p1', [
+      [swpLocal, legacy],
+      ['file://localhost$enc', otherOwner],
+      ['$appFiles/attachments/$ownA/other.jpg'],
+      [aliasDataData, 'file://$enc'],
+    ]));
+    // Unknown visit keys must survive byte for byte.
+    final raw0 = (await rawRow(db, 'p1'))!;
+    final hist = (jsonDecode(raw0['history'] as String) as List)
+        .cast<Map<String, dynamic>>();
+    hist[2]['zzExtra'] = {'k': [1, 2.5, null]};
+    await db.update('patients', {'history': jsonEncode(hist)},
+        where: 'id = ?', whereArgs: ['p1']);
+    final before = (await rawRow(db, 'p1'))!;
+    expect(await swp(d), isTrue);
+    final after = (await rawRow(db, 'p1'))!;
+    final h2 = (jsonDecode(after['history'] as String) as List)
+        .cast<Map<String, dynamic>>();
+    expect(h2[0]['attachmentPaths'], [swpStorage, legacy]);
+    expect(h2[1]['attachmentPaths'], [swpStorage, otherOwner]);
+    expect(h2[3]['attachmentPaths'], [swpStorage, swpStorage]);
+    expect(jsonEncode(h2[2]), jsonEncode(hist[2])); // untouched visit
+    for (final i in [0, 1, 3]) {
+      final a = Map.of(h2[i])..remove('attachmentPaths');
+      final b = Map.of(hist[i])..remove('attachmentPaths');
+      expect(jsonEncode(a), jsonEncode(b));
+    }
+    for (final c in ['id', 'name', 'age', 'gender', 'phone', 'relation']) {
+      expect(after[c], before[c], reason: c);
+    }
+    await d.close();
+    await wipe();
+  });
+
+  h.define('SWP-03 the photo is gone: false, row byte-identical, counter '
+      'unchanged', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    await d.insertPatient(withVisits('p1', [['$appFiles/attachments/$ownA/x.jpg']]));
+    await d.insertPatient(withVisits('p3', [[swpLocal]])); // other patient
+    await markAllSynced(d);
+    final before = await rawRow(db, 'p1');
+    final c0 = await counterOf(uidA);
+    expect(await swp(d), isFalse); // removed before the upload finished
+    expect(await rawRow(db, 'p1'), before);
+    expect(await counterOf(uidA), c0);
+    // Same photo already swapped (repeat confirmation): false, no change.
+    await d.insertPatient(withVisits('p2', [[swpLocal]]));
+    const sp2 = 'clinical_attachments/$uidA/p2/$swpUuid.jpg';
+    expect(await swp(d, patient: 'p2', storagePath: sp2), isTrue);
+    final p2 = await rawRow(db, 'p2');
+    final c1 = await counterOf(uidA);
+    expect(await swp(d, patient: 'p2', storagePath: sp2), isFalse);
+    expect(await rawRow(db, 'p2'), p2);
+    expect(await counterOf(uidA), c1);
+    await d.close();
+    await wipe();
+  });
+
+  h.define('SWP-04 deleted or tombstoned patient, or no such row: false, '
+      'nothing written', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    expect(await swp(d), isFalse); // no such row
+    await d.insertPatient(withVisits('p1', [[swpLocal]]));
+    await d.markPendingDelete('p1');
+    final c0 = await counterOf(uidA);
+    expect(await swp(d), isFalse);
+    expect(await rawRow(db, 'p1'), isNull);
+    expect(await d.pendingDeletesStrict(), ['p1']);
+    expect(await counterOf(uidA), c0);
+    // A row that exists next to a tombstone is still refused.
+    await db.insert('patients', {
+      'id': 'p1', 'name': 'Asha', 'age': '34', 'gender': 'Female',
+      'phone': '+91999', 'relation': 'Self',
+      'history': jsonEncode([{'id': 'v', 'date': '2026-01-01T00:00:00.000',
+        'attachmentPaths': [swpLocal]}]),
+      'sync_state': 'synced', 'updated_at': 1,
+    });
+    final raw = await rawRow(db, 'p1');
+    expect(await swp(d), isFalse);
+    expect(await rawRow(db, 'p1'), raw);
+    expect(await counterOf(uidA), c0);
+    await d.close();
+    await wipe();
+  });
+
+  h.define('SWP-05 a corrupt row throws unreadableRow (never false) and '
+      'writes nothing', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    await d.insertPatient(withVisits('p1', [[swpLocal]]));
+    await markAllSynced(d);
+    final c0 = await counterOf(uidA);
+    for (final bad in <Object>[
+      '{"attachmentPaths": ["$swpLocal"]', // not JSON
+      '{"id":"v"}', // not a list
+      jsonEncode([{'id': 'v', 'attachmentPaths': swpLocal}]),
+      jsonEncode([{'id': 'v', 'date': '2026-01-01T00:00:00.000',
+        'attachmentPaths': [swpLocal, 7]}]),
+      jsonEncode([{'id': 'v', 'date': 'not a date',
+        'attachmentPaths': [swpLocal]}]), // visit would come back flagged
+      Uint8List.fromList([1, 2, 3]), // not text
+    ]) {
+      await db.update('patients', {'history': bad, 'sync_state': 'synced'},
+          where: 'id = ?', whereArgs: ['p1']);
+      final before = await rawRow(db, 'p1');
+      await expectLater(swp(d), readFails(DbReadFailure.unreadableRow));
+      expect(await rawRow(db, 'p1'), before);
+      expect(await counterOf(uidA), c0);
+    }
+    // Table gone while the DB counts as open: readFailed, not false.
+    await db.execute('DROP TABLE patients');
+    await expectLater(swp(d), readFails(DbReadFailure.readFailed));
+    await d.close();
+    await wipe();
+  });
+
+  h.define('SWP-06 counter: +1 exactly once from clean, not again while '
+      'dirty; updated_at bumped; markSynced with it clears it', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    final other = '$appFiles/attachments/$ownA/second.jpg';
+    await d.insertPatient(withVisits('p1', [[swpLocal], [other]]));
+    await d.insertPatient(withVisits('p2', [['$appFiles/attachments/$ownA/z.jpg']]));
+    await markAllSynced(d);
+    expect(await counterOf(uidA), '0');
+    final t0 = (await rawRow(db, 'p1'))!['updated_at'] as int;
+    expect(await swp(d), isTrue);
+    final r1 = (await rawRow(db, 'p1'))!;
+    expect(r1['sync_state'], 'dirty');
+    expect(r1['updated_at'] as int, greaterThan(t0));
+    expect(await counterOf(uidA), '1');
+    expect(await d.unsyncedCount(), const UnsyncedCount.known(1));
+    // Second photo of the same, now dirty, row: no second increment.
+    expect(
+        await swp(d,
+            localPath: other,
+            storagePath: 'clinical_attachments/$uidA/p1/second.jpg'),
+        isTrue);
+    final r2 = (await rawRow(db, 'p1'))!;
+    expect(r2['updated_at'] as int, greaterThan(r1['updated_at'] as int));
+    expect(await counterOf(uidA), '1');
+    // The swap gets pushed: it is in the dirty list with its version.
+    final dirty = await d.dirtyPatientsStrict();
+    expect(dirty.map((p) => p.id), ['p1']);
+    expect(dirty.single.updatedAt, '${r2['updated_at']}');
+    expect(await d.markSynced('p1', dirty.single.updatedAt!), isTrue);
+    expect(await counterOf(uidA), '0');
+    // Unknown counter: rebuilt from the rows inside the transaction (no
+    // deadlock), then counts this row once.
+    await h.keys.delete(DatabaseHelper.unsyncedCounterKeyFor(uidA));
+    await d.insertPatient(withVisits('p4', [['$appFiles/attachments/$ownA/w.jpg']]));
+    await markAllSynced(d);
+    await h.keys.delete(DatabaseHelper.unsyncedCounterKeyFor(uidA));
+    await d.updatePatient(edited(
+        (await d.fetchPatientsStrict()).singleWhere((p) => p.id == 'p2'),
+        {'phone': '+91777'})); // one dirty row, counter unknown
+    await h.keys.delete(DatabaseHelper.unsyncedCounterKeyFor(uidA));
+    expect(
+        await swp(d,
+            patient: 'p4',
+            localPath: '$appFiles/attachments/$ownA/w.jpg',
+            storagePath: 'clinical_attachments/$uidA/p4/w.jpg'),
+        isTrue);
+    expect(await counterOf(uidA), '2'); // p2 + p4
+    await d.close();
+    await wipe();
+  });
+
+  h.define('SWP-07 after the swap, referencedAttachmentKeys drops the local '
+      'key and keeps the others', () async {
+    await wipe();
+    final d = helper();
+    await d.openFor(uidA);
+    final other = '$appFiles/attachments/$ownA/other.jpg';
+    await d.insertPatient(withVisits('p1', [
+      [swpLocal, other],
+      ['file://localhost${Uri.file(swpLocal).path}'],
+    ]));
+    expect(await d.referencedAttachmentKeys(),
+        {'attachments/$swpUuid.jpg', 'attachments/other.jpg'});
+    expect(await swp(d), isTrue);
+    expect(await d.referencedAttachmentKeys(), {'attachments/other.jpg'});
+    expect(await d.referencedAttachmentPaths(), {swpStorage, other});
+    await d.close();
+    await wipe();
+  });
+
+  h.define('SWP-08 owner and Storage-path guards: wrong owner or closed DB '
+      'throws notOpen; other patient/uid folder or traversal is an '
+      'ArgumentError; nothing written', () async {
+    await wipe();
+    final d = helper();
+    final db = await d.openFor(uidA);
+    await d.insertPatient(withVisits('p1', [[swpLocal]]));
+    await markAllSynced(d);
+    final before = await rawRow(db, 'p1');
+    final c0 = await counterOf(uidA);
+    // Signed in as B while A's DB is still open (the local path is in B's
+    // folder so the arguments are valid for B).
+    await expectLater(
+        swp(d,
+            owner: uidB,
+            localPath: '$appFiles/attachments/$ownB/$swpUuid.jpg',
+            storagePath: 'clinical_attachments/$uidB/p1/$swpUuid.jpg'),
+        readFails(DbReadFailure.notOpen));
+    for (final sp in [
+      'clinical_attachments/$uidA/p2/$swpUuid.jpg', // other patient
+      'clinical_attachments/$uidB/p1/$swpUuid.jpg', // other uid
+      'clinical_attachments/$uidA/p1/../p2/$swpUuid.jpg', // traversal
+      'clinical_attachments/$uidA/../$uidB/p1/$swpUuid.jpg',
+      'clinical_attachments/$uidA//$swpUuid.jpg',
+      'doctor_profiles/$uidA/$swpUuid.jpg',
+    ]) {
+      await expectLater(swp(d, storagePath: sp),
+          throwsA(isA<ArgumentError>().having((e) => e.name, 'name', 'storagePath')),
+          reason: sp);
+    }
+    await expectLater(
+        swp(d, localPath: '$appFiles/attachments/$ownB/$swpUuid.jpg'),
+        throwsA(isA<ArgumentError>().having((e) => e.name, 'name', 'localPath')));
+    expect(await rawRow(db, 'p1'), before);
+    expect(await counterOf(uidA), c0);
+    await d.close();
+    await expectLater(swp(d), readFails(DbReadFailure.notOpen));
+    // Reopened as B: A's swap is refused, B's DB untouched.
+    final dB = helper();
+    await dB.openFor(uidB);
+    await expectLater(swp(dB), readFails(DbReadFailure.notOpen));
+    expect(await dB.fetchPatientsStrict(), isEmpty);
+    await dB.close();
+    await wipe();
+  });
+
   h.define('STR-01 healthy DB: strict reads equal the lenient ones; an '
       'empty DB gives empty, not an error', () async {
     await wipe();

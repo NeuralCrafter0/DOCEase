@@ -504,6 +504,41 @@ abstract class LocalDatabase {
   /// dropped. Same other failure rules as [referencedAttachmentPaths].
   Future<Set<String>> referencedAttachmentKeys();
 
+  /// After a confirmed upload: in patient [patientId]'s row, replaces every
+  /// visit attachment entry that is the same local photo as [localPath]
+  /// (same [attachmentKey] for [expectedOwner], so `file:///`,
+  /// `file://localhost/` and `/data/data` vs `/data/user/0` aliases all
+  /// match) with [storagePath]. Everything else in the row (other fields,
+  /// other visits, other entries, entries that cannot be keyed) is kept
+  /// exactly as stored, so an edit saved during the upload is not lost.
+  /// Runs under the row write queue in one transaction that also checks the
+  /// open owner. On success the row is marked dirty (counted once if it was
+  /// clean), `updated_at` is bumped, and it returns true.
+  ///
+  /// Returns false, writing nothing, only when the photo is gone: no such
+  /// row, the patient is tombstoned, or no entry has that key any more.
+  ///
+  /// Throws, writing nothing:
+  /// * [ArgumentError] (names the parameter, never its value) if
+  ///   [expectedOwner] or [patientId] is empty, [storagePath] is not exactly
+  ///   `clinical_attachments/<expectedOwner>/<patientId>/<file>` (file
+  ///   `[A-Za-z0-9_-]{1,128}.jpg|jpeg|png|webp`, see
+  ///   [AttachmentRefs.isPatientStoragePath]), or [localPath] is not a
+  ///   visit photo in [expectedOwner]'s attachments folder.
+  /// * [DbReadException] `notOpen`: no DB open, the open failed, or the
+  ///   open DB's owner is not [expectedOwner] (sign-out or owner change
+  ///   mid-upload).
+  /// * [DbReadException] `unreadableRow`: the row or its `history` does not
+  ///   parse (the row is read-only).
+  /// * [DbReadException] `readFailed`: the read or write failed; rolled
+  ///   back (the unsynced counter may be one high, which is safe).
+  /// * [UnsyncedCounterException]: the counter cannot be kept honest.
+  Future<bool> swapAttachmentPath(
+      {required String expectedOwner,
+      required String patientId,
+      required String localPath,
+      required String storagePath});
+
   /// Owner-relative key of a stored or on-disk photo path, or null if it is
   /// not in [ownerFolderName]'s folders ("not mine, never delete"). Pure;
   /// see [AttachmentRefs.attachmentKey].

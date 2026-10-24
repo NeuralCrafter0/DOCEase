@@ -252,6 +252,44 @@ class FakeLocalDatabase implements LocalDatabase {
   @override
   Future<void> deletePatient(String id) => markPendingDelete(id);
 
+  /// Same contract as the real helper (argument checks, owner check, key
+  /// matching, false only when the photo is gone, dirty + version bump).
+  @override
+  Future<bool> swapAttachmentPath(
+      {required String expectedOwner,
+      required String patientId,
+      required String localPath,
+      required String storagePath}) async {
+    final key = AttachmentRefs.swapKeyFor(
+        expectedOwner: expectedOwner,
+        patientId: patientId,
+        localPath: localPath,
+        storagePath: storagePath);
+    if (openUid != expectedOwner) {
+      throw const DbReadException(DbReadFailure.notOpen);
+    }
+    if (refuseWrites) throw UnsyncedCounterException(expectedOwner);
+    if (tombstones.contains(patientId)) return false;
+    final p = rows[patientId];
+    if (p == null) return false;
+    if (p.hasParseErrors) {
+      throw const DbReadException(DbReadFailure.unreadableRow);
+    }
+    final json = p.toJson();
+    final next = AttachmentRefs.swapInHistoryJson(jsonEncode(json['history']),
+        key: key,
+        ownerFolderName: AttachmentRefs.ownerFolderNameFor(expectedOwner),
+        storagePath: storagePath);
+    if (next == null) return false;
+    log.add('swap:$patientId');
+    final version = '${++_version}';
+    rows[patientId] = Patient.fromJson({...json, 'history': jsonDecode(next)},
+        updatedAt: version);
+    dirty[patientId] = true;
+    versions[patientId] = version;
+    return true;
+  }
+
   @override
   Future<List<String>> pendingDeletes() async => tombstones.toList();
 
