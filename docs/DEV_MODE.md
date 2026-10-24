@@ -68,7 +68,69 @@ name the flavor (`--flavor prod` or `--flavor dev`).
   owner folder is the same hash the DB file name uses (`docease_<hash>.db`), so the uid is not on
   disk. Photo files are only ever deleted inside the folders of the owner that is asking
   (symlinks are refused): an unsaved copy when its save fails, and the previous doctor photo when
-  a new one is saved. Deleting a visit or patient does not delete its photos (PR #8 owns that).
+  a new one is saved, and the photos of a deleted patient or visit (below).
+- Photo cleanup (security's #8 review; `PatientProvider`, `services/photo_sweep.dart`), for dev
+  and real owners alike:
+  - After a local delete succeeds (`markPendingDelete` for a patient, the visit save for a
+    deleted visit or a photo removed while editing), the provider deletes the dropped photos. A
+    refused delete removes nothing. A photo another visit still uses is kept; a file that is
+    already gone is ignored, so a second delete is harmless. "Still used" is never taken from the
+    in-memory list alone: a fresh `referencedAttachmentKeys()` scan after the DB change must succeed, and a
+    still-used local entry that cannot be keyed aborts the cleanup too (left to the sweep; log
+    `Photos: cleanup skipped (<reason>)`).
+  - Cloud mode (parked, security F8-R1 and the #16 re-review): after a confirmed upload the DB
+    swaps the local path for the Storage path in the stored row (`swapAttachmentPath`, one
+    transaction, named arguments `expectedOwner`/`patientId`/`localPath`/`storagePath`); the
+    provider never writes a row snapshot back, so an edit saved mid-upload is kept, and a stale
+    form saved later gets the Storage path. The local copy is deleted only after the swap returned
+    true (PR #8 writes picks into `attachments/<owner folder>/`). A swap that throws (wrong owner,
+    bad path, corrupt row) deletes nothing, local or remote; the row stays dirty and the retry
+    swaps the same object again without a new upload. A swap that returns false (photo or visit
+    removed mid-upload) deletes the object that upload just wrote, at that exact path, only if a
+    strict `referencedAttachmentPaths()` scan shows nothing references it (log
+    `Upload: unused upload kept (<reason>)` otherwise). The Storage path must be in the owner's
+    folder for that patient (checked by us and the DB); files outside the owner folder are never
+    deleted. Since #10's `attachment_swaps` a local whole-row save may store the Storage path S
+    where the provider's memory still holds the local path L, so the push always sends the stored
+    rows from `dirtyPatientsStrict()` (never the in-memory list) and passes `markSynced` that
+    row's own `updatedAt`; after every local save the provider re-reads the patient strictly, so
+    the UI shows S. Tests:
+    `test/backend/upload_cleanup_test.dart`.
+  - At startup (`StartupHooks`, both start modes) a sweep waits for the first open DB and deletes
+    files in that owner's `attachments/<owner folder>/` that no row references any more (e.g.
+    after a crash between the DB delete and the file delete). Rules: it skips everything unless
+    #10's `referencedAttachmentKeys()` returns the full set; it throws `AttachmentScanIncomplete`
+    otherwise, and only the reason's name is logged (`noDatabase`, `openFailed`, `unreadableRow`,
+    `unreadableAttachmentList`, `unreadableDoctorProfile`, `unrecognisedPath`, `readFailed`).
+    Unsynced rows count as referenced; only regular files directly in that folder, never
+    symlinks, directories, `profile/` or another owner's folder; files changed in the last 10
+    minutes are kept; logs carry counts only. It runs once per start, so a skip is logged once.
+  - Deletes (both paths) go through `LocalPhotoStore.deleteOwnedVisitFile`: only names the app
+    generates (`<uuid v4>.<jpg|png|webp>`, lower case), only directly in the owner folder, the
+    folder must resolve to itself, and the entry is re-checked as a regular file (no-follow) right
+    before `File(entry).delete()`. The delete target is always the entry's own path, never a
+    resolved one, so a last-moment symlink swap can at worst unlink that link.
+  - Both compare #10's owner-relative keys (`AttachmentRefs.attachmentKey`: `attachments/<file>`
+    or `profile/<file>`), never raw paths, so `/data/user/0/...` and `/data/data/...` name the
+    same photo; the sweep only looks at `attachments/` keys. The owner folder is #10's
+    `ownerFolderNameFor` (sha256 hex, first 32; `local` is `25bf8e1a2393f1108d37029b3df55932`).
+  - The scan also counts the doctor's photo (`doctor_profile` setting, the same key
+    `DoctorProvider` writes). A new avatar is saved in the setting before the old file is deleted,
+    so the two never disagree; the sweep never touches `profile/`.
+  - Known limitation: a visit that still holds an old image_picker cache path makes the scan fail
+    with `unrecognisedPath`, so that phone is never swept (safe; clinical records are not
+    migrated). Provider cleanup is skipped there as well (the fresh scan fails the same way). A leftover avatar after a crash is
+    not swept either. Tests: `test/backend/photo_cleanup_test.dart`.
+- Strict reads (DB engineer's audit, #16): the patient list, the push of dirty rows and the
+  tombstone pass use #10's `fetchPatientsStrict()`, `dirtyPatientsStrict()` and
+  `pendingDeletesStrict()`. A `DbReadException` (`notOpen`, `readFailed`, `unreadableRow`) sets
+  `PatientProvider.loadFailed`/`loadFailure` for the load (the list is kept only for the same
+  owner, `reload()` retries, every patient/visit write and delete is refused with
+  `SaveRefusedException`, the sweep skips) and keeps the sync retry pending for the push. The
+  lenient reads stay for display-only code. `MedicineProvider` never saves over a list it could
+  not read (local setting or Firestore): additions are kept in memory and saved together with
+  the stored list once a retried `load` succeeds; a stored value that is not a list is a failed
+  load. Tests: `test/backend/strict_load_test.dart`, `test/backend/load_guard_audit_test.dart`.
 - iOS: each owner photo folder is excluded from iCloud and computer backups when it is first used
   in a run, through #10's `PlatformBackupExcluder` (the existing `docease/backup_exclusion`
   channel in `ios/Runner/AppDelegate.swift`, which also covers the encrypted DB; no new native

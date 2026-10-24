@@ -244,6 +244,39 @@ void main() {
       await session.idle;
       expect(session.phase, SessionPhase.ready);
     });
+
+    test('security #16 L-1: a picked photo registers and saves under "local" (no Firebase session)', () async {
+      session.dispose();
+      final localDb = LocalSessionDb();
+      final patients = localPatients(localDb, photos);
+      session = SessionController.localOnly(
+          db: localDb,
+          patients: patients,
+          doctor: localDoctor(localDb, photos),
+          medicines: localMedicines(localDb),
+          observeAppLifecycle: false);
+      await session.idle;
+      await settle();
+      expect(session.uid, kLocalOwnerId);
+      await patients.addPatient(newPatient('p1'));
+
+      // #8's flow: copy into attachments/<local folder>/, then register.
+      final copy = await photos.keepVisitPhoto(kLocalOwnerId, pick('IMG_21.jpg'), UploadImageType.jpeg);
+      expect(p.dirname(copy), photos.visitFolderFor(kLocalOwnerId));
+      patients.registerPickedAttachment(patientId: 'p1', localPath: copy);
+      expect(patients.isRegisteredPickForTesting('p1', copy), isTrue);
+      await patients.addRecord('p1', visit('v1', [copy]));
+      expect(localDb.rows['p1']!.history.single.attachmentPaths, [copy]);
+      expect(patients.isRegisteredPickForTesting('p1', copy), isFalse, reason: 'consumed by the save');
+      expect(File(copy).existsSync(), isTrue);
+
+      // An app photo nobody registered is left out (and left on disk).
+      final stray = await photos.keepVisitPhoto(kLocalOwnerId, pick('IMG_22.jpg'), UploadImageType.jpeg);
+      await patients.addRecord('p1', visit('v2', [stray]));
+      expect(localDb.rows['p1']!.history.firstWhere((v) => v.id == 'v2').attachmentPaths, isEmpty);
+      expect(File(stray).existsSync(), isTrue);
+      expect(hits, isEmpty, reason: 'no Firebase call');
+    });
   }, skip: !kDevMode); // SessionController.localOnly needs the define
 
   group('patients and visits', () {
@@ -281,6 +314,8 @@ void main() {
     test('a photo already in the app folder (PR #8 layout) is not copied again', () async {
       await patients.addPatient(newPatient('p1'));
       final inFolder = await photos.keepVisitPhoto(kLocalOwnerId, pick('IMG_2.jpg'), UploadImageType.jpeg);
+      // #8 registers its copy (security #16 L-1).
+      patients.registerPickedAttachment(patientId: 'p1', localPath: inFolder);
       await patients.addRecord('p1', visit('v1', [inFolder]));
       expect(db.rows['p1']!.history.single.attachmentPaths, [inFolder]);
       expect(attachmentsOnDisk(), [inFolder]);
@@ -309,14 +344,19 @@ void main() {
       expect(File(savedPhoto).existsSync(), isTrue);
     });
 
-    test('deleting a visit or patient never deletes photos here (PR #8 owns that) and calls no cloud', () async {
+    test('deleting a visit or patient deletes its kept photos and calls no cloud', () async {
+      // Cleanup details: test/backend/photo_cleanup_test.dart.
       await patients.addPatient(newPatient('p1'));
       await patients.addRecord('p1', visit('v1', [pick('a.jpg')]));
-      final photo = db.rows['p1']!.history.single.attachmentPaths.single;
+      await patients.addRecord('p1', visit('v2', [pick('b.jpg')]));
+      final kept = {for (final r in db.rows['p1']!.history) r.id: r.attachmentPaths.single};
+      expect(kept.values.every((f) => File(f).existsSync()), isTrue);
       await patients.deleteRecord('p1', 'v1');
+      expect(File(kept['v1']!).existsSync(), isFalse);
+      expect(File(kept['v2']!).existsSync(), isTrue);
       await patients.deletePatient('p1');
       await settle();
-      expect(File(photo).existsSync(), isTrue);
+      expect(File(kept['v2']!).existsSync(), isFalse);
       expect(db.tombstones, contains('p1'));
       expect(hits, isEmpty);
     });

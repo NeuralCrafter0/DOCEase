@@ -1,12 +1,11 @@
-import 'dart:convert';
 import 'dart:io';
 
-import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
+import '../providers/attachment_refs.dart' show AttachmentRefs;
 import '../providers/database_helper.dart' show BackupExcluder, PlatformBackupExcluder;
 import 'attachments.dart';
 import 'log_codes.dart';
@@ -38,12 +37,15 @@ class LocalPhotoStore {
   /// The app-wide store (dev mode calls [init] before runApp).
   static LocalPhotoStore instance = LocalPhotoStore();
 
-  static const attachmentsFolder = 'attachments';
-  static const profileFolder = 'profile';
+  // Same names as #10's AttachmentRefs, so the DB scan and the sweep
+  // agree on the layout.
+  static const attachmentsFolder = AttachmentRefs.attachmentsFolder;
+  static const profileFolder = AttachmentRefs.profileFolder;
 
   /// Folder name for [owner]: `sha256(owner)` hex, first 32 characters.
-  static String ownerFolderName(String owner) =>
-      sha256.convert(utf8.encode(owner)).toString().substring(0, 32);
+  /// Delegates to #10's [AttachmentRefs.ownerFolderNameFor] (also the DB
+  /// file name hash), so the two can never drift.
+  static String ownerFolderName(String owner) => AttachmentRefs.ownerFolderNameFor(owner);
 
   static final _ownerHash = RegExp(r'^[0-9a-f]{32}$');
 
@@ -144,6 +146,91 @@ class LocalPhotoStore {
     } catch (_) {
       return false;
     }
+  }
+
+  /// The file in [owner]'s visit folder that [key] names, or null. Only
+  /// visit-photo keys directly in the folder (`attachments/<file>`, from
+  /// [AttachmentRefs.attachmentKey]) map to a path; `profile/…` keys never do, so visit
+  /// cleanup can never reach the doctor's photo.
+  String? visitPathForKey(String owner, String key) {
+    final segs = key.split('/');
+    if (segs.length != 2 || segs.first != attachmentsFolder) return null;
+    final name = segs.last;
+    if (name.isEmpty || name == '.' || name == '..' || name.contains('\\')) return null;
+    final dir = visitFolderFor(owner);
+    return dir == null ? null : p.join(dir, name);
+  }
+
+  /// Visit photo names the app itself writes (this store and PR #8's
+  /// picker): `<uuid v4>.<ext>`, lower-case, with an [UploadImageType]
+  /// extension. Cleanup leaves every other name alone (security #16 Low-3:
+  /// rules out foreign files and Unicode or case aliases).
+  static final RegExp _appVisitName = RegExp(
+      '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+      '\\.(${UploadImageType.values.map((t) => t.fileExtension).join('|')})\$');
+
+  /// Whether [name] (a bare file name) is one the app generates for visit photos.
+  static bool isAppVisitFileName(String name) => _appVisitName.hasMatch(name);
+
+  /// Strict delete for photo cleanup (security #8 and #16 reviews). Deletes
+  /// the directory entry [path] only when all hold:
+  /// - it is directly in [owner]'s visit folder (`attachments/<ownerHash>/`,
+  ///   never a sub-folder or `profile/`);
+  /// - its name is one the app generates ([isAppVisitFileName]);
+  /// - the folder itself resolves to itself (a symlinked `attachments/` or
+  ///   owner folder cannot redirect the delete);
+  /// - right before the delete, the entry is a regular file, checked with
+  ///   `followLinks: false`, so symlinks and directories are skipped.
+  /// The delete target is always the entry's own path, never a resolved
+  /// one: if the entry is swapped for a symlink at the last moment, the
+  /// worst case is unlinking that link, never the photo it points to.
+  /// A missing file returns false, so deleting twice is harmless. Never
+  /// throws.
+  Future<bool> deleteOwnedVisitFile(String path, {required String owner}) async {
+    try {
+      await init();
+      final dir = visitFolderFor(owner);
+      if (dir == null || !p.isAbsolute(path)) return false;
+      final entry = p.normalize(path);
+      if (p.dirname(entry) != dir) return false;
+      if (!isAppVisitFileName(p.basename(entry))) return false;
+      if (FileSystemEntity.typeSync(dir, followLinks: false) != FileSystemEntityType.directory) return false;
+      if (p.normalize(await Directory(dir).resolveSymbolicLinks()) != dir) return false;
+      if (FileSystemEntity.typeSync(entry, followLinks: false) != FileSystemEntityType.file) return false;
+      await File(entry).delete(); // unlinks the entry itself
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Security #16 L-2: whether [path] is a regular file directly in
+  /// [owner]'s visit folder (`attachments/<ownerHash>/<file>`): the path is
+  /// absolute and already normalised (no `.` or `..` segments), never in a
+  /// sub-folder, the folder resolves to itself, and the entry is a regular
+  /// file checked with `followLinks: false` (a symlink or a directory is
+  /// not). Same rules as [deleteOwnedVisitFile], minus the name check.
+  /// False before the support directory resolves or on any error. Never
+  /// throws.
+  Future<bool> isOwnedVisitFile(String path, {required String owner}) async {
+    try {
+      await init();
+      final dir = visitFolderFor(owner);
+      if (dir == null || !p.isAbsolute(path) || p.normalize(path) != path) return false;
+      return await _isDirectRegularFile(path, dir);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// [entry] sits directly in [dir], [dir] is a real directory that
+  /// resolves to itself, and [entry] is a regular file (links not
+  /// followed).
+  Future<bool> _isDirectRegularFile(String entry, String dir) async {
+    if (p.dirname(entry) != dir) return false;
+    if (FileSystemEntity.typeSync(dir, followLinks: false) != FileSystemEntityType.directory) return false;
+    if (p.normalize(await Directory(dir).resolveSymbolicLinks()) != dir) return false;
+    return FileSystemEntity.typeSync(entry, followLinks: false) == FileSystemEntityType.file;
   }
 
   Future<bool> _realPathWithin(String path, String dir) async {
