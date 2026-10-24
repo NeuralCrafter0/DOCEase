@@ -71,10 +71,36 @@ class _DoctorProfileScreenState extends State<DoctorProfileScreen> {
     _mobileController = TextEditingController(text: initialNumber);
   }
 
-  Future<void> _pickImage(ImageSource source) async {
+  /// Asks whether to take a photo or pick one from the gallery, then picks.
+  /// [preferred] is listed first (the camera button passes the camera).
+  Future<void> _pickImage(ImageSource preferred) async {
     if (!_isEditing) return;
+    final source = await _chooseImageSource(preferred);
+    if (source == null || !mounted) return;
     final picked = await ImagePicker().pickImage(source: source, imageQuality: 50);
     if (picked != null) setState(() => _localImage = File(picked.path));
+  }
+
+  Future<ImageSource?> _chooseImageSource(ImageSource preferred) {
+    final order = preferred == ImageSource.camera ? const [ImageSource.camera, ImageSource.gallery] : const [ImageSource.gallery, ImageSource.camera];
+    return showModalBottomSheet<ImageSource>(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(32))),
+      backgroundColor: Colors.white,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            for (final s in order)
+              ListTile(
+                leading: Icon(s == ImageSource.camera ? Icons.camera_alt_rounded : Icons.photo_library_rounded, color: AppColors.primary),
+                title: Text(s == ImageSource.camera ? 'Take photo' : 'Choose from gallery', style: const TextStyle(fontWeight: FontWeight.w700, color: AppColors.ink)),
+                onTap: () => Navigator.pop(ctx, s),
+              ),
+          ]),
+        ),
+      ),
+    );
   }
 
   Future<void> _saveProfile() async {
