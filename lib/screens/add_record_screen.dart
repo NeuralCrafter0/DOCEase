@@ -4,6 +4,8 @@ import 'package:provider/provider.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter_typeahead/flutter_typeahead.dart';
+import '../widgets/field_label.dart';
+import '../widgets/segmented_selector.dart';
 import '../models/patient.dart';
 import '../providers/patient_provider.dart';
 import '../providers/medicine_provider.dart';
@@ -225,28 +227,14 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
     ]);
   }
 
-  Widget _buildLabel(String text) => Padding(padding: const EdgeInsets.only(bottom: 10, left: 4), child: Text(text, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Color(0xFF475569))));
+  Widget _buildLabel(String text) => FieldLabel(text);
 
   Widget _buildModernInput(TextEditingController controller, String hint, IconData icon, {int maxLines = 1}) {
     return TextFormField(controller: controller, maxLines: maxLines, style: const TextStyle(fontWeight: FontWeight.w700), decoration: InputDecoration(hintText: hint, prefixIcon: Icon(icon, color: const Color(0xFF6366F1), size: 20), filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: Colors.grey.shade200))));
   }
 
   Widget _buildHighPerfSelector(List<String> options, String selectedValue, Function(String) onSelected) {
-    final selectedIndex = options.indexOf(selectedValue);
-    return Container(
-      height: 54, padding: const EdgeInsets.all(4),
-      decoration: BoxDecoration(color: const Color(0xFFF1F5F9), borderRadius: BorderRadius.circular(18)),
-      child: LayoutBuilder(builder: (context, constraints) {
-        final width = constraints.maxWidth / options.length;
-        return Stack(children: [
-          AnimatedPositioned(duration: const Duration(milliseconds: 250), curve: Curves.easeOutCubic, left: selectedIndex * width, top: 0, bottom: 0, width: width, child: Container(decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 8)]))),
-          Row(children: options.map((opt) {
-            final isSelected = selectedValue == opt;
-            return Expanded(child: GestureDetector(onTap: () => onSelected(opt), behavior: HitTestBehavior.opaque, child: Center(child: Text(opt, style: TextStyle(fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600, color: isSelected ? const Color(0xFF6366F1) : const Color(0xFF64748B), fontSize: 12)))));
-          }).toList()),
-        ]);
-      }),
-    );
+    return SegmentedSelector(options: options, selected: selectedValue, onSelected: onSelected, fontSize: 12);
   }
 
   Widget _buildIconButton(IconData icon, String label, VoidCallback onTap) {

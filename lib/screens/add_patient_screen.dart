@@ -3,6 +3,8 @@ import 'package:provider/provider.dart';
 import 'package:intl_phone_field/intl_phone_field.dart';
 import 'package:intl_phone_field/country_picker_dialog.dart';
 import 'package:intl_phone_field/countries.dart';
+import '../widgets/field_label.dart';
+import '../widgets/segmented_selector.dart';
 import '../models/patient.dart';
 import '../providers/patient_provider.dart';
 
@@ -111,52 +113,13 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
     );
   }
 
-  Widget _buildLabel(String text) => Padding(padding: const EdgeInsets.only(bottom: 10, left: 4), child: Text(text, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Color(0xFF475569))));
+  Widget _buildLabel(String text) => FieldLabel(text);
 
   Widget _buildModernInput(TextEditingController controller, String hint, IconData icon, {TextInputType? keyboardType}) {
     return TextFormField(controller: controller, keyboardType: keyboardType, style: const TextStyle(fontWeight: FontWeight.w700), decoration: InputDecoration(hintText: hint, prefixIcon: Icon(icon, color: const Color(0xFF6366F1), size: 20), filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: Colors.grey.shade200))));
   }
 
   Widget _buildHighPerfSelector(List<String> options, String selectedValue, Function(String) onSelected) {
-    final selectedIndex = options.indexOf(selectedValue);
-    return Container(
-      height: 54,
-      padding: const EdgeInsets.all(4),
-      decoration: BoxDecoration(color: const Color(0xFFF1F5F9), borderRadius: BorderRadius.circular(18)),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final width = constraints.maxWidth / options.length;
-          return Stack(
-            children: [
-              // Moving Indicator - Single object, no shadow trail
-              AnimatedPositioned(
-                duration: const Duration(milliseconds: 250),
-                curve: Curves.easeOutCubic,
-                left: selectedIndex * width,
-                top: 0, bottom: 0, width: width,
-                child: Container(
-                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 8, offset: const Offset(0, 2))]),
-                ),
-              ),
-              // Labels Layer
-              Row(
-                children: options.map((opt) {
-                  final isSelected = selectedValue == opt;
-                  return Expanded(
-                    child: GestureDetector(
-                      onTap: () => onSelected(opt),
-                      behavior: HitTestBehavior.opaque,
-                      child: Center(
-                        child: Text(opt, style: TextStyle(fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600, color: isSelected ? const Color(0xFF6366F1) : const Color(0xFF64748B), fontSize: 13)),
-                      ),
-                    ),
-                  );
-                }).toList(),
-              ),
-            ],
-          );
-        },
-      ),
-    );
+    return SegmentedSelector(options: options, selected: selectedValue, onSelected: onSelected, indicatorShadowOffset: const Offset(0, 2));
   }
 }
