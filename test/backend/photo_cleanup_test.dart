@@ -1,15 +1,19 @@
 // Photo cleanup after deletes, and the startup sweep (security's #8 review).
 // Runs in both suite modes: everything here injects cloudSync: false and the
 // dev owner explicitly; nothing depends on the define.
+import 'dart:async';
 import 'dart:io';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:docease/config/dev_mode.dart';
+import 'package:docease/models/doctor.dart';
 import 'package:docease/models/patient.dart';
+import 'package:docease/providers/doctor_provider.dart';
 import 'package:docease/providers/local_database.dart';
 import 'package:docease/providers/patient_provider.dart';
-import 'package:docease/services/attachment_keys.dart';
 import 'package:docease/services/local_photo_store.dart';
 import 'package:docease/services/photo_sweep.dart';
+import 'package:docease/services/startup_hooks.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -32,6 +36,30 @@ class _TripStorage implements FirebaseStorage {
   dynamic noSuchMethod(Invocation i) {
     hits.add('storage.${i.memberName}');
     throw StateError('Storage touched');
+  }
+}
+
+class _TripFirestore implements FirebaseFirestore {
+  @override
+  dynamic noSuchMethod(Invocation i) {
+    hits.add('firestore.${i.memberName}');
+    throw StateError('Firestore touched');
+  }
+}
+
+/// #10's FakeLocalDatabase, plus a scan that can fail with a given error and
+/// a states stream that can emit several opens.
+class _ScanDb extends FakeLocalDatabase {
+  Object? failWith;
+  List<DbOpenState>? emit;
+
+  @override
+  Stream<DbOpenState> get states => emit == null ? super.states : Stream.fromIterable(emit!);
+
+  @override
+  Future<Set<String>> referencedAttachmentKeys() async {
+    if (failWith != null) throw failWith!;
+    return super.referencedAttachmentKeys();
   }
 }
 
@@ -71,7 +99,7 @@ void main() {
   late Directory root;
   late Directory support;
   late LocalPhotoStore photos;
-  late FakeLocalDatabase db;
+  late _ScanDb db;
 
   String photoIn(String? dir, String name) {
     Directory(dir!).createSync(recursive: true);
@@ -90,21 +118,8 @@ void main() {
     return provider;
   }
 
-  PhotoSweep sweepFor({
-    ReferencedKeysFn? referencedKeys,
-    AttachmentKeyFn? attachmentKey,
-    DateTime Function()? now,
-    Duration grace = PhotoSweep.defaultGrace,
-  }) {
-    final key = attachmentKey ?? AttachmentKeys.interimAttachmentKey;
-    return PhotoSweep(
-        db: db,
-        photos: photos,
-        attachmentKey: key,
-        referencedKeys: referencedKeys ?? () => AttachmentKeys.interimReferencedKeys(db, key),
-        grace: grace,
-        now: now ?? later);
-  }
+  PhotoSweep sweepFor({DateTime Function()? now, Duration grace = PhotoSweep.defaultGrace}) =>
+      PhotoSweep(db: db, photos: photos, grace: grace, now: now ?? later);
 
   setUp(() async {
     hits.clear();
@@ -112,7 +127,7 @@ void main() {
     support = Directory(p.join(root.path, 'support'))..createSync();
     photos = LocalPhotoStore(supportDir: () async => support);
     await photos.init();
-    db = FakeLocalDatabase()..state = const DbReady(kLocalOwnerId);
+    db = _ScanDb()..state = const DbReady(kLocalOwnerId);
   });
 
   tearDown(() {
@@ -120,46 +135,39 @@ void main() {
     root.deleteSync(recursive: true);
   });
 
-  group('attachment keys (interim stand-in for #10)', () {
-    final folder = LocalPhotoStore.ownerFolderName(kLocalOwnerId);
-    String? key(String s) => AttachmentKeys.interimAttachmentKey(s, ownerFolderName: folder);
-
-    test('built from segments: /data/user/0 and /data/data give the same key', () {
-      expect(key('/data/user/0/app/files/attachments/$folder/a.jpg'), 'attachments/a.jpg');
-      expect(key('/data/data/app/files/attachments/$folder/a.jpg'), 'attachments/a.jpg');
-      expect(key('file:///data/data/app/files/attachments/$folder/a.jpg'), 'attachments/a.jpg');
-      expect(key('/x/profile/$folder/avatar_1.jpg'), 'profile/avatar_1.jpg');
+  group('keys come from #10 (AttachmentRefs / referencedAttachmentKeys)', () {
+    test('LocalPhotoStore.ownerFolderName is #10\'s ownerFolderNameFor: sha256 hex, first 32', () {
+      expect(LocalPhotoStore.ownerFolderName(kLocalOwnerId), '25bf8e1a2393f1108d37029b3df55932');
+      for (final owner in [kLocalOwnerId, doctorB, 'uid-\u00e4\u00f6-\u{1F600}', 'x' * 200]) {
+        final name = LocalPhotoStore.ownerFolderName(owner);
+        expect(name, AttachmentRefs.ownerFolderNameFor(owner));
+        expect(name, LocalDatabase.ownerFolderNameFor(owner));
+        expect(name, matches(RegExp(r'^[0-9a-f]{32}$')));
+      }
+      expect(LocalPhotoStore.attachmentsFolder, AttachmentRefs.attachmentsFolder);
+      expect(LocalPhotoStore.profileFolder, AttachmentRefs.profileFolder);
+      expect(DoctorProvider.profileSettingKey, AttachmentRefs.doctorProfileSettingKey);
     });
 
-    test('null (never delete) for .., other owners, the root and temp files', () {
-      final other = LocalPhotoStore.ownerFolderName(doctorB);
-      expect(key('/x/attachments/$folder/../$other/a.jpg'), isNull);
-      expect(key('/x/attachments/$other/a.jpg'), isNull);
-      expect(key('/x/attachments/a.jpg'), isNull);
-      expect(key('/x/attachments/$folder/sub/a.jpg'), isNull);
-      expect(key('/cache/image_picker123.jpg'), isNull);
-      expect(key(''), isNull);
-    });
-
-    test('referenced keys fail closed and skip only web links and Storage paths', () async {
+    test('a walked file and its stored path give the same key; stored paths are LocalPhotoStore\'s', () async {
+      final folder = LocalPhotoStore.ownerFolderName(kLocalOwnerId);
       final a = visitPhoto(kLocalOwnerId, 'a.jpg');
+      expect(a, p.join(photos.supportPath!, 'attachments', folder, 'a.jpg'));
+      expect(AttachmentRefs.attachmentKey(a, ownerFolderName: folder), 'attachments/a.jpg');
       db.rows['p1'] = patient('p1', [visit('v1', [a, 'https://example.com/x.jpg', 'clinical_attachments/u/p1/y.jpg', ''])]);
-      final ref = AttachmentKeys.interimAttachmentKey;
-      expect(await AttachmentKeys.interimReferencedKeys(db, ref), {'attachments/a.jpg'});
+      expect(await db.referencedAttachmentKeys(), {'attachments/a.jpg'});
+    });
 
-      db.rows['p2'] = patient('p2', [visit('v2', ['/cache/image_picker1.jpg'])]);
-      await expectLater(AttachmentKeys.interimReferencedKeys(db, ref),
-          throwsA(isA<AttachmentReferencesUnavailable>().having((e) => e.code, 'code', 'unkeyable_path')));
-      db.rows.remove('p2');
-
-      db.rows['p3'] = patient('p3', [], parseErrors: ['history']);
-      await expectLater(AttachmentKeys.interimReferencedKeys(db, ref),
-          throwsA(isA<AttachmentReferencesUnavailable>().having((e) => e.code, 'code', 'parse_error')));
-      db.rows.remove('p3');
-
-      db.state = const DbClosed();
-      await expectLater(AttachmentKeys.interimReferencedKeys(db, ref),
-          throwsA(isA<AttachmentReferencesUnavailable>().having((e) => e.code, 'code', 'no_open_db')));
+    test('no stand-ins and no hand-built keys are left', () {
+      expect(File('lib/services/attachment_keys.dart').existsSync(), isFalse);
+      final sweep = File('lib/services/photo_sweep.dart').readAsStringSync();
+      expect(sweep, contains('AttachmentRefs.attachmentKey(path, ownerFolderName: folder)'));
+      expect(sweep, contains('await _db.referencedAttachmentKeys()'));
+      expect(sweep, contains('on AttachmentScanIncomplete catch (e)'));
+      expect(sweep, isNot(contains('TODO(#10)')));
+      final provider = File('lib/providers/patient_provider.dart').readAsStringSync();
+      expect(provider, isNot(contains('TODO(#10)')));
+      expect(RegExp(r'AttachmentRefs\.attachmentKey\(').allMatches(provider).length, greaterThanOrEqualTo(2));
     });
   });
 
@@ -190,8 +198,7 @@ void main() {
       await db.markPendingDelete('p1');
 
       expect(db.tombstones, contains('p1'));
-      expect(await AttachmentKeys.interimReferencedKeys(db, AttachmentKeys.interimAttachmentKey),
-          {'attachments/c.jpg'});
+      expect(await db.referencedAttachmentKeys(), {'attachments/c.jpg'});
       final r = await sweepFor().sweep(kLocalOwnerId);
       expect(r.removed, 1);
       expect(File(a).existsSync(), isFalse);
@@ -210,8 +217,7 @@ void main() {
       expect(provider.patients.map((x) => x.id), contains('p1'));
       expect(File(a).existsSync(), isTrue);
       expect(File(b).existsSync(), isTrue);
-      expect(await AttachmentKeys.interimReferencedKeys(db, AttachmentKeys.interimAttachmentKey),
-          {'attachments/a.jpg', 'attachments/b.jpg'});
+      expect(await db.referencedAttachmentKeys(), {'attachments/a.jpg', 'attachments/b.jpg'});
       final r = await sweepFor().sweep(kLocalOwnerId);
       expect(r.removed, 0);
       expect(File(a).existsSync() && File(b).existsSync(), isTrue);
@@ -338,7 +344,7 @@ void main() {
         final orphan = visitPhoto(kLocalOwnerId, 'orphan.jpg');
         db.state = const DbClosed();
         final r = await sweepFor().sweep(kLocalOwnerId);
-        expect((r.ran, r.reason), (false, 'no_open_db'));
+        expect((r.ran, r.reason), (false, 'noDatabase'));
         expect(File(orphan).existsSync(), isTrue);
       });
 
@@ -350,37 +356,69 @@ void main() {
         expect(File(orphan).existsSync(), isTrue);
       });
 
-      test('a record fails to parse', () async {
+      test('every AttachmentScanFailure skips the sweep and logs only its name', () async {
         final orphan = visitPhoto(kLocalOwnerId, 'orphan.jpg');
-        db.rows['bad'] = patient('bad', [], parseErrors: ['history']);
+        expect(AttachmentScanFailure.values.map((r) => r.name), [
+          'noDatabase', 'openFailed', 'unreadableRow', 'unreadableAttachmentList',
+          'unreadableDoctorProfile', 'unrecognisedPath', 'readFailed',
+        ]);
+        for (final reason in AttachmentScanFailure.values) {
+          db.failWith = AttachmentScanIncomplete(reason);
+          final logs = <String>[];
+          final r = await captureLogs(logs, () => sweepFor().sweep(kLocalOwnerId));
+          expect((r.ran, r.reason, r.removed), (false, reason.name, 0));
+          expect(logs.where((l) => l.startsWith('Photos:')), ['Photos: sweep skipped (${reason.name})']);
+          expect(File(orphan).existsSync(), isTrue, reason: reason.name);
+        }
+      });
+
+      test('real scan: an old image_picker cache path in a visit -> unrecognisedPath, nothing swept', () async {
+        // Known limitation: such phones never sweep until the visit changes.
+        final orphan = visitPhoto(kLocalOwnerId, 'orphan.jpg');
+        final picked = photoIn(p.join(root.path, 'cache'), 'image_picker_1234.jpg');
+        db.rows['p1'] = patient('p1', [visit('v1', [picked])]);
         final r = await sweepFor().sweep(kLocalOwnerId);
-        expect((r.ran, r.reason), (false, 'references_parse_error'));
+        expect((r.ran, r.reason), (false, 'unrecognisedPath'));
+        expect(File(orphan).existsSync() && File(picked).existsSync(), isTrue);
+      });
+
+      test('real scan: another owner\'s path or an unreadable doctor profile skips too', () async {
+        final orphan = visitPhoto(kLocalOwnerId, 'orphan.jpg');
+        db.rows['p1'] = patient('p1', [visit('v1', [visitPhoto(doctorB, 'x.jpg')])]);
+        expect((await sweepFor().sweep(kLocalOwnerId)).reason, 'unrecognisedPath');
+        db.rows.remove('p1');
+        db.settings[AttachmentRefs.doctorProfileSettingKey] = '{not json';
+        expect((await sweepFor().sweep(kLocalOwnerId)).reason, 'unreadableDoctorProfile');
         expect(File(orphan).existsSync(), isTrue);
       });
 
-      test('a local path cannot be keyed', () async {
+      test('any other error from the scan also skips (logged as its type)', () async {
         final orphan = visitPhoto(kLocalOwnerId, 'orphan.jpg');
-        db.rows['p1'] = patient('p1', [visit('v1', ['/tmp/image_picker_1.jpg'])]);
-        final r = await sweepFor().sweep(kLocalOwnerId);
-        expect(r.ran, isFalse);
+        db.failWith = StateError('db closed /secret/path');
+        final logs = <String>[];
+        final r = await captureLogs(logs, () => sweepFor().sweep(kLocalOwnerId));
+        expect((r.ran, r.reason), (false, 'StateError'));
+        expect(logs.join('\n'), isNot(contains('secret')));
         expect(File(orphan).existsSync(), isTrue);
       });
 
-      test('the reference source throws anything (until #10 names its exception)', () async {
-        final orphan = visitPhoto(kLocalOwnerId, 'orphan.jpg');
-        final r = await sweepFor(referencedKeys: () async => throw StateError('db closed')).sweep(kLocalOwnerId);
-        expect((r.ran, r.reason), (false, 'references_StateError'));
-        expect(File(orphan).existsSync(), isTrue);
-      });
-
-      test('a null key from attachmentKey means "not mine": never deleted', () async {
-        final orphan = visitPhoto(kLocalOwnerId, 'orphan.jpg');
-        final r = await sweepFor(
-                referencedKeys: () async => <String>{},
-                attachmentKey: (String path, {required String ownerFolderName}) => null)
-            .sweep(kLocalOwnerId);
-        expect((r.removed, r.other), (0, 1));
-        expect(File(orphan).existsSync(), isTrue);
+      test('a skip is logged once per start, not per open (StartupHooks + first open only)', () async {
+        visitPhoto(kLocalOwnerId, 'orphan.jpg');
+        db.rows['p1'] = patient('p1', [visit('v1', [photoIn(p.join(root.path, 'cache'), 'image_picker_9.jpg')])]);
+        db.emit = const [DbReady(kLocalOwnerId), DbClosed(), DbReady(kLocalOwnerId), DbReady(doctorB), DbReady(kLocalOwnerId)];
+        final logs = <String>[];
+        await captureLogs(logs, () async {
+          StartupHooks.resetForTesting();
+          final done = Completer<void>();
+          StartupHooks.register(PhotoSweep.hookName, () => sweepFor().runWhenOpen().whenComplete(done.complete));
+          StartupHooks.register(PhotoSweep.hookName, () async => fail('registered twice'));
+          StartupHooks.runAll();
+          StartupHooks.runAll();
+          await done.future;
+          await pumpEventQueue();
+        });
+        StartupHooks.resetForTesting();
+        expect(logs.where((l) => l.startsWith('Photos:')), ['Photos: sweep skipped (unrecognisedPath)']);
       });
     });
 
@@ -465,7 +503,7 @@ void main() {
         db.state = const DbClosed();
         await sweepFor().sweep(kLocalOwnerId);
         db.state = const DbReady(kLocalOwnerId);
-        db.rows['bad'] = patient('bad', [], parseErrors: ['name']);
+        db.rows['bad'] = patient('bad', [visit('vb', [p.join(root.path, 'cache', 'image_picker_7.jpg')])]);
         await sweepFor().sweep(kLocalOwnerId);
         db.rows.remove('bad');
         final provider = await loaded();
@@ -478,7 +516,7 @@ void main() {
           expect(line, isNot(contains(leak)), reason: line);
         }
         expect(line, matches(RegExp(r'^Photos: (sweep removed \d+ of \d+ \(kept \d+ referenced, \d+ recent, \d+ other\)'
-            r'|sweep skipped \([A-Za-z_]+\)|removed \d+ after a delete)$')));
+            r'|sweep skipped \([A-Za-z]+\)|removed \d+ after a delete)$')));
       }
       expect(logs.where((l) => l.startsWith('Photos: removed')).length, 1);
     });
@@ -507,6 +545,45 @@ void main() {
         expect(File(f).existsSync(), isFalse);
         expect(PhotoSweep.defaultGrace, const Duration(minutes: 10));
       });
+    });
+
+    test('doctor avatar: replacing it on our side agrees with #10\'s scan; profile/ is never swept', () async {
+      List<int> jpeg() => [0xFF, 0xD8, 0xFF, 0xE0, ...List.filled(64, 1), 0xFF, 0xD9];
+      final src1 = (File(p.join(root.path, 'pick1.jpg'))..writeAsBytesSync(jpeg())).path;
+      final src2 = (File(p.join(root.path, 'pick2.jpg'))..writeAsBytesSync(jpeg())).path;
+      final doctors = DoctorProvider(
+          cloudSync: false, localDb: db, photos: photos,
+          auth: _TripAuth(), firestore: _TripFirestore(), storage: _TripStorage());
+      await doctors.load(kLocalOwnerId);
+      Doctor profile(String? photo) => Doctor(
+          id: 'ignored', title: 'DR', name: 'Asha', email: 'a@example.com', age: '40',
+          mobileNumber: '+911234', specialty: 'GP', clinicName: 'Clinic',
+          practiceMode: 'Solo Practice', profileImageUrl: photo);
+      final folder = LocalPhotoStore.ownerFolderName(kLocalOwnerId);
+      String key(String path) => AttachmentRefs.attachmentKey(path, ownerFolderName: folder)!;
+
+      final first = (await doctors.uploadProfileImage(File(src1)))!;
+      expect(await doctors.saveDoctorProfile(profile(first)), isTrue);
+      expect(await db.referencedAttachmentKeys(), {key(first)});
+      expect(key(first), startsWith('profile/'));
+
+      final second = (await doctors.uploadProfileImage(File(src2)))!;
+      expect(await doctors.saveDoctorProfile(profile(second)), isTrue);
+      // New photo saved in the setting first, then the old file deleted:
+      // the scan never sees a missing or stale avatar.
+      expect(File(first).existsSync(), isFalse);
+      expect(File(second).existsSync(), isTrue);
+      expect(await db.referencedAttachmentKeys(), {key(second)});
+
+      // A leftover avatar (e.g. crash before the old one was deleted) is not
+      // the sweep's business: attachments only.
+      final leftover = photoIn(photos.profileFolderFor(kLocalOwnerId), 'avatar_left.jpg');
+      final orphan = visitPhoto(kLocalOwnerId, 'orphan.jpg');
+      final r = await sweepFor().sweep(kLocalOwnerId);
+      expect((r.scanned, r.removed), (1, 1));
+      expect(File(orphan).existsSync(), isFalse);
+      expect(File(second).existsSync() && File(leftover).existsSync(), isTrue);
+      doctors.dispose();
     });
 
     test('stored paths through a symlinked app dir (/data/user/0 vs /data/data) keep in-use photos', () async {

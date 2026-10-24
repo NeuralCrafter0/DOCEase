@@ -1,12 +1,11 @@
-import 'dart:convert';
 import 'dart:io';
 
-import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
+import '../providers/attachment_refs.dart' show AttachmentRefs;
 import '../providers/database_helper.dart' show BackupExcluder, PlatformBackupExcluder;
 import 'attachments.dart';
 import 'log_codes.dart';
@@ -38,12 +37,15 @@ class LocalPhotoStore {
   /// The app-wide store (dev mode calls [init] before runApp).
   static LocalPhotoStore instance = LocalPhotoStore();
 
-  static const attachmentsFolder = 'attachments';
-  static const profileFolder = 'profile';
+  // Same names as #10's AttachmentRefs, so the DB scan and the sweep
+  // agree on the layout.
+  static const attachmentsFolder = AttachmentRefs.attachmentsFolder;
+  static const profileFolder = AttachmentRefs.profileFolder;
 
   /// Folder name for [owner]: `sha256(owner)` hex, first 32 characters.
-  static String ownerFolderName(String owner) =>
-      sha256.convert(utf8.encode(owner)).toString().substring(0, 32);
+  /// Delegates to #10's [AttachmentRefs.ownerFolderNameFor] (also the DB
+  /// file name hash), so the two can never drift.
+  static String ownerFolderName(String owner) => AttachmentRefs.ownerFolderNameFor(owner);
 
   static final _ownerHash = RegExp(r'^[0-9a-f]{32}$');
 
@@ -147,8 +149,8 @@ class LocalPhotoStore {
   }
 
   /// The file in [owner]'s visit folder that [key] names, or null. Only
-  /// visit-photo keys (`attachments/<file>`, as returned by #10's
-  /// `attachmentKey`) map to a path; `profile/…` keys never do, so visit
+  /// visit-photo keys directly in the folder (`attachments/<file>`, from
+  /// [AttachmentRefs.attachmentKey]) map to a path; `profile/…` keys never do, so visit
   /// cleanup can never reach the doctor's photo.
   String? visitPathForKey(String owner, String key) {
     final segs = key.split('/');

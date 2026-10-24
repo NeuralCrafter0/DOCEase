@@ -30,8 +30,9 @@ class DoctorProvider with ChangeNotifier {
         _localDbOverride = localDb,
         _photosOverride = photos;
 
-  /// Settings key of the on-phone profile (dev mode).
-  static const profileSettingKey = 'doctor_profile';
+  /// Settings key of the on-phone profile (dev mode). #10's attachment scan
+  /// reads the doctor's photo from this setting, so it is #10's constant.
+  static const profileSettingKey = AttachmentRefs.doctorProfileSettingKey;
 
   final bool _cloudSync;
 
